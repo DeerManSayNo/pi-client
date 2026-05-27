@@ -28,9 +28,9 @@ interface Props {
 }
 
 const PRESETS: { id: ToolPreset; label: string; desc: string; tools: string[] }[] = [
-  { id: "none",    label: "Off",  desc: "No tools",                                tools: PRESET_NONE },
-  { id: "default", label: "Low",  desc: "read · bash · edit · write",              tools: PRESET_DEFAULT },
-  { id: "full",    label: "High", desc: "read · bash · edit · write · grep · find · ls", tools: PRESET_FULL },
+  { id: "none",    label: "关闭",  desc: "无工具",                                  tools: PRESET_NONE },
+  { id: "default", label: "低",    desc: "read · bash · edit · write",              tools: PRESET_DEFAULT },
+  { id: "full",    label: "高",    desc: "read · bash · edit · write · grep · find · ls", tools: PRESET_FULL },
 ];
 
 export function ToolPanel({ tools, onPreset, onClose }: Props) {
@@ -104,8 +104,8 @@ export function ToolPanel({ tools, onPreset, onClose }: Props) {
 
       {/* Description of current selection */}
       <div style={{ fontSize: 11, color: "var(--text-dim)", lineHeight: 1.5 }}>
-        {currentIndex >= 0 ? PRESETS[currentIndex].desc || "No tools enabled" : ""}
-        {current === "none" && <span> — agent will not use any tools</span>}
+        {currentIndex >= 0 ? PRESETS[currentIndex].desc || "未启用任何工具" : ""}
+        {current === "none" && <span> — Agent 将不使用任何工具</span>}
       </div>
 
       {/* Track bar */}
@@ -123,7 +123,7 @@ export function ToolPanel({ tools, onPreset, onClose }: Props) {
       </div>
 
       <div style={{ fontSize: 10, color: "var(--text-dim)" }}>
-        takes effect on next turn
+        将在下一次交互中生效
       </div>
     </div>
   );

@@ -10,7 +10,7 @@ const notoSansMono = Noto_Sans_Mono({
 
 export const metadata: Metadata = {
   title: "Pi Agent Web",
-  description: "Pi Coding Agent Web Interface",
+  description: "Pi 编程智能体网页界面",
 };
 
 export default function RootLayout({
@@ -19,7 +19,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en" className={notoSansMono.variable} suppressHydrationWarning>
+    <html lang="zh-CN" className={notoSansMono.variable} suppressHydrationWarning>
       <head>
         <script
           dangerouslySetInnerHTML={{

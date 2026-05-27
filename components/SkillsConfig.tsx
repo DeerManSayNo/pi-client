@@ -28,6 +28,12 @@ function sourceLabel(skill: Skill): string {
   return "path";
 }
 
+const labelMap: Record<string, string> = {
+  global: "全局",
+  project: "项目",
+  path: "路径",
+};
+
 function Toggle({
   enabled,
   loading,
@@ -43,8 +49,8 @@ function Toggle({
       disabled={loading}
       title={
         enabled
-          ? "Visible in model prompt — click to disable"
-          : "Hidden from model prompt — click to enable"
+          ? "在模型提示词中可见 — 点击禁用"
+          : "在模型提示词中隐藏 — 点击启用"
       }
       style={{
         flexShrink: 0,
@@ -119,7 +125,7 @@ function SkillDetail({
               label === "project" ? "rgba(99,102,241,0.8)" : "var(--text-dim)",
           }}
         >
-          {label}
+          {labelMap[label] ?? label}
         </span>
         <span
           style={{
@@ -150,7 +156,7 @@ function SkillDetail({
         <span
           style={{ fontSize: 12, color: "var(--text-muted)", fontWeight: 500 }}
         >
-          Name
+          名称
         </span>
         <span
           style={{
@@ -167,7 +173,7 @@ function SkillDetail({
         <span
           style={{ fontSize: 12, color: "var(--text-muted)", fontWeight: 500 }}
         >
-          Description
+          描述
         </span>
         <span
           style={{ fontSize: 14, color: "var(--text-muted)", lineHeight: 1.6 }}
@@ -178,6 +184,11 @@ function SkillDetail({
     </div>
   );
 }
+
+const scopeLabels: Record<string, string> = {
+  global: "全局",
+  project: "项目",
+};
 
 function AddSkillPanel({
   cwd,
@@ -220,7 +231,7 @@ function AddSkillPanel({
         return;
       }
       setResults(d.results ?? []);
-      if ((d.results ?? []).length === 0) setSearchError("No skills found");
+      if ((d.results ?? []).length === 0) setSearchError("未找到匹配的技能");
     } catch (e) {
       setSearchError(String(e));
     } finally {
@@ -271,7 +282,7 @@ function AddSkillPanel({
         }}
       >
         <div style={{ fontSize: 14, fontWeight: 600, color: "var(--text)" }}>
-          Add Skill
+          添加技能
         </div>
 
         {/* Search row */}
@@ -283,7 +294,7 @@ function AddSkillPanel({
             onKeyDown={(e) => {
               if (e.key === "Enter") search(query);
             }}
-            placeholder="e.g. react, testing, deploy"
+            placeholder="例如 react, testing, deploy"
             style={{
               flex: 1,
               padding: "7px 10px",
@@ -310,7 +321,7 @@ function AddSkillPanel({
               flexShrink: 0,
             }}
           >
-            {searching ? "Searching…" : "Search"}
+            {searching ? "搜索中…" : "搜索"}
           </button>
         </div>
 
@@ -341,7 +352,7 @@ function AddSkillPanel({
                     s === "global" ? "1px solid var(--border)" : "none",
                 }}
               >
-                {s}
+                {scopeLabels[s] ?? s}
               </button>
             ))}
           </div>
@@ -474,10 +485,10 @@ function AddSkillPanel({
                   }}
                 >
                   {isInstalled
-                    ? "✓ Installed"
+                    ? "✓ 已安装"
                     : isInstalling
-                      ? "Installing…"
-                      : "Install"}
+                      ? "安装中…"
+                      : "安装"}
                 </button>
               </div>
             );
@@ -489,7 +500,7 @@ function AddSkillPanel({
           <div
             style={{ fontSize: 13, color: "var(--text-dim)", lineHeight: 1.8 }}
           >
-            Search{" "}
+            在{" "}
             <a
               href="https://skills.sh"
               target="_blank"
@@ -498,7 +509,7 @@ function AddSkillPanel({
             >
               skills.sh
             </a>{" "}
-            to discover and install skills for your agent.
+            上搜索并安装适合您 Agent 的技能。
           </div>
         )
       )}
@@ -624,7 +635,7 @@ export function SkillsConfig({
             <span
               style={{ fontSize: 15, fontWeight: 700, color: "var(--text)" }}
             >
-              Skills
+              技能配置
             </span>
             <code
               style={{
@@ -678,7 +689,7 @@ export function SkillsConfig({
                     color: "var(--text-muted)",
                   }}
                 >
-                  Loading…
+                  加载中…
                 </div>
               ) : error ? (
                 <div
@@ -698,7 +709,7 @@ export function SkillsConfig({
                     color: "var(--text-dim)",
                   }}
                 >
-                  No skills found
+                  未找到任何技能
                 </div>
               ) : (
                 (() => {
@@ -723,7 +734,7 @@ export function SkillsConfig({
                             letterSpacing: "0.06em",
                           }}
                         >
-                          {grpLabel}
+                          {labelMap[grpLabel] ?? grpLabel}
                         </div>
                         {grpSkills.map((skill) => {
                           const isSelected =
@@ -840,7 +851,7 @@ export function SkillsConfig({
                   <line x1="12" y1="5" x2="12" y2="19" />
                   <line x1="5" y1="12" x2="19" y2="12" />
                 </svg>
-                Add skill
+                添加技能
               </div>
             </div>
           </div>
@@ -874,7 +885,7 @@ export function SkillsConfig({
                   fontSize: 13,
                 }}
               >
-                Select a skill
+                请选择一个技能
               </div>
             )}
           </div>
@@ -903,7 +914,7 @@ export function SkillsConfig({
               fontSize: 13,
             }}
           >
-            Close
+            关闭
           </button>
         </div>
       </div>

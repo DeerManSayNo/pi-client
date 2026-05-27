@@ -162,7 +162,7 @@ function TreeNode({
               e.stopPropagation();
               onAtMention(getRelativeFilePath(node.fullPath, cwd));
             }}
-            title="Insert path into chat"
+            title="插入路径到输入框"
             style={{
               position: "absolute",
               right: 4,
@@ -188,7 +188,7 @@ function TreeNode({
               <circle cx="12" cy="12" r="4" />
               <path d="M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-4 8" />
             </svg>
-            mention
+            引用
           </button>
         )}
       </div>
@@ -199,7 +199,7 @@ function TreeNode({
           ))}
           {children.length === 0 && loaded && (
             <div style={{ paddingLeft: 8 + (depth + 1) * 14, fontSize: 11, color: "var(--text-dim)", height: 22, display: "flex", alignItems: "center" }}>
-              empty
+              空文件夹
             </div>
           )}
         </div>
@@ -241,7 +241,7 @@ export function FileExplorer({ cwd, onOpenFile, refreshKey, onAtMention }: Props
   if (loading) {
     return (
       <div style={{ padding: "8px 12px", fontSize: 11, color: "var(--text-dim)" }}>
-        Loading files...
+        正在加载文件...
       </div>
     );
   }
@@ -271,7 +271,7 @@ export function FileExplorer({ cwd, onOpenFile, refreshKey, onAtMention }: Props
       ))}
       {roots.length === 0 && (
         <div style={{ padding: "8px 12px", fontSize: 11, color: "var(--text-dim)" }}>
-          No files found
+          未找到文件
         </div>
       )}
     </div>

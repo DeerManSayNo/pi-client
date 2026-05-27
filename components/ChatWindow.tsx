@@ -26,34 +26,34 @@ interface Props {
 function phaseLabel(phase: AgentPhase): string {
   if (phase?.kind === "running_tools") {
     const names = phase.tools.map((t) => t.name);
-    if (names.length === 0) return "Running tool...";
-    if (names.length === 1) return `Running ${names[0]}...`;
-    if (names.length <= 3) return `Running ${names.join(", ")}...`;
-    return `Running ${names.slice(0, 2).join(", ")} (+${names.length - 2})...`;
+    if (names.length === 0) return "正在运行工具...";
+    if (names.length === 1) return `正在运行 ${names[0]}...`;
+    if (names.length <= 3) return `正在运行 ${names.join(", ")}...`;
+    return `正在运行 ${names.slice(0, 2).join(", ")} (+${names.length - 2})...`;
   }
-  if (phase?.kind === "waiting_model") return "Waiting for model...";
-  return "Thinking...";
+  if (phase?.kind === "waiting_model") return "正在等待模型响应...";
+  return "正在思考...";
 }
 
 const TYPEWRITER_PHRASES = [
-  "ready when you are.",
-  "ask me anything.",
-  "let's build something cool.",
-  "explore your codebase.",
-  "draft an email.",
-  "summarize that paper.",
-  "plan your weekend.",
-  "explain it like I'm five.",
-  "pair-program with me.",
-  "fix that pesky bug.",
-  "translate to 中文.",
-  "write a haiku.",
-  "brainstorm ideas.",
-  "review my pull request.",
-  "what should we cook tonight?",
-  "ship it.",
-  "make it pretty.",
-  "rubber-duck with me.",
+  "随时准备为您服务。",
+  "问我任何问题。",
+  "让我们一起构建酷炫的项目。",
+  "探索您的代码库。",
+  "撰写一封邮件。",
+  "总结那篇论文。",
+  "规划您的周末。",
+  "用最通俗的话向我解释。",
+  "和我结对编程。",
+  "修复那个烦人的Bug。",
+  "翻译成中文。",
+  "写一首俳句。",
+  "头脑风暴构思创意。",
+  "审查我的拉取请求。",
+  "今晚吃什么？",
+  "发布上线。",
+  "让它更美观。",
+  "做您的小黄鸭。",
 ];
 
 function Typewriter({ phrases }: { phrases: string[] }) {
@@ -198,7 +198,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
   if (loading) {
     return (
       <div className="flex h-full items-center justify-center text-text-muted">
-        Loading session...
+        正在加载会话...
       </div>
     );
   }

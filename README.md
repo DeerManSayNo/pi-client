@@ -73,3 +73,57 @@ lib/
 ```
 
 会话文件存储路径：`~/.pi/agent/sessions/<编码后的工作目录>/<时间戳>_<uuid>.jsonl`
+
+## 中文界面
+
+pi-web 的界面已全面中文化，所有 UI 文本直接内联在组件中，无需额外配置或语言包。
+
+### 启动中文界面
+
+界面语言随代码内置，启动即中文：
+
+```bash
+# 开发模式（从源码启动）
+cd pi-web-source
+npm install
+npm run dev
+
+# 生产模式（通过 npx 或全局安装）
+npx @agegr/pi-web@latest
+# 或
+npm install -g @agegr/pi-web
+pi-web
+```
+
+启动后访问 http://localhost:30141 即可看到完整的中文界面。
+
+### 实现方式
+
+采用**硬编码中文字符串**的方式，直接在 TSX 组件中写入中文文本，未使用 i18n 库。涉及的文件包括：
+
+- `components/AppShell.tsx` — 侧边栏按钮、占位提示、顶栏标签
+- `components/SessionSidebar.tsx` — 会话列表、时间格式、操作按钮
+- `components/ChatInput.tsx` — 输入框、模型选择、推理等级、工具预设
+- `components/ChatWindow.tsx` — 欢迎语、Agent 状态提示
+- `components/MessageView.tsx` — 思考过程、工具调用、复制操作
+- `components/ModelsConfig.tsx` — 模型配置面板全部字段
+- `components/SkillsConfig.tsx` — 技能配置面板
+- `components/ToolPanel.tsx` — 工具预设选择面板
+- `components/FileExplorer.tsx` — 文件浏览器
+- `components/BranchNavigator.tsx` — 分支导航器
+- `components/TabBar.tsx` — 文件标签页
+- `components/FileViewer.tsx` — 文件查看器
+- `components/ChatMinimap.tsx` — 对话缩略图
+
+### 扩展其他语言
+
+如需支持多语言切换，建议抽取一个 `lib/locale.ts` 文件集中管理所有字符串，按语言 key 映射：
+
+```
+lib/
+  locale.ts       # 语言上下文与切换逻辑
+  zh-CN.ts        # 中文字符串
+  en.ts           # 英文字符串
+```
+
+然后将各组件中的硬编码文本替换为 locale key 引用即可。

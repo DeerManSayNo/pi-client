@@ -182,7 +182,7 @@ function UserMessageView({ message, entryId, onFork, forking, onNavigate, prevAs
           }}>
             <button
               onClick={copyContent}
-              title="Copy message"
+              title="复制消息"
               style={{
                 display: "flex", alignItems: "center", gap: 4,
                 padding: "3px 8px", height: 22,
@@ -207,7 +207,7 @@ function UserMessageView({ message, entryId, onFork, forking, onNavigate, prevAs
                   <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
                 </svg>
               )}
-              {copied ? "Copied" : "Copy"}
+              {copied ? "已复制" : "复制"}
             </button>
           </div>
           {(canFork || canNavigate) && (
@@ -220,7 +220,7 @@ function UserMessageView({ message, entryId, onFork, forking, onNavigate, prevAs
               {canNavigate && (
                 <button
                   onClick={() => { onNavigate!(prevAssistantEntryId!); onEditContent?.(content); }}
-                  title="Edit from here — branches within this session"
+                  title="从此开始编辑 — 在当前会话中创建分支继续对话"
                   style={{
                     display: "flex", alignItems: "center", gap: 4,
                     padding: "3px 8px", height: 22,
@@ -239,14 +239,14 @@ function UserMessageView({ message, entryId, onFork, forking, onNavigate, prevAs
                     <polyline points="15 10 20 15 15 20" />
                     <path d="M4 4v7a4 4 0 0 0 4 4h12" />
                   </svg>
-                  Edit from here
+                  从此编辑
                 </button>
               )}
               {canFork && (
                 <button
                   onClick={() => { onFork!(entryId!); }}
                   disabled={forking}
-                  title={forking ? "Creating new session…" : "New session — creates an independent copy from here"}
+                  title={forking ? "正在创建新会话…" : "新建会话 — 从此处消息起创建一个新的独立会话"}
                   style={{
                     display: "flex", alignItems: "center", gap: 4,
                     padding: "3px 8px", height: 22,
@@ -267,7 +267,7 @@ function UserMessageView({ message, entryId, onFork, forking, onNavigate, prevAs
                     <circle cx="6" cy="18" r="3" />
                     <path d="M18 9a9 9 0 0 1-9 9" />
                   </svg>
-                  {forking ? "Creating…" : "New session"}
+                  {forking ? "创建中…" : "新建会话"}
                 </button>
               )}
             </div>
@@ -494,7 +494,7 @@ function AssistantMessageView({
                 <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
               </svg>
             )}
-            {copied ? "Copied" : "Copy"}
+            {copied ? "已复制" : "复制"}
           </button>
         )}
         {time && !isStreaming && (
@@ -588,7 +588,7 @@ function ThinkingBlock({ block, duration }: { block: ThinkingContent; duration?:
           textAlign: "left",
         }}
       >
-        <span>Thinking</span>
+        <span>思考过程</span>
         {duration !== undefined && (
           <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--text-dim)", fontVariantNumeric: "tabular-nums" }}>{duration}s</span>
         )}
@@ -726,7 +726,7 @@ function PairedResult({ text, isEmpty, isError }: {
           opacity: isEmpty ? 0.6 : 1,
         }}
       >
-        {isEmpty ? "(no output)" : text}
+        {isEmpty ? "(无输出)" : text}
       </pre>
     </div>
   );
@@ -758,9 +758,9 @@ function formatUsage(usage: {
   cost: { total: number };
 }): string {
   const parts = [];
-  if (usage.input) parts.push(`${usage.input.toLocaleString()} in`);
-  if (usage.output) parts.push(`${usage.output.toLocaleString()} out`);
-  if (usage.cacheRead) parts.push(`${usage.cacheRead.toLocaleString()} cache`);
+  if (usage.input) parts.push(`${usage.input.toLocaleString()} 输入`);
+  if (usage.output) parts.push(`${usage.output.toLocaleString()} 输出`);
+  if (usage.cacheRead) parts.push(`${usage.cacheRead.toLocaleString()} 缓存读取`);
   if (usage.cost?.total) parts.push(`$${usage.cost.total.toFixed(4)}`);
   return parts.join(" · ");
 }
@@ -812,7 +812,7 @@ function CodeBlock({ code, lang }: { code: string; lang: string }) {
             fontSize: 11,
           }}
         >
-          {copied ? "copied" : "copy"}
+          {copied ? "已复制" : "复制"}
         </button>
       </div>
       <SyntaxHighlighter
