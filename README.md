@@ -4,48 +4,50 @@
 
 ## 快速开始
 
-**无需安装，直接运行：**
+**从源码启动（中文版）：**
 
 ```bash
-npx @agegr/pi-web@latest
-```
-
-**或全局安装后使用：**
-
-```bash
-npm install -g @agegr/pi-web
-pi-web
+git clone https://github.com/Cgwgpt/pi-web.git
+cd pi-web
+npm install
+npm run dev
 ```
 
 启动后打开 [http://localhost:30141](http://localhost:30141)。
 
+> **注意**：`npx @agegr/pi-web@latest` 安装的是 npm 官方原版，不含本文档描述的中文界面。如需中文版，请使用上方 `git clone` 方式从本仓库启动。
+
 **可选参数：**
 
 ```bash
-pi-web --port 8080               # 自定义端口
-pi-web --hostname 127.0.0.1      # 仅本机访问
-pi-web -p 8080 -H 127.0.0.1     # 组合使用
+npm run dev -- -p 8080           # 自定义端口
+npm run dev -- -H 127.0.0.1      # 仅本机访问
 
-PORT=8080 pi-web                 # 也支持环境变量
+PORT=8080 npm run dev            # 也支持环境变量
 ```
 
 ## 功能介绍
 
-- **会话浏览器** — 按工作目录分组展示所有 pi 会话
-- **实时对话** — 通过 SSE 流式输出与智能体实时交互
+- **会话浏览器** — 按工作目录分组展示所有 pi 会话，支持重命名和删除
+- **实时对话** — 通过 SSE 流式输出与智能体实时交互，支持 Markdown 渲染和代码高亮
 - **会话分叉** — 从任意用户消息创建独立的新会话分支
 - **会话内分支** — 回退到任意节点继续对话，在同一文件内创建分支
 - **分支导航器** — 可视化切换同一会话内的各个分支
 - **模型切换** — 对话中途随时切换模型
-- **工具面板** — 控制智能体可使用的工具
+- **技能配置** — 搜索、安装、启用/禁用 Agent 技能
+- **推理强度** — 控制模型推理深度（auto / off / minimal / low / medium / high / xhigh）
+- **工具面板** — 控制智能体可使用的工具（关闭 / 默认 / 全部）
 - **压缩会话** — 对长会话进行摘要，节省上下文窗口
-- **引导 / 追加** — 打断正在运行的智能体，或在其完成后追加消息
+- **引导 / 追加** — 打断正在运行的智能体（Steer），或在其完成后追加消息（Follow-up）
+- **图片附件** — 支持粘贴或拖拽上传图片
+- **文件浏览** — 侧边栏内置文件浏览器，支持 @ 引用文件路径到输入框
+- **音效提示** — Agent 完成时播放提示音（可开关）
 
 ## 注意事项
 
 - **数据目录** — 默认读取 `~/.pi/agent/sessions` 下的会话文件。可通过环境变量 `PI_CODING_AGENT_DIR` 指定其他目录。
-- **模型配置** — 从智能体数据目录下的 `models.json` 读取可用模型，可在侧边栏的「Models」面板中编辑。
-- **文件浏览** — 侧边栏内置文件浏览器，可在标签页中查看当前工作目录下的文件。
+- **模型配置** — 从智能体数据目录下的 `models.json` 读取可用模型，可在侧边栏的「模型配置」面板中编辑。
+- **技能配置** — 从 `skills.sh` 搜索并安装技能，可在侧边栏的「技能配置」面板中管理。
 
 ## 开发
 
@@ -59,17 +61,26 @@ npm run dev   # 端口 30141
 ```
 app/
   api/
-    sessions/      # 读写会话文件
-    agent/         # 发送命令、SSE 事件流
-    files/         # 文件内容读取
-    models/        # 可用模型列表与默认模型
-    models-config/ # 读写 models.json
-components/        # UI 组件
+    sessions/       # 读写会话文件（列表、详情、新建、重命名、删除）
+    agent/          # 发送命令、SSE 事件流
+    files/          # 文件内容读取与目录浏览
+    models/         # 可用模型列表与默认模型
+    models-config/  # 读写 models.json、模型连接测试
+    skills/         # 技能搜索与安装
+    auth/           # OAuth / API Key 认证
+    home/           # 获取用户主目录
+    default-cwd/    # 获取默认工作目录
+components/         # UI 组件
+hooks/              # 自定义 Hook（useAgentSession、useAudio 等）
 lib/
   session-reader.ts  # 解析 .jsonl 会话文件
   rpc-manager.ts     # 管理 AgentSession 生命周期
+  agent-client.ts    # Agent 客户端通信
   normalize.ts       # 规范化 toolCall 字段名
-  types.ts
+  file-paths.ts      # 跨平台文件路径处理
+  pi-types.ts        # pi 类型定义
+  npx.ts             # npx 运行工具
+  types.ts           # UI 类型定义
 ```
 
 会话文件存储路径：`~/.pi/agent/sessions/<编码后的工作目录>/<时间戳>_<uuid>.jsonl`
@@ -80,22 +91,18 @@ pi-web 的界面已全面中文化，所有 UI 文本直接内联在组件中，
 
 ### 启动中文界面
 
-界面语言随代码内置，启动即中文：
+界面语言随代码内置，从本仓库源码启动即中文：
 
 ```bash
-# 开发模式（从源码启动）
-cd pi-web-source
+git clone https://github.com/Cgwgpt/pi-web.git
+cd pi-web
 npm install
 npm run dev
-
-# 生产模式（通过 npx 或全局安装）
-npx @agegr/pi-web@latest
-# 或
-npm install -g @agegr/pi-web
-pi-web
 ```
 
 启动后访问 http://localhost:30141 即可看到完整的中文界面。
+
+> npm 官方包 `@agegr/pi-web` 为英文原版，不含中文界面。
 
 ### 实现方式
 
