@@ -1,30 +1,22 @@
 # pi-agent
 
-[pi 编程智能体](https://github.com/badlogic/pi-mono) 的网页界面。在浏览器中浏览会话、与智能体对话、分叉对话、切换消息分支。
+[pi 编程智能体](https://github.com/badlogic/pi-mono) 的 **Tauri 桌面客户端**。在原生桌面应用中浏览会话、与智能体对话、分叉对话、切换消息分支。
 
 ## 快速开始
-
-**从源码启动（中文版）：**
 
 ```bash
 git clone https://github.com/DeerManSayNo/pi-client.git
 cd pi-client
 npm install
+
+# 桌面端开发（启动 Tauri 窗口）
+npm run tauri dev
+
+# 或者仅启动 Web 前端调试
 npm run dev
 ```
 
-启动后打开 [http://localhost:30141](http://localhost:30141)。
-
-> **注意**：本仓库项目名为 `pi-agent`，仓库地址为 `pi-client`。
-
-**可选参数：**
-
-```bash
-npm run dev -- -p 8080           # 自定义端口
-npm run dev -- -H 127.0.0.1      # 仅本机访问
-
-PORT=8080 npm run dev            # 也支持环境变量
-```
+> 本仓库项目名为 `pi-agent`，仓库地址为 `pi-client`。
 
 ## 功能介绍
 
@@ -43,18 +35,20 @@ PORT=8080 npm run dev            # 也支持环境变量
 - **文件浏览** — 侧边栏内置文件浏览器，支持 @ 引用文件路径到输入框
 - **音效提示** — Agent 完成时播放提示音（可开关）
 
+## 技术栈
+
+| 层级 | 技术 |
+|------|------|
+| 桌面壳 | Tauri 2 (Rust) |
+| 前端 | Next.js + React + TypeScript |
+| 样式 | Tailwind CSS |
+| 运行时 | Bun / Node.js |
+
 ## 注意事项
 
 - **数据目录** — 默认读取 `~/.pi/agent/sessions` 下的会话文件。可通过环境变量 `PI_CODING_AGENT_DIR` 指定其他目录。
 - **模型配置** — 从智能体数据目录下的 `models.json` 读取可用模型，可在侧边栏的「模型配置」面板中编辑。
 - **技能配置** — 从 `skills.sh` 搜索并安装技能，可在侧边栏的「技能配置」面板中管理。
-
-## 开发
-
-```bash
-npm install
-npm run dev   # 端口 30141
-```
 
 ## 项目结构
 
@@ -81,6 +75,8 @@ lib/
   pi-types.ts        # pi 类型定义
   npx.ts             # npx 运行工具
   types.ts           # UI 类型定义
+src-tauri/          # Tauri 桌面壳（Rust 后端）
+bin/                # 启动脚本
 ```
 
 会话文件存储路径：`~/.pi/agent/sessions/<编码后的工作目录>/<时间戳>_<uuid>.jsonl`
@@ -89,24 +85,9 @@ lib/
 
 pi-agent 的界面已全面中文化，所有 UI 文本直接内联在组件中，无需额外配置或语言包。
 
-### 启动中文界面
-
-界面语言随代码内置，从本仓库源码启动即中文：
-
-```bash
-git clone https://github.com/DeerManSayNo/pi-client.git
-cd pi-client
-npm install
-npm run dev
-```
-
-启动后访问 http://localhost:30141 即可看到完整的中文界面。
-
-> 本仓库项目名为 `pi-agent`，仓库地址为 `pi-client`。
-
 ### 实现方式
 
-采用**硬编码中文字符串**的方式，直接在 TSX 组件中写入中文文本，未使用 i18n 库。涉及的文件包括：
+采用**硬编码中文字符串**的方式，直接在 TSX 组件中写入中文文本，涉及的文件包括：
 
 - `components/AppShell.tsx` — 侧边栏按钮、占位提示、顶栏标签
 - `components/SessionSidebar.tsx` — 会话列表、时间格式、操作按钮
