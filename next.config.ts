@@ -13,6 +13,7 @@ const nextConfig: NextConfig = {
   output: "standalone",
   serverExternalPackages: ["@earendil-works/pi-coding-agent", "@earendil-works/pi-ai"],
   allowedDevOrigins: ["127.0.0.1", "192.168.*.*"],
+  devIndicators: false,
   env: {
     NEXT_PUBLIC_APP_VERSION: version,
     NEXT_PUBLIC_PI_VERSION: piVersion,
