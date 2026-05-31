@@ -38,10 +38,16 @@ pub fn run() {
                 wait_for_server("http://127.0.0.1:30141");
             }
 
+            let webview_url = if cfg!(debug_assertions) {
+                "http://localhost:30141"
+            } else {
+                "http://127.0.0.1:30141"
+            };
+
             let window = WebviewWindowBuilder::new(
                 app,
                 "main",
-                WebviewUrl::External("http://127.0.0.1:30141".parse()?),
+                WebviewUrl::External(webview_url.parse()?),
             )
             .title("pi-agent")
             .inner_size(1280.0, 800.0)

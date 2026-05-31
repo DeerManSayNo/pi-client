@@ -80,6 +80,13 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const thinkingDropdownRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // Track IME composition state to prevent Enter from firing send during Chinese/Japanese/Korean input.
+  const isComposingRef = useRef(false);
+  const suppressNextEnterRef = useRef(false);
+  const suppressNextEnterTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingEnterSendTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastCompositionEndAtRef = useRef(0);
+
   useImperativeHandle(ref, () => ({
     insertIfEmpty(text: string) {
       const ta = textareaRef.current;
@@ -159,7 +166,11 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   }, []);
 
   const handleSend = useCallback(() => {
-    const msg = value.trim();
+    const shouldBlock = isComposingRef.current || suppressNextEnterRef.current || Date.now() - lastCompositionEndAtRef.current < 500;
+    if (shouldBlock) return;
+
+    const currentValue = textareaRef.current?.value ?? value;
+    const msg = currentValue.trim();
     if (!msg && !attachedImages.length) return;
     if (isStreaming) return;
     onSend(msg, attachedImages.length ? attachedImages : undefined);
@@ -183,27 +194,120 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     if (textareaRef.current) textareaRef.current.style.height = "auto";
   }, [value, attachedImages, onSteer, onFollowUp, clearImages]);
 
+  const cancelPendingEnterSend = useCallback(() => {
+    if (pendingEnterSendTimerRef.current) {
+      clearTimeout(pendingEnterSendTimerRef.current);
+      pendingEnterSendTimerRef.current = null;
+    }
+  }, []);
+
+  const handleTextChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    cancelPendingEnterSend();
+    setValue(e.target.value);
+  }, [cancelPendingEnterSend]);
+
+  const handleCompositionStart = useCallback(() => {
+    cancelPendingEnterSend();
+    if (suppressNextEnterTimerRef.current) {
+      clearTimeout(suppressNextEnterTimerRef.current);
+      suppressNextEnterTimerRef.current = null;
+    }
+    isComposingRef.current = true;
+    suppressNextEnterRef.current = true;
+  }, [cancelPendingEnterSend]);
+
+  const handleCompositionUpdate = useCallback(() => {
+    cancelPendingEnterSend();
+    isComposingRef.current = true;
+    suppressNextEnterRef.current = true;
+  }, [cancelPendingEnterSend]);
+
+  const handleCompositionEnd = useCallback(() => {
+    cancelPendingEnterSend();
+    isComposingRef.current = false;
+    suppressNextEnterRef.current = true;
+    lastCompositionEndAtRef.current = Date.now();
+
+    if (suppressNextEnterTimerRef.current) {
+      clearTimeout(suppressNextEnterTimerRef.current);
+    }
+    suppressNextEnterTimerRef.current = setTimeout(() => {
+      suppressNextEnterRef.current = false;
+      suppressNextEnterTimerRef.current = null;
+    }, 500);
+  }, [cancelPendingEnterSend]);
+
+  const runSendAction = useCallback(() => {
+    if (isStreaming && (onSteer || onFollowUp)) {
+      sendQueued(onSteer ? "steer" : "followup");
+    } else {
+      handleSend();
+    }
+  }, [isStreaming, onSteer, onFollowUp, sendQueued, handleSend]);
+
+  const scheduleEnterSend = useCallback(() => {
+    cancelPendingEnterSend();
+    pendingEnterSendTimerRef.current = setTimeout(() => {
+      pendingEnterSendTimerRef.current = null;
+      const shouldBlock = isComposingRef.current || suppressNextEnterRef.current || Date.now() - lastCompositionEndAtRef.current < 500;
+      if (shouldBlock) return;
+      runSendAction();
+    }, 80);
+  }, [cancelPendingEnterSend, runSendAction]);
+
   const handleKeyDown = useCallback(
     (e: KeyboardEvent<HTMLTextAreaElement>) => {
-      if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+      const nativeEvent = e.nativeEvent as KeyboardEvent<HTMLTextAreaElement>["nativeEvent"] & {
+        keyCode?: number;
+        which?: number;
+      };
+      const isImeEvent =
+        isComposingRef.current ||
+        nativeEvent.isComposing ||
+        nativeEvent.keyCode === 229 ||
+        nativeEvent.which === 229 ||
+        e.key === "Process";
+      const isImmediatelyAfterComposition = Date.now() - lastCompositionEndAtRef.current < 500;
+
+      if (isImeEvent) {
+        suppressNextEnterRef.current = true;
+        return;
+      }
+
+      if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
-        if (isStreaming && (onSteer || onFollowUp)) {
-          // Default Enter sends as steer if available, else followup
-          sendQueued(onSteer ? "steer" : "followup");
-        } else {
-          handleSend();
+        e.stopPropagation();
+
+        if (suppressNextEnterRef.current || isImmediatelyAfterComposition) {
+          cancelPendingEnterSend();
+          suppressNextEnterRef.current = false;
+          if (suppressNextEnterTimerRef.current) {
+            clearTimeout(suppressNextEnterTimerRef.current);
+            suppressNextEnterTimerRef.current = null;
+          }
+          return;
+        }
+
+        scheduleEnterSend();
+      } else if (e.key !== "Shift") {
+        cancelPendingEnterSend();
+        suppressNextEnterRef.current = false;
+        if (suppressNextEnterTimerRef.current) {
+          clearTimeout(suppressNextEnterTimerRef.current);
+          suppressNextEnterTimerRef.current = null;
         }
       }
     },
-    [isStreaming, onSteer, onFollowUp, sendQueued, handleSend]
+    [cancelPendingEnterSend, scheduleEnterSend]
   );
 
   const handleInput = useCallback(() => {
+    cancelPendingEnterSend();
     const ta = textareaRef.current;
     if (!ta) return;
     ta.style.height = "auto";
     ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
-  }, []);
+  }, [cancelPendingEnterSend]);
 
   const handlePaste = useCallback((e: React.ClipboardEvent) => {
     const items = Array.from(e.clipboardData?.items ?? []);
@@ -349,10 +453,13 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
           <textarea
             ref={textareaRef}
             value={value}
-            onChange={(e) => setValue(e.target.value)}
+            onChange={handleTextChange}
             onKeyDown={handleKeyDown}
             onInput={handleInput}
             onPaste={handlePaste}
+            onCompositionStart={handleCompositionStart}
+            onCompositionUpdate={handleCompositionUpdate}
+            onCompositionEnd={handleCompositionEnd}
             placeholder={
               isStreaming && (onSteer || onFollowUp)
                 ? "Steer 立即注入 / Follow-up 排队…"
@@ -380,6 +487,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
             <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0, alignSelf: "flex-end" }}>
               {onSteer && (
                 <button
+                  type="button"
                   onClick={() => sendQueued("steer")}
                   disabled={!value.trim() && !attachedImages.length}
                   title="打断 Agent 当前运行，立即注入消息"
@@ -403,6 +511,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
               )}
               {onFollowUp && (
                 <button
+                  type="button"
                   onClick={() => sendQueued("followup")}
                   disabled={!value.trim() && !attachedImages.length}
                   title="在 Agent 完成后排队发送"
@@ -428,6 +537,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
             </div>
           ) : (
             <button
+              type="button"
               onClick={handleSend}
               disabled={!value.trim() && !attachedImages.length}
               style={{
