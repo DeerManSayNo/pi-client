@@ -1,1 +1,1 @@
-{}
+{"default":{"identifier":"default","description":"Default permissions for the main window","remote":{"urls":["http://127.0.0.1:30141"]},"local":true,"windows":["main"],"permissions":["core:default","dialog:allow-open"]}}

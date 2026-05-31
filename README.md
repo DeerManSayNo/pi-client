@@ -18,6 +18,53 @@ npm run dev
 
 > 本仓库项目名为 `pi-agent`，仓库地址为 `pi-client`。
 
+## 构建桌面应用
+
+支持构建 **macOS**（DMG）和 **Windows**（NSIS 安装包）。
+
+### 前置条件
+
+1. **Rust 工具链** — 安装 [rustup](https://rustup.rs/)
+2. **平台相关依赖**：
+   - **macOS**：Xcode Command Line Tools（`xcode-select --install`）
+   - **Windows**：Microsoft Visual Studio C++ Build Tools（或完整 Visual Studio，勾选「使用 C++ 的桌面开发」工作负荷）
+
+### 下载 Node.js 运行时
+
+桌面应用需要内嵌一个 Node.js 运行时。根据目标平台运行对应的下载命令：
+
+```bash
+# 当前平台（自动检测）
+npm run download:node
+
+# macOS Apple Silicon（M 系列芯片）
+npm run download:node:mac-arm
+
+# macOS Intel
+npm run download:node:mac-x64
+
+# Windows x64
+npm run download:node:win
+```
+
+> 如果你需要同时分发 macOS 和 Windows 版本，请分别下载两个平台的 Node 二进制文件，或在 CI 中按平台执行对应的下载命令。
+
+### 执行构建
+
+```bash
+# 构建当前平台的应用
+npm run tauri:build
+```
+
+构建产物位于 `src-tauri/target/release/bundle/`：
+
+| 平台 | 产物 |
+|------|------|
+| macOS | `.dmg` 磁盘映像 |
+| Windows | `.exe` NSIS 安装程序 |
+
+> **注意**：Tauri 不支持交叉编译桌面应用。构建 Windows 版本需要在 Windows 机器上执行，构建 macOS 版本需要在 macOS 机器上执行。建议使用 GitHub Actions 等 CI 服务同时构建两个平台。
+
 ## 功能介绍
 
 - **会话浏览器** — 按工作目录分组展示所有 pi 会话，支持重命名和删除

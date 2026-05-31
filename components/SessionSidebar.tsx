@@ -1,5 +1,6 @@
 "use client";
 
+import { open } from "@tauri-apps/plugin-dialog";
 import { useEffect, useState, useCallback, useRef } from "react";
 import type { SessionInfo } from "@/lib/types";
 import { FileExplorer } from "./FileExplorer";
@@ -203,9 +204,6 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const [selectedCwd, setSelectedCwd] = useState<string | null>(null);
   const [homeDir, setHomeDir] = useState<string>("");
   const [dropdownOpen, setDropdownOpen] = useState(false);
-  const [customPathOpen, setCustomPathOpen] = useState(false);
-  const [customPathValue, setCustomPathValue] = useState("");
-  const customPathInputRef = useRef<HTMLInputElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const [explorerOpen, setExplorerOpen] = useState(true);
   const [explorerKey, setExplorerKey] = useState(0);
@@ -298,23 +296,24 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     }
   }, [loading, allSessions, selectedCwd, initialSessionId, onSelectSession, onInitialRestoreDone, handleDefaultCwd]);
 
-  const commitCustomPath = useCallback(() => {
-    const path = customPathValue.trim();
-    if (path) {
-      setSelectedCwd(path);
+  const handleCustomPath = useCallback(async () => {
+    const selected = await open({
+      directory: true,
+      multiple: false,
+      title: "选择项目目录",
+    });
+
+    if (typeof selected === "string") {
+      setSelectedCwd(selected);
+      setDropdownOpen(false);
     }
-    setCustomPathOpen(false);
-    setCustomPathValue("");
-    setDropdownOpen(false);
-  }, [customPathValue]);
+  }, []);
 
   // Close dropdown on outside click
   useEffect(() => {
     const handler = (e: MouseEvent) => {
       if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
         setDropdownOpen(false);
-        setCustomPathOpen(false);
-        setCustomPathValue("");
       }
     };
     document.addEventListener("mousedown", handler);
@@ -487,8 +486,6 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                   key={cwd}
                   onClick={() => {
                     setSelectedCwd(cwd);
-                    setCustomPathOpen(false);
-                    setCustomPathValue("");
                     setDropdownOpen(false);
                   }}
                   style={{
@@ -522,121 +519,55 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
               ))}
 
               {/* Default cwd shortcut */}
-              {!customPathOpen && (
-                <button
-                  onClick={(e) => { e.stopPropagation(); handleDefaultCwd(); }}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 7,
-                    width: "100%",
-                    padding: "8px 10px",
-                    background: "none",
-                    border: "none",
-                    borderTop: recentCwds.length > 0 ? "1px solid var(--border)" : "none",
-                    color: "var(--text-muted)",
-                    cursor: "pointer",
-                    textAlign: "left",
-                    fontSize: 11,
-                  }}
-                >
-                  <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
-                    <path d="M1 3A1 1 0 0 1 2 2H4L5 3.5H8.5a.5.5 0 0 1 .5.5v4a.5.5 0 0 1-.5.5h-7A.5.5 0 0 1 1 8V3Z" />
-                  </svg>
-                  <span>使用默认目录</span>
-                </button>
-              )}
+              <button
+                onClick={(e) => { e.stopPropagation(); handleDefaultCwd(); }}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 7,
+                  width: "100%",
+                  padding: "8px 10px",
+                  background: "none",
+                  border: "none",
+                  borderTop: recentCwds.length > 0 ? "1px solid var(--border)" : "none",
+                  color: "var(--text-muted)",
+                  cursor: "pointer",
+                  textAlign: "left",
+                  fontSize: 11,
+                }}
+              >
+                <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+                  <path d="M1 3A1 1 0 0 1 2 2H4L5 3.5H8.5a.5.5 0 0 1 .5.5v4a.5.5 0 0 1-.5.5h-7A.5.5 0 0 1 1 8V3Z" />
+                </svg>
+                <span>使用默认目录</span>
+              </button>
 
               {/* Custom path entry */}
-              {!customPathOpen ? (
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setCustomPathOpen(true);
-                    setTimeout(() => customPathInputRef.current?.focus(), 0);
-                  }}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 7,
-                    width: "100%",
-                    padding: "8px 10px",
-                    background: "none",
-                    border: "none",
-                    color: "var(--text-muted)",
-                    cursor: "pointer",
-                    textAlign: "left",
-                    fontSize: 11,
-                  }}
-                >
-                  <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" style={{ flexShrink: 0 }}>
-                    <line x1="5" y1="1" x2="5" y2="9" />
-                    <line x1="1" y1="5" x2="9" y2="5" />
-                  </svg>
-                  <span>自定义路径…</span>
-                </button>
-              ) : (
-                <div style={{ padding: "6px 8px", borderTop: recentCwds.length > 0 ? "none" : undefined }}>
-                  <input
-                    ref={customPathInputRef}
-                    value={customPathValue}
-                    onChange={(e) => setCustomPathValue(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") commitCustomPath();
-                      if (e.key === "Escape") {
-                        setCustomPathOpen(false);
-                        setCustomPathValue("");
-                      }
-                    }}
-                    placeholder="/path/to/project"
-                    style={{
-                      width: "100%",
-                      fontSize: 11,
-                      fontFamily: "var(--font-mono)",
-                      padding: "5px 8px",
-                      border: "1px solid var(--accent)",
-                      borderRadius: 5,
-                      outline: "none",
-                      background: "var(--bg)",
-                      color: "var(--text)",
-                      boxSizing: "border-box",
-                    }}
-                  />
-                  <div style={{ display: "flex", gap: 5, marginTop: 5 }}>
-                    <button
-                      onClick={commitCustomPath}
-                      style={{
-                        flex: 1,
-                        padding: "4px 0",
-                        background: "var(--accent)",
-                        border: "none",
-                        borderRadius: 5,
-                        color: "#fff",
-                        fontSize: 11,
-                        fontWeight: 600,
-                        cursor: "pointer",
-                      }}
-                    >
-                      打开
-                    </button>
-                    <button
-                      onClick={() => { setCustomPathOpen(false); setCustomPathValue(""); }}
-                      style={{
-                        flex: 1,
-                        padding: "4px 0",
-                        background: "var(--bg-hover)",
-                        border: "1px solid var(--border)",
-                        borderRadius: 5,
-                        color: "var(--text-muted)",
-                        fontSize: 11,
-                        cursor: "pointer",
-                      }}
-                    >
-                      取消
-                    </button>
-                  </div>
-                </div>
-              )}
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  handleCustomPath();
+                }}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 7,
+                  width: "100%",
+                  padding: "8px 10px",
+                  background: "none",
+                  border: "none",
+                  color: "var(--text-muted)",
+                  cursor: "pointer",
+                  textAlign: "left",
+                  fontSize: 11,
+                }}
+              >
+                <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" style={{ flexShrink: 0 }}>
+                  <line x1="5" y1="1" x2="5" y2="9" />
+                  <line x1="1" y1="5" x2="9" y2="5" />
+                </svg>
+                <span>添加自定义路径…</span>
+              </button>
             </div>
           )}
         </div>
