@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { addAllowedRoot } from "@/lib/file-access";
 import { resolveSessionPath } from "@/lib/session-reader";
 import { startRpcSession, getRpcSession } from "@/lib/rpc-manager";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
@@ -28,6 +29,7 @@ export async function POST(
     const cwd = SessionManager.open(filePath).getHeader()?.cwd ?? process.cwd();
 
     const { session } = await startRpcSession(id, filePath, cwd);
+    addAllowedRoot(cwd);
     const result = await session.send(body);
 
     return NextResponse.json({ success: true, data: result });

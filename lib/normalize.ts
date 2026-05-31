@@ -1,4 +1,4 @@
-import type { AgentMessage, AssistantMessage, ToolCallContent } from "./types";
+import type { AgentMessage, AssistantMessage, ThinkingContent, TextContent, ToolCallContent } from "./types";
 
 function isObject(val: unknown): val is Record<string, unknown> {
   return typeof val === "object" && val !== null && !Array.isArray(val);
@@ -18,6 +18,18 @@ function normalizeToolCallBlock(block: unknown): ToolCallContent | null {
   };
 }
 
+function convertThinkingOnlyToText(content: AssistantMessage["content"]): AssistantMessage["content"] {
+  const hasText = content.some((block) => block.type === "text" && block.text.trim());
+  if (hasText) return content;
+  const hasNonThinkingBlock = content.some((block) => block.type !== "thinking");
+  if (hasNonThinkingBlock) return content;
+
+  return content.map((block) => ({
+    type: "text",
+    text: (block as ThinkingContent).thinking,
+  } satisfies TextContent));
+}
+
 export function normalizeToolCalls(msg: AgentMessage): AgentMessage {
   if (msg.role !== "assistant") return msg;
   const content = (msg as AssistantMessage).content;
@@ -27,4 +39,14 @@ export function normalizeToolCalls(msg: AgentMessage): AgentMessage {
     return result ?? block;
   });
   return { ...msg, content: normalized } as AgentMessage;
+}
+
+export function normalizeCompletedMessage(msg: AgentMessage): AgentMessage {
+  if (msg.role !== "assistant") return msg;
+  const normalized = normalizeToolCalls(msg) as AssistantMessage;
+  return { ...normalized, content: convertThinkingOnlyToText(normalized.content) } as AgentMessage;
+}
+
+export function normalizeCompletedMessages(messages: AgentMessage[]): AgentMessage[] {
+  return messages.map(normalizeCompletedMessage);
 }

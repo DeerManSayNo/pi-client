@@ -1,3 +1,4 @@
+import { addAllowedRoot } from "@/lib/file-access";
 import { resolveSessionPath } from "@/lib/session-reader";
 import { getRpcSession, startRpcSession } from "@/lib/rpc-manager";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
@@ -21,6 +22,7 @@ export async function GET(
     const cwd = SessionManager.open(filePath).getHeader()?.cwd ?? process.cwd();
     try {
       ({ session } = await startRpcSession(id, filePath, cwd));
+      addAllowedRoot(cwd);
     } catch (error) {
       return new Response(`Failed to start agent: ${error}`, { status: 500 });
     }

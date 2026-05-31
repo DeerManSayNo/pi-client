@@ -40,3 +40,7 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 .factory
+
+# tauri
+/src-tauri/target/
+/src-tauri/binaries/

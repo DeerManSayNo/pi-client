@@ -1,3 +1,4 @@
+import path from "path";
 import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
 import { cacheSessionPath } from "./session-reader";
 import type { AgentSessionLike, ToolInfo } from "./pi-types";
@@ -13,6 +14,45 @@ export interface AgentEvent {
 
 type EventListener = (event: AgentEvent) => void;
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function getNestedString(value: unknown, keys: string[]): string | null {
+  let current: unknown = value;
+  for (const key of keys) {
+    if (!isRecord(current)) return null;
+    current = current[key];
+  }
+  return typeof current === "string" && current.trim() ? current.trim() : null;
+}
+
+function extractToolName(event: AgentEvent): string {
+  return typeof event.toolName === "string" ? event.toolName : typeof event.name === "string" ? event.name : "";
+}
+
+function extractChangedFilePath(event: AgentEvent): string | null {
+  const toolName = extractToolName(event);
+  if (toolName !== "write" && toolName !== "edit") return null;
+
+  return getNestedString(event, ["filePath"])
+    ?? getNestedString(event, ["path"])
+    ?? getNestedString(event, ["file_path"])
+    ?? getNestedString(event, ["args", "file_path"])
+    ?? getNestedString(event, ["args", "path"])
+    ?? getNestedString(event, ["input", "file_path"])
+    ?? getNestedString(event, ["input", "path"])
+    ?? getNestedString(event, ["result", "filePath"])
+    ?? getNestedString(event, ["result", "path"])
+    ?? getNestedString(event, ["result", "file_path"]);
+}
+
+function resolveChangedFilePath(filePath: string, cwd: string): string | null {
+  const trimmed = filePath.trim();
+  if (!trimmed) return null;
+  return path.isAbsolute(trimmed) ? path.resolve(trimmed) : path.resolve(cwd, trimmed);
+}
+
 // ============================================================================
 // AgentSessionWrapper
 // Wraps AgentSession with the same interface the rest of the app expects
@@ -20,6 +60,7 @@ type EventListener = (event: AgentEvent) => void;
 
 export class AgentSessionWrapper {
   private listeners: EventListener[] = [];
+  private pendingToolEvents = new Map<string, AgentEvent>();
   private unsubscribe: (() => void) | null = null;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private onDestroyCallback: (() => void) | null = null;
@@ -43,6 +84,24 @@ export class AgentSessionWrapper {
     this.unsubscribe = this.inner.subscribe((event: AgentEvent) => {
       this.resetIdleTimer();
       for (const l of this.listeners) l(event);
+      if (event.type === "tool_execution_start" && typeof event.toolCallId === "string") {
+        this.pendingToolEvents.set(event.toolCallId, event);
+        return;
+      }
+      const sourceEvent = event.type === "tool_execution_end" && typeof event.toolCallId === "string"
+        ? { ...(this.pendingToolEvents.get(event.toolCallId) ?? {}), ...event }
+        : event;
+      if (event.type === "tool_execution_end" && typeof event.toolCallId === "string") {
+        this.pendingToolEvents.delete(event.toolCallId);
+      }
+      const changedFilePath = extractChangedFilePath(sourceEvent);
+      const cwd = this.inner.sessionManager.getCwd();
+      if (changedFilePath && cwd) {
+        const resolved = resolveChangedFilePath(changedFilePath, cwd);
+        if (resolved) {
+          for (const l of this.listeners) l({ type: "agent_file_changed", filePath: resolved, toolName: extractToolName(sourceEvent) });
+        }
+      }
     });
     this.resetIdleTimer();
   }

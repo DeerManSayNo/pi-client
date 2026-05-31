@@ -1,4 +1,4 @@
-# pi-web
+# pi-agent
 
 [pi 编程智能体](https://github.com/badlogic/pi-mono) 的网页界面。在浏览器中浏览会话、与智能体对话、分叉对话、切换消息分支。
 
@@ -7,15 +7,15 @@
 **从源码启动（中文版）：**
 
 ```bash
-git clone https://github.com/Cgwgpt/pi-web.git
-cd pi-web
+git clone https://github.com/DeerManSayNo/pi-client.git
+cd pi-client
 npm install
 npm run dev
 ```
 
 启动后打开 [http://localhost:30141](http://localhost:30141)。
 
-> **注意**：`npx @agegr/pi-web@latest` 安装的是 npm 官方原版，不含本文档描述的中文界面。如需中文版，请使用上方 `git clone` 方式从本仓库启动。
+> **注意**：本仓库项目名为 `pi-agent`，仓库地址为 `pi-client`。
 
 **可选参数：**
 
@@ -87,22 +87,22 @@ lib/
 
 ## 中文界面
 
-pi-web 的界面已全面中文化，所有 UI 文本直接内联在组件中，无需额外配置或语言包。
+pi-agent 的界面已全面中文化，所有 UI 文本直接内联在组件中，无需额外配置或语言包。
 
 ### 启动中文界面
 
 界面语言随代码内置，从本仓库源码启动即中文：
 
 ```bash
-git clone https://github.com/Cgwgpt/pi-web.git
-cd pi-web
+git clone https://github.com/DeerManSayNo/pi-client.git
+cd pi-client
 npm install
 npm run dev
 ```
 
 启动后访问 http://localhost:30141 即可看到完整的中文界面。
 
-> npm 官方包 `@agegr/pi-web` 为英文原版，不含中文界面。
+> 本仓库项目名为 `pi-agent`，仓库地址为 `pi-client`。
 
 ### 实现方式
 

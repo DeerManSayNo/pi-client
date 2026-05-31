@@ -12,7 +12,7 @@ import { useDragDrop } from "@/hooks/useDragDrop";
 interface Props {
   session: SessionInfo | null;
   newSessionCwd: string | null;
-  onAgentEnd?: () => void;
+  onAgentEnd?: (changedFiles?: string[]) => void;
   onSessionCreated?: (session: SessionInfo) => void;
   onSessionForked?: (newSessionId: string) => void;
   modelsRefreshKey?: number;

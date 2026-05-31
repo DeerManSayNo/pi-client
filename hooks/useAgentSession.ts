@@ -2,7 +2,7 @@
 
 import { useState, useCallback, useRef, useEffect, useReducer } from "react";
 import type { AgentMessage, SessionInfo, SessionTreeNode } from "@/lib/types";
-import { normalizeToolCalls } from "@/lib/normalize";
+import { normalizeCompletedMessage, normalizeCompletedMessages, normalizeToolCalls } from "@/lib/normalize";
 import { sendAgentCommand } from "@/lib/agent-client";
 import type { ToolEntry } from "@/components/ToolPanel";
 
@@ -57,7 +57,7 @@ export type AgentPhase =
 export interface UseAgentSessionOptions {
   session: SessionInfo | null;
   newSessionCwd: string | null;
-  onAgentEnd?: () => void;
+  onAgentEnd?: (changedFiles?: string[]) => void;
   onSessionCreated?: (session: SessionInfo) => void;
   onSessionForked?: (newSessionId: string) => void;
   modelsRefreshKey?: number;
@@ -91,7 +91,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const isNew = session === null && newSessionCwd !== null;
 
   const [data, setData] = useState<SessionData | null>(null);
-  const [loading, setLoading] = useState(!isNew);
+  const [loading, setLoading] = useState(() => !isNew);
   const [error, setError] = useState<string | null>(null);
   const [activeLeafId, setActiveLeafId] = useState<string | null>(null);
   const [messages, setMessages] = useState<AgentMessage[]>([]);
@@ -121,6 +121,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const handleAgentEventRef = useRef<((event: AgentEvent) => void) | null>(null);
   const initialScrollDoneRef = useRef(false);
   const lastUserMsgRef = useRef<HTMLDivElement | null>(null);
+  const changedFilesRef = useRef<Set<string>>(new Set());
   const pendingScrollToUserRef = useRef(false);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
@@ -149,12 +150,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   })();
 
   const loadSession = useCallback(async (sid: string, showLoading = false, includeState = false) => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
     try {
       if (showLoading) setLoading(true);
       const url = includeState
         ? `/api/sessions/${encodeURIComponent(sid)}?includeState`
         : `/api/sessions/${encodeURIComponent(sid)}`;
-      const res = await fetch(url);
+      const res = await fetch(url, { signal: controller.signal });
       if (res.status === 404) {
         if (showLoading) {
           setData(null);
@@ -168,7 +171,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const d = await res.json() as SessionData & { agentState?: { running: boolean; state?: { isStreaming?: boolean; isCompacting?: boolean; contextUsage?: { percent: number | null; contextWindow: number; tokens: number | null } | null; systemPrompt?: string; thinkingLevel?: string } } };
       setData(d);
       setActiveLeafId(d.leafId);
-      setMessages(d.context.messages);
+      setMessages(normalizeCompletedMessages(d.context.messages));
       setEntryIds(d.context.entryIds ?? []);
       setCurrentModelOverride(null);
       setError(null);
@@ -178,10 +181,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       return d.agentState ?? null;
     } catch (e) {
-      setError(String(e));
+      setError(e instanceof DOMException && e.name === "AbortError" ? "加载会话超时" : String(e));
       return null;
     } finally {
-      if (showLoading) setLoading(false);
+      clearTimeout(timeout);
+      setLoading(false);
     }
   }, []);
 
@@ -193,7 +197,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const res = await fetch(url);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const d = await res.json() as { context: { messages: AgentMessage[]; entryIds: string[] } };
-      setMessages(d.context.messages);
+      setMessages(normalizeCompletedMessages(d.context.messages));
       setEntryIds(d.context.entryIds ?? []);
     } catch (e) {
       console.error("Failed to load context:", e);
@@ -244,6 +248,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const handleAgentEvent = useCallback((event: AgentEvent) => {
     switch (event.type) {
+      case "agent_file_changed": {
+        const filePath = event.filePath;
+        if (typeof filePath === "string" && filePath.trim()) {
+          changedFilesRef.current.add(filePath);
+        }
+        break;
+      }
       case "agent_start":
         setAgentRunning(true);
         setAgentPhase({ kind: "waiting_model" });
@@ -264,7 +275,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             })
             .catch(() => {});
         }
-        onAgentEnd?.();
+        const changedFiles = [...changedFilesRef.current];
+        changedFilesRef.current.clear();
+        onAgentEnd?.(changedFiles);
         break;
       case "message_start":
       case "message_update": {
@@ -278,7 +291,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       case "message_end": {
         const completed = event.message as AgentMessage | undefined;
         if (completed) {
-          setMessages((prev) => [...prev, normalizeToolCalls(completed)]);
+          setMessages((prev) => [...prev, normalizeCompletedMessage(completed)]);
         }
         dispatch({ type: "reset" });
         setAgentPhase({ kind: "waiting_model" });

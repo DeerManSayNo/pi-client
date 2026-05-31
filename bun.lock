@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "pi-web",
+      "name": "pi-agent",
       "dependencies": {
         "@earendil-works/pi-ai": "^0.75.5",
         "@earendil-works/pi-coding-agent": "^0.75.5",

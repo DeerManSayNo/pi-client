@@ -13,6 +13,17 @@ import { useTheme } from "@/hooks/useTheme";
 import type { SessionInfo, SessionTreeNode } from "@/lib/types";
 import type { ChatInputHandle } from "./ChatInput";
 
+const SKIP_AUTO_OPEN_SUFFIXES = [".jsonl"];
+
+function fileNameFromPath(filePath: string): string {
+  return filePath.split(/[\\/]/).filter(Boolean).pop() ?? filePath;
+}
+
+function shouldAutoOpenFile(filePath: string): boolean {
+  const name = fileNameFromPath(filePath).toLowerCase();
+  return Boolean(name) && !SKIP_AUTO_OPEN_SUFFIXES.some((suffix) => name.endsWith(suffix));
+}
+
 export function AppShell() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -160,11 +171,6 @@ export function AppShell() {
     router.replace(`?session=${encodeURIComponent(session.id)}`, { scroll: false });
   }, [router]);
 
-  const handleAgentEnd = useCallback(() => {
-    setRefreshKey((k) => k + 1);
-    setExplorerRefreshKey((k) => k + 1);
-  }, []);
-
   const handleSessionForked = useCallback((newSessionId: string) => {
     setRefreshKey((k) => k + 1);
     setSessionKey((k) => k + 1);
@@ -204,6 +210,13 @@ export function AppShell() {
     setActiveFileTabId(tabId);
     setRightPanelOpen(true);
   }, []);
+
+  const handleAgentEnd = useCallback((changedFiles?: string[]) => {
+    setRefreshKey((k) => k + 1);
+    setExplorerRefreshKey((k) => k + 1);
+    const filePath = changedFiles?.filter(shouldAutoOpenFile).at(-1);
+    if (filePath) handleOpenFile(filePath, fileNameFromPath(filePath));
+  }, [handleOpenFile]);
 
   const handleCloseFileTab = useCallback((tabId: string) => {
     setFileTabs((prev) => {
@@ -300,14 +313,13 @@ export function AppShell() {
       {/* Mobile overlay backdrop */}
       <div
         className="sidebar-overlay-backdrop"
-        onClick={() => setSidebarOpen(false)}
         style={{
           position: "fixed",
           inset: 0,
           zIndex: 199,
           background: "rgba(0,0,0,0.4)",
-          opacity: sidebarOpen ? 1 : 0,
-          pointerEvents: sidebarOpen ? "auto" : "none",
+          opacity: 0,
+          pointerEvents: "none",
           transition: "opacity 0.25s ease",
         }}
       />

@@ -288,6 +288,9 @@ span.linenumber {
   .chat-stats-center {
     display: none !important;
   }
+  .sidebar-overlay-backdrop {
+    display: none !important;
+  }
   .sidebar-container {
     position: fixed !important;
     top: 0;

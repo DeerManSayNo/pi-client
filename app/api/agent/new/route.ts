@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { existsSync } from "fs";
+import { addAllowedRoot } from "@/lib/file-access";
 import { startRpcSession } from "@/lib/rpc-manager";
 
 // POST /api/agent/new  body: { cwd: string; type: string; message: string; ... }
@@ -23,10 +24,7 @@ export async function POST(req: Request) {
     const tempKey = `__new__${Date.now()}`;
     const { session, realSessionId } = await startRpcSession(tempKey, "", cwd, toolNames);
 
-    // Keep the files-route allowed-roots cache (see app/api/files/[...path]/route.ts)
-    // in sync so the new cwd is immediately readable via /api/files. Without this,
-    // a file request under a brand-new cwd would 403 for up to the cache TTL.
-    globalThis.__piAllowedRootsCache?.roots.add(cwd);
+    addAllowedRoot(cwd);
 
     // Apply pre-selected model before sending the prompt
     if (provider && modelId) {
