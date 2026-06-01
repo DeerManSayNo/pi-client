@@ -325,5 +325,18 @@ span.linenumber {
     display: none !important;
   }
 }
+@keyframes session-running-spin {
+  to { transform: rotate(360deg); }
+}
 
+.session-running-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  border: 2px solid color-mix(in srgb, var(--accent) 24%, transparent);
+  border-top-color: var(--accent);
+  border-right-color: var(--accent);
+  animation: session-running-spin 0.75s linear infinite;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 8%, transparent);
+}
 

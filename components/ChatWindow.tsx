@@ -15,6 +15,7 @@ interface Props {
   onAgentEnd?: (changedFiles?: string[]) => void;
   onSessionCreated?: (session: SessionInfo) => void;
   onSessionStarted?: (session: SessionInfo | null) => void;
+  onAgentRunningChange?: (sessionId: string | null | undefined, running: boolean) => void;
   onSessionForked?: (newSessionId: string) => void;
   modelsRefreshKey?: number;
   chatInputRef?: React.RefObject<ChatInputHandle | null>;
@@ -90,7 +91,7 @@ function Typewriter({ phrases }: { phrases: string[] }) {
   );
 }
 
-export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionStarted, onSessionForked, modelsRefreshKey, chatInputRef, onSystemPromptChange, onSessionStatsChange, onContextUsageChange }: Props) {
+export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionStarted, onAgentRunningChange, onSessionForked, modelsRefreshKey, chatInputRef, onSystemPromptChange, onSessionStatsChange, onContextUsageChange }: Props) {
   const {
     loading, error, messages, entryIds, streamState,
     agentRunning, modelNames, modelList, modelThinkingLevels, modelThinkingLevelMaps, toolPreset, thinkingLevel,
@@ -107,6 +108,10 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
     session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionStarted, onSessionForked,
     modelsRefreshKey, onSystemPromptChange,
   });
+
+  useEffect(() => {
+    onAgentRunningChange?.(session?.id, agentRunning);
+  }, [agentRunning, onAgentRunningChange, session?.id]);
 
   const { soundEnabled, onSoundToggle, playDoneSound } = useAudio();
   const playDoneSoundRef = useRef(playDoneSound);
@@ -156,6 +161,18 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
 
   const visibleMessages = messages.filter((m) => m.role === "user" || m.role === "assistant");
   const messageRefs = useMessageRefs(visibleMessages.length);
+  const liveStreamEndRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!agentRunning) return;
+    const anchor = liveStreamEndRef.current;
+    if (!anchor) return;
+
+    const frame = requestAnimationFrame(() => {
+      anchor.scrollIntoView({ block: "end", behavior: "auto" });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [agentRunning, streamState.streamingMessage, agentPhase]);
 
   const isEmptyNew = isNew && messages.length === 0 && !streamState.isStreaming && !agentRunning;
 
@@ -269,7 +286,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
             >
               <div style={{ display: "flex", alignItems: "baseline", gap: 10, minWidth: 0, flex: 1, lineHeight: 1.4 }}>
                 <span style={{ fontSize: 28, fontWeight: 700, letterSpacing: "-0.02em", color: "var(--text)" }}>π</span>
-                <span style={{ fontSize: 22, color: "var(--text)", fontWeight: 700, letterSpacing: "-0.01em" }}>Pi Agent Web</span>
+                <span style={{ fontSize: 22, color: "var(--text)", fontWeight: 700, letterSpacing: "-0.01em" }}>Pi Client</span>
                 <span style={{ fontSize: 14, minWidth: 0, overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis" }}>
                   <Typewriter phrases={TYPEWRITER_PHRASES} />
                 </span>
@@ -354,6 +371,8 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
                 <span className="animate-[pulse_1.5s_infinite]">{phaseLabel(agentPhase)}</span>
               </div>
             )}
+
+            {agentRunning && <div ref={liveStreamEndRef} />}
 
             {agentRunning && (
               <div style={{ height: scrollContainerRef.current ? scrollContainerRef.current.clientHeight : "80vh" }} />

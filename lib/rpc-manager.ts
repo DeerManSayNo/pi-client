@@ -324,6 +324,16 @@ export function getRpcSession(sessionId: string): AgentSessionWrapper | undefine
   return getRegistry().get(sessionId);
 }
 
+export function listRpcSessionStates(): Array<{ sessionId: string; isStreaming: boolean; isCompacting: boolean }> {
+  return [...getRegistry().values()]
+    .filter((session) => session.isAlive())
+    .map((session) => ({
+      sessionId: session.sessionId,
+      isStreaming: Boolean(session.inner.isStreaming),
+      isCompacting: Boolean(session.inner.isCompacting),
+    }));
+}
+
 /**
  * Get or create an AgentSession for the given session.
  * For new sessions (sessionFile === ""), pi generates its own id.

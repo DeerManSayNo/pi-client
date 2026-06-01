@@ -13,6 +13,7 @@ interface Props {
   onInitialRestoreDone?: () => void;
   refreshKey?: number;
   optimisticSession?: SessionInfo | null;
+  runningSessionIds?: Set<string>;
   onSessionDeleted?: (sessionId: string) => void;
   selectedCwd?: string | null;
   onCwdChange?: (cwd: string | null) => void;
@@ -217,7 +218,7 @@ function PiAgentTitle() {
   const [scrambling, setScrambling] = useState(false);
   const revertTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const target = showVersion ? `${process.env.NEXT_PUBLIC_APP_VERSION ?? "0.0.0"}p${process.env.NEXT_PUBLIC_PI_VERSION ?? "0.0.0"}` : "Pi Agent Web";
+  const target = showVersion ? `${process.env.NEXT_PUBLIC_APP_VERSION ?? "0.0.0"}p${process.env.NEXT_PUBLIC_PI_VERSION ?? "0.0.0"}` : "Pi Client";
   const display = useScramble(target, scrambling);
 
   const triggerScramble = useCallback((toVersion: boolean) => {
@@ -255,7 +256,7 @@ function PiAgentTitle() {
   );
 }
 
-export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, onInitialRestoreDone, refreshKey, optimisticSession, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onAtMention }: Props) {
+export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, onInitialRestoreDone, refreshKey, optimisticSession, runningSessionIds = new Set(), onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onAtMention }: Props) {
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -789,6 +790,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             expanded={expandedCwds.has(project.cwd)}
             showAll={showAllCwds.has(project.cwd)}
             selectedSessionId={selectedSessionId}
+            runningSessionIds={runningSessionIds}
             onToggle={() => toggleProject(project.cwd)}
             onToggleShowAll={() => toggleShowAll(project.cwd)}
             onSelectSession={onSelectSession}
@@ -983,6 +985,7 @@ function ProjectSection({
   expanded,
   showAll,
   selectedSessionId,
+  runningSessionIds,
   onToggle,
   onToggleShowAll,
   onSelectSession,
@@ -994,6 +997,7 @@ function ProjectSection({
   expanded: boolean;
   showAll: boolean;
   selectedSessionId: string | null;
+  runningSessionIds: Set<string>;
   onToggle: () => void;
   onToggleShowAll: () => void;
   onSelectSession: (s: SessionInfo) => void;
@@ -1074,6 +1078,7 @@ function ProjectSection({
               key={node.session.id}
               node={node}
               selectedSessionId={selectedSessionId}
+              runningSessionIds={runningSessionIds}
               onSelectSession={onSelectSession}
               onRenamed={onRenamed}
               onSessionDeleted={onSessionDeleted}
@@ -1084,6 +1089,7 @@ function ProjectSection({
               key={session.id}
               session={session}
               isSelected={session.id === selectedSessionId}
+              isRunning={runningSessionIds.has(session.id)}
               onClick={() => onSelectSession(session)}
               onRenamed={onRenamed}
               onDeleted={(id) => onSessionDeleted?.(id)}
@@ -1118,6 +1124,7 @@ function ProjectSection({
 function SessionTreeItem({
   node,
   selectedSessionId,
+  runningSessionIds,
   onSelectSession,
   onRenamed,
   onSessionDeleted,
@@ -1125,6 +1132,7 @@ function SessionTreeItem({
 }: {
   node: SessionTreeNode;
   selectedSessionId: string | null;
+  runningSessionIds: Set<string>;
   onSelectSession: (s: SessionInfo) => void;
   onRenamed?: () => void;
   onSessionDeleted?: (id: string) => void;
@@ -1150,6 +1158,7 @@ function SessionTreeItem({
         <SessionItem
           session={node.session}
           isSelected={node.session.id === selectedSessionId}
+          isRunning={runningSessionIds.has(node.session.id)}
           onClick={() => onSelectSession(node.session)}
           onRenamed={onRenamed}
           onDeleted={(id) => onSessionDeleted?.(id)}
@@ -1166,6 +1175,7 @@ function SessionTreeItem({
               key={child.session.id}
               node={child}
               selectedSessionId={selectedSessionId}
+              runningSessionIds={runningSessionIds}
               onSelectSession={onSelectSession}
               onRenamed={onRenamed}
               onSessionDeleted={onSessionDeleted}
@@ -1181,6 +1191,7 @@ function SessionTreeItem({
 function SessionItem({
   session,
   isSelected,
+  isRunning,
   onClick,
   onRenamed,
   onDeleted,
@@ -1191,6 +1202,7 @@ function SessionItem({
 }: {
   session: SessionInfo;
   isSelected: boolean;
+  isRunning?: boolean;
   onClick: () => void;
   onRenamed?: () => void;
   onDeleted?: (id: string) => void;
@@ -1396,6 +1408,16 @@ function SessionItem({
                 <polyline points="2 3.5 5 6.5 8 3.5" />
               </svg>
             </button>
+          )}
+
+          {/* Running indicator */}
+          {isRunning && (
+            <span
+              aria-label="会话正在运行"
+              title="会话正在运行"
+              className="session-running-dot"
+              style={{ flexShrink: 0 }}
+            />
           )}
 
           {/* Action buttons — shown on hover */}

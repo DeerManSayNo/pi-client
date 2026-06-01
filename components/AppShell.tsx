@@ -61,6 +61,8 @@ export function AppShell() {
   const [modelsConfigOpen, setModelsConfigOpen] = useState(false);
   const [modelsRefreshKey, setModelsRefreshKey] = useState(0);
   const [skillsConfigOpen, setSkillsConfigOpen] = useState(false);
+  const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(new Set());
+  const pendingSessionIdRef = useRef<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const SIDEBAR_MIN = 180;
   const SIDEBAR_MAX = 500;
@@ -220,6 +222,34 @@ export function AppShell() {
     return () => window.removeEventListener("pointerdown", handlePointerDown);
   }, [projectDropdownOpen]);
 
+  useEffect(() => {
+    let cancelled = false;
+    const loadRunningSessions = () => {
+      fetch("/api/agent/running")
+        .then((res) => res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`)))
+        .then((data: { runningSessionIds?: string[] }) => {
+          if (!cancelled) setRunningSessionIds(new Set(data.runningSessionIds ?? []));
+        })
+        .catch(() => {});
+    };
+    loadRunningSessions();
+    const interval = window.setInterval(loadRunningSessions, 2000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, []);
+
+  const setSessionRunning = useCallback((sessionId: string | null | undefined, running: boolean) => {
+    if (!sessionId) return;
+    setRunningSessionIds((prev) => {
+      const next = new Set(prev);
+      if (running) next.add(sessionId);
+      else next.delete(sessionId);
+      return next;
+    });
+  }, []);
+
   const handleCwdChange = useCallback((cwd: string | null) => {
     setActiveCwd(cwd);
     // Skip if cwd is null (initial mount) or during the initial URL restore.
@@ -241,7 +271,10 @@ export function AppShell() {
   }, [router]);
 
   const handleSelectSession = useCallback((session: SessionInfo, isRestore = false) => {
-    setPendingSession(null);
+    // Do not clear pendingSession here: a newly-created session is not written
+    // to disk by pi until the first assistant message exists. If the user
+    // switches away while that first response is still running, /api/sessions
+    // cannot list it yet, so the sidebar must keep showing the optimistic row.
     setNewSessionCwd(null);
     setSelectedSession(session);
     setSessionKey((k) => k + 1);
@@ -272,21 +305,32 @@ export function AppShell() {
 
   const handleSessionStarted = useCallback((session: SessionInfo | null) => {
     if (!session) {
+      setSessionRunning(pendingSessionIdRef.current, false);
+      pendingSessionIdRef.current = null;
       setPendingSession(null);
       return;
     }
+    pendingSessionIdRef.current = session.id;
     setPendingSession(session);
+    setSessionRunning(session.id, true);
     setRefreshKey((k) => k + 1);
-  }, []);
+  }, [setSessionRunning]);
 
   // Called by ChatWindow when a new session gets its real id from pi
   const handleSessionCreated = useCallback((session: SessionInfo) => {
-    setPendingSession(null);
+    setSessionRunning(pendingSessionIdRef.current, false);
+    pendingSessionIdRef.current = null;
+    setSessionRunning(session.id, true);
+    // Keep an optimistic entry with the real id until SessionManager.listAll()
+    // can see the file. For brand-new sessions pi delays writing the jsonl
+    // until an assistant message is persisted, so clearing this immediately
+    // makes the session disappear from the sidebar when switching away mid-run.
+    setPendingSession(session);
     setNewSessionCwd(null);
     setSelectedSession(session);
     setRefreshKey((k) => k + 1);
     router.replace(`?session=${encodeURIComponent(session.id)}`, { scroll: false });
-  }, [router]);
+  }, [router, setSessionRunning]);
 
   const handleSessionForked = useCallback((newSessionId: string) => {
     setRefreshKey((k) => k + 1);
@@ -357,11 +401,12 @@ export function AppShell() {
   }, []);
 
   const handleAgentEnd = useCallback((changedFiles?: string[]) => {
+    if (selectedSession?.id) setSessionRunning(selectedSession.id, false);
     setRefreshKey((k) => k + 1);
     setExplorerRefreshKey((k) => k + 1);
     const filePath = changedFiles?.filter(shouldAutoOpenFile).at(-1);
     if (filePath) handleOpenFile(filePath, fileNameFromPath(filePath));
-  }, [handleOpenFile]);
+  }, [handleOpenFile, selectedSession?.id, setSessionRunning]);
 
   const handleCloseFileTab = useCallback((tabId: string) => {
     setFileTabs((prev) => {
@@ -394,6 +439,7 @@ export function AppShell() {
         onInitialRestoreDone={handleInitialRestoreDone}
         refreshKey={refreshKey}
         optimisticSession={pendingSession ?? selectedSession}
+        runningSessionIds={runningSessionIds}
         onSessionDeleted={handleSessionDeleted}
         selectedCwd={selectedSession?.cwd ?? newSessionCwd ?? activeCwd ?? null}
         onCwdChange={handleCwdChange}
@@ -866,6 +912,7 @@ export function AppShell() {
               onAgentEnd={handleAgentEnd}
               onSessionCreated={handleSessionCreated}
               onSessionStarted={handleSessionStarted}
+              onAgentRunningChange={setSessionRunning}
               onSessionForked={handleSessionForked}
               modelsRefreshKey={modelsRefreshKey}
               chatInputRef={chatInputRef}
