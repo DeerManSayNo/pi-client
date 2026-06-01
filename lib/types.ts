@@ -165,12 +165,6 @@ export type SessionEntry =
 
 export type FileEntry = SessionHeader | SessionEntry;
 
-export interface SessionTreeNode {
-  entry: SessionEntry;
-  children: SessionTreeNode[];
-  label?: string;
-}
-
 export interface SessionInfo {
   path: string;
   id: string;

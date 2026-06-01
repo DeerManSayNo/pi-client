@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useCallback, useRef, useEffect } from "react";
+import { open } from "@tauri-apps/plugin-dialog";
+import { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { SessionSidebar } from "./SessionSidebar";
 import { ChatWindow } from "./ChatWindow";
@@ -8,9 +9,8 @@ import { FileViewer } from "./FileViewer";
 import { TabBar, type Tab } from "./TabBar";
 import { ModelsConfig } from "./ModelsConfig";
 import { SkillsConfig } from "./SkillsConfig";
-import { BranchNavigator } from "./BranchNavigator";
 import { useTheme } from "@/hooks/useTheme";
-import type { SessionInfo, SessionTreeNode } from "@/lib/types";
+import type { SessionInfo } from "@/lib/types";
 import type { ChatInputHandle } from "./ChatInput";
 
 const SKIP_AUTO_OPEN_SUFFIXES = [".jsonl"];
@@ -22,6 +22,29 @@ function fileNameFromPath(filePath: string): string {
 function shouldAutoOpenFile(filePath: string): boolean {
   const name = fileNameFromPath(filePath).toLowerCase();
   return Boolean(name) && !SKIP_AUTO_OPEN_SUFFIXES.some((suffix) => name.endsWith(suffix));
+}
+
+function getProjectName(cwd: string): string {
+  const normalized = cwd.replace(/[\\/]+$/, "");
+  const parts = normalized.split(/[\\/]/).filter(Boolean);
+  return parts.at(-1) ?? cwd;
+}
+
+const CUSTOM_CWDS_STORAGE_KEY = "pi-agent.custom-cwds";
+
+function readCustomCwds(): string[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(CUSTOM_CWDS_STORAGE_KEY) ?? "[]") as unknown;
+    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === "string" && v.trim().length > 0) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeCustomCwds(cwds: string[]) {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(CUSTOM_CWDS_STORAGE_KEY, JSON.stringify([...new Set(cwds)]));
 }
 
 export function AppShell() {
@@ -40,21 +63,8 @@ export function AppShell() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const chatInputRef = useRef<ChatInputHandle | null>(null);
   const topBarRef = useRef<HTMLDivElement>(null);
-
-  // Branch navigator state — populated by ChatWindow via onBranchDataChange
-  const [branchTree, setBranchTree] = useState<SessionTreeNode[]>([]);
-  const [branchActiveLeafId, setBranchActiveLeafId] = useState<string | null>(null);
-  const branchLeafChangeFnRef = useRef<((leafId: string | null) => void) | null>(null);
-
-  const handleBranchDataChange = useCallback((tree: SessionTreeNode[], activeLeafId: string | null, onLeafChange: (leafId: string | null) => void) => {
-    setBranchTree(tree);
-    setBranchActiveLeafId(activeLeafId);
-    branchLeafChangeFnRef.current = onLeafChange;
-  }, []);
-
-  const handleBranchLeafChange = useCallback((leafId: string | null) => {
-    branchLeafChangeFnRef.current?.(leafId);
-  }, []);
+  const projectDropdownRef = useRef<HTMLDivElement>(null);
+  const [projectDropdownOpen, setProjectDropdownOpen] = useState(false);
 
   const [systemPrompt, setSystemPrompt] = useState<string | null>(null);
   const systemBtnRef = useRef<HTMLButtonElement>(null);
@@ -76,10 +86,10 @@ export function AppShell() {
   }, []);
 
   // Single active panel — only one dropdown open at a time
-  const [activeTopPanel, setActiveTopPanel] = useState<"branches" | "system" | null>(null);
+  const [activeTopPanel, setActiveTopPanel] = useState<"system" | null>(null);
   const [topPanelPos, setTopPanelPos] = useState<{ top: number; left: number; width: number } | null>(null);
 
-  const toggleTopPanel = useCallback((panel: "branches" | "system") => {
+  const toggleTopPanel = useCallback((panel: "system") => {
     setActiveTopPanel((cur) => cur === panel ? null : panel);
   }, []);
 
@@ -106,10 +116,97 @@ export function AppShell() {
 
   const [initialSessionId] = useState<string | null>(() => searchParams.get("session"));
   const [activeCwd, setActiveCwd] = useState<string | null>(null);
+  const [defaultCwd, setDefaultCwd] = useState<string | null>(null);
+  const [projectCwds, setProjectCwds] = useState<string[]>([]);
+  const [customCwds, setCustomCwds] = useState<string[]>(() => readCustomCwds());
+  const effectiveProjectCwd = selectedSession?.cwd ?? newSessionCwd ?? activeCwd ?? defaultCwd;
   // True once the initial ?session= URL param has been resolved (or confirmed absent)
   const [initialSessionRestored, setInitialSessionRestored] = useState<boolean>(() => !searchParams.get("session"));
   // Suppresses sessionKey bump in handleCwdChange during the initial URL restore
   const suppressCwdBumpRef = useRef(false);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch("/api/sessions", { signal: controller.signal })
+      .then((res) => res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`)))
+      .then((data: { sessions?: SessionInfo[] }) => {
+        const cwds = (data.sessions ?? []).map((s) => s.cwd).filter((cwd): cwd is string => Boolean(cwd));
+        setProjectCwds([...new Set(cwds)]);
+      })
+      .catch(() => {});
+    return () => controller.abort();
+  }, [refreshKey]);
+
+  useEffect(() => {
+    fetch("/api/default-cwd", { method: "POST" })
+      .then((res) => res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`)))
+      .then((data: { cwd?: string }) => { if (data.cwd) setDefaultCwd(data.cwd); })
+      .catch(() => {});
+  }, []);
+
+  const projectOptions = useMemo(() => {
+    const seen = new Set<string>();
+    const result: { cwd: string; label: string }[] = [];
+    const add = (cwd: string | null | undefined, label?: string) => {
+      if (!cwd || seen.has(cwd)) return;
+      seen.add(cwd);
+      result.push({ cwd, label: label ?? getProjectName(cwd) });
+    };
+    add(defaultCwd, "默认");
+    add(effectiveProjectCwd);
+    customCwds.forEach((cwd) => add(cwd));
+    projectCwds.forEach((cwd) => add(cwd));
+    return result;
+  }, [defaultCwd, effectiveProjectCwd, customCwds, projectCwds]);
+
+  const switchProject = useCallback((cwd: string) => {
+    if (!cwd || cwd === "__add__") return;
+    setSelectedSession(null);
+    setNewSessionCwd(cwd);
+    setActiveCwd(cwd);
+    setSessionKey((k) => k + 1);
+    setExplorerRefreshKey((k) => k + 1);
+    setSystemPrompt(null);
+    setActiveTopPanel(null);
+    router.replace("/", { scroll: false });
+  }, [router]);
+
+  const handleAddProjectFromTopBar = useCallback(async () => {
+    let cwd: string | null = null;
+    try {
+      const selected = await open({ directory: true, multiple: false, title: "选择项目目录" });
+      if (typeof selected === "string") cwd = selected;
+    } catch {
+      // In non-Tauri/dev browser environments, fall back to manual input.
+    }
+    if (!cwd) {
+      const typed = window.prompt("输入项目路径", effectiveProjectCwd ?? defaultCwd ?? "");
+      cwd = typed?.trim() || null;
+    }
+    if (!cwd) return;
+    const finalCwd = cwd;
+    setCustomCwds((prev) => {
+      const next = [finalCwd, ...prev.filter((item) => item !== finalCwd)];
+      writeCustomCwds(next);
+      return next;
+    });
+    switchProject(finalCwd);
+  }, [defaultCwd, effectiveProjectCwd, switchProject]);
+
+  const handleProjectSelectChange = useCallback((value: string) => {
+    if (value === "__add__") void handleAddProjectFromTopBar();
+    else switchProject(value);
+  }, [handleAddProjectFromTopBar, switchProject]);
+
+  useEffect(() => {
+    if (!projectDropdownOpen) return;
+    const handlePointerDown = (event: PointerEvent) => {
+      if (projectDropdownRef.current?.contains(event.target as Node)) return;
+      setProjectDropdownOpen(false);
+    };
+    window.addEventListener("pointerdown", handlePointerDown);
+    return () => window.removeEventListener("pointerdown", handlePointerDown);
+  }, [projectDropdownOpen]);
 
   const handleCwdChange = useCallback((cwd: string | null) => {
     setActiveCwd(cwd);
@@ -126,8 +223,6 @@ export function AppShell() {
       return prev;
     });
     setSessionKey((k) => k + 1);
-    setBranchTree([]);
-    setBranchActiveLeafId(null);
     setSystemPrompt(null);
     setActiveTopPanel(null);
     router.replace("/", { scroll: false });
@@ -156,8 +251,6 @@ export function AppShell() {
     setSelectedSession(null);
     setNewSessionCwd(cwd);
     setSessionKey((k) => k + 1);
-    setBranchTree([]);
-    setBranchActiveLeafId(null);
     setSystemPrompt(null);
     setActiveTopPanel(null);
     router.replace("/", { scroll: false });
@@ -193,8 +286,6 @@ export function AppShell() {
       setSelectedSession(null);
       setNewSessionCwd(cwd ?? null);
       setSessionKey((k) => k + 1);
-      setBranchTree([]);
-      setBranchActiveLeafId(null);
       setSystemPrompt(null);
       setActiveTopPanel(null);
       router.replace("/", { scroll: false });
@@ -249,7 +340,7 @@ export function AppShell() {
         onInitialRestoreDone={handleInitialRestoreDone}
         refreshKey={refreshKey}
         onSessionDeleted={handleSessionDeleted}
-        selectedCwd={selectedSession?.cwd ?? newSessionCwd ?? null}
+        selectedCwd={selectedSession?.cwd ?? newSessionCwd ?? activeCwd ?? null}
         onCwdChange={handleCwdChange}
         onOpenFile={handleOpenFile}
         explorerRefreshKey={explorerRefreshKey}
@@ -398,16 +489,6 @@ export function AppShell() {
           </button>
           {showChat && (
             <div style={{ display: "flex", alignItems: "stretch", height: "100%" }}>
-              <BranchNavigator
-                tree={branchTree}
-                activeLeafId={branchActiveLeafId}
-                onLeafChange={handleBranchLeafChange}
-                inline
-                containerRef={topBarRef}
-                open={activeTopPanel === "branches"}
-                onToggle={() => toggleTopPanel("branches")}
-                hasSession
-              />
               <button
                 ref={systemBtnRef}
                 onClick={() => toggleTopPanel("system")}
@@ -564,6 +645,142 @@ export function AppShell() {
 
         {/* Chat content */}
         <div style={{ flex: 1, overflow: "hidden", position: "relative" }}>
+          {/* Project selector — always visible top-left in content area */}
+          <div
+            ref={projectDropdownRef}
+            style={{
+              position: "absolute",
+              top: 12,
+              left: 12,
+              zIndex: 10,
+            }}
+          >
+            <button
+              type="button"
+              onClick={() => setProjectDropdownOpen((v) => !v)}
+              title={effectiveProjectCwd ?? "选择项目"}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+                maxWidth: 240,
+                height: 28,
+                border: "none",
+                background: "transparent",
+                color: "var(--text)",
+                padding: 0,
+                fontSize: 14,
+                fontWeight: 700,
+                outline: "none",
+                cursor: "pointer",
+              }}
+            >
+              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {projectOptions.find((project) => project.cwd === effectiveProjectCwd)?.label ?? "选择项目"}
+              </span>
+              <svg
+                width="14"
+                height="14"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2.2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                style={{ color: "var(--text-muted)", flexShrink: 0, transform: projectDropdownOpen ? "rotate(180deg)" : "none", transition: "transform 0.12s" }}
+              >
+                <polyline points="6 9 12 15 18 9" />
+              </svg>
+            </button>
+
+            {projectDropdownOpen && (
+              <div
+                style={{
+                  position: "absolute",
+                  top: 34,
+                  left: 0,
+                  width: 260,
+                  maxHeight: 320,
+                  overflowY: "auto",
+                  background: "var(--bg-panel)",
+                  border: "1px solid var(--border)",
+                  borderRadius: 10,
+                  boxShadow: "0 12px 28px rgba(0,0,0,0.16)",
+                  padding: 6,
+                }}
+              >
+                {projectOptions.map((project) => {
+                  const active = project.cwd === effectiveProjectCwd;
+                  return (
+                    <button
+                      key={project.cwd}
+                      type="button"
+                      onClick={() => {
+                        setProjectDropdownOpen(false);
+                        switchProject(project.cwd);
+                      }}
+                      title={project.cwd}
+                      style={{
+                        width: "100%",
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 8,
+                        padding: "8px 9px",
+                        border: "none",
+                        borderRadius: 7,
+                        background: active ? "var(--bg-selected)" : "transparent",
+                        color: active ? "var(--text)" : "var(--text-muted)",
+                        cursor: "pointer",
+                        textAlign: "left",
+                        fontSize: 12,
+                        fontWeight: active ? 700 : 500,
+                      }}
+                      onMouseEnter={(e) => { if (!active) e.currentTarget.style.background = "var(--bg-hover)"; }}
+                      onMouseLeave={(e) => { if (!active) e.currentTarget.style.background = "transparent"; }}
+                    >
+                      <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{project.label}</span>
+                      {active && (
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" style={{ color: "var(--accent)", flexShrink: 0 }}>
+                          <polyline points="20 6 9 17 4 12" />
+                        </svg>
+                      )}
+                    </button>
+                  );
+                })}
+                <div style={{ height: 1, background: "var(--border)", margin: "6px 4px" }} />
+                <button
+                  type="button"
+                  onClick={() => {
+                    setProjectDropdownOpen(false);
+                    void handleAddProjectFromTopBar();
+                  }}
+                  style={{
+                    width: "100%",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    padding: "8px 9px",
+                    border: "none",
+                    borderRadius: 7,
+                    background: "transparent",
+                    color: "var(--accent)",
+                    cursor: "pointer",
+                    textAlign: "left",
+                    fontSize: 12,
+                    fontWeight: 600,
+                  }}
+                  onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
+                    <line x1="12" y1="5" x2="12" y2="19" />
+                    <line x1="5" y1="12" x2="19" y2="12" />
+                  </svg>
+                  添加项目…
+                </button>
+              </div>
+            )}
+          </div>
           {showChat ? (
             <ChatWindow
               key={sessionKey}
@@ -574,7 +791,6 @@ export function AppShell() {
               onSessionForked={handleSessionForked}
               modelsRefreshKey={modelsRefreshKey}
               chatInputRef={chatInputRef}
-              onBranchDataChange={handleBranchDataChange}
               onSystemPromptChange={handleSystemPromptChange}
               onSessionStatsChange={handleSessionStatsChange}
               onContextUsageChange={handleContextUsageChange}
@@ -585,7 +801,7 @@ export function AppShell() {
                 从侧边栏中选择一个会话
               </div>
             ) : (
-              <div style={{ position: "absolute", top: 12, left: 12, display: "flex", alignItems: "flex-start", gap: 8, userSelect: "none", pointerEvents: "none" }}>
+              <div style={{ position: "absolute", top: 64, left: 12, display: "flex", alignItems: "flex-start", gap: 8, userSelect: "none", pointerEvents: "none" }}>
                 <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" style={{ opacity: 0.7, flexShrink: 0 }}>
                   <line x1="20" y1="12" x2="4" y2="12" /><polyline points="10 6 4 12 10 18" />
                 </svg>
