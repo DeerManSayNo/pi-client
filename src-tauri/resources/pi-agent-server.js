@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-const { spawn } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 
@@ -10,25 +9,15 @@ if (!resourceDir) {
   process.exit(1);
 }
 
+// Set env before requiring server.js so it picks up correct config
+process.env.HOSTNAME = "127.0.0.1";
+process.env.NODE_ENV = "production";
+process.env.PORT = port;
+
 const bundledStandaloneDir = path.join(resourceDir, "app", "standalone");
 const standaloneDir = fs.existsSync(path.join(bundledStandaloneDir, "server.js"))
   ? bundledStandaloneDir
   : path.join(resourceDir, ".next", "standalone");
-const child = spawn(process.execPath, [path.join(standaloneDir, "server.js")], {
-  cwd: standaloneDir,
-  stdio: "inherit",
-  env: {
-    ...process.env,
-    HOSTNAME: "127.0.0.1",
-    NODE_ENV: "production",
-    PORT: port,
-  },
-});
 
-const shutdown = () => child.kill();
-process.on("SIGTERM", shutdown);
-process.on("SIGINT", shutdown);
-child.on("exit", (code, signal) => {
-  if (signal) process.kill(process.pid, signal);
-  process.exit(code ?? 0);
-});
+process.chdir(standaloneDir);
+require(path.join(standaloneDir, "server.js"));

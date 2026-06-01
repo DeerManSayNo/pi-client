@@ -1,21 +1,38 @@
 #[cfg(not(debug_assertions))]
+use std::io::{Read, Write};
+#[cfg(not(debug_assertions))]
+use std::net::TcpStream;
+#[cfg(not(debug_assertions))]
+use std::process::Stdio;
+#[cfg(not(debug_assertions))]
 use std::time::Duration;
-use tauri::{WebviewUrl, WebviewWindowBuilder};
-#[cfg(not(debug_assertions))]
-use tauri::Manager;
-#[cfg(not(debug_assertions))]
-use tauri_plugin_shell::ShellExt;
+use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 
 #[cfg(not(debug_assertions))]
-fn wait_for_server(url: &str) {
+fn find_available_port() -> std::io::Result<u16> {
+    std::net::TcpListener::bind("127.0.0.1:0").and_then(|listener| listener.local_addr().map(|addr| addr.port()))
+}
+
+#[cfg(not(debug_assertions))]
+fn wait_for_server(port: u16) {
     for _ in 0..100 {
-        if std::net::TcpStream::connect("127.0.0.1:30141").is_ok() {
-            return;
+        if let Ok(mut stream) = TcpStream::connect(("127.0.0.1", port)) {
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
+            let _ = stream.write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+
+            let mut buffer = [0; 64];
+            if stream.read(&mut buffer).is_ok_and(|size| {
+                std::str::from_utf8(&buffer[..size]).is_ok_and(|response| {
+                    response.starts_with("HTTP/1.1 200") || response.starts_with("HTTP/1.1 30")
+                })
+            }) {
+                return;
+            }
         }
         std::thread::sleep(Duration::from_millis(100));
     }
 
-    eprintln!("Timed out waiting for {url}");
+    eprintln!("Timed out waiting for http://127.0.0.1:{port}");
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -24,24 +41,57 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            #[cfg(not(debug_assertions))]
-            {
-                let resource_dir = app.path().resource_dir()?;
-                let (_rx, child) = app
-                    .shell()
-                    .sidecar("node")?
-                    .args([resource_dir.join("pi-agent-server.js")])
-                    .env("PI_AGENT_RESOURCE_DIR", resource_dir)
-                    .env("PORT", "30141")
-                    .spawn()?;
-                app.manage(child);
-                wait_for_server("http://127.0.0.1:30141");
-            }
-
             let webview_url = if cfg!(debug_assertions) {
-                "http://localhost:30141"
+                "http://localhost:30141".to_string()
             } else {
-                "http://127.0.0.1:30141"
+                #[cfg(not(debug_assertions))]
+                {
+                    let port = find_available_port()?;
+                    let resource_dir = app.path().resource_dir()?;
+
+                    // Resolve node binary — lives alongside the main executable in
+                    // Contents/MacOS on macOS, or in the same dir on other platforms.
+                    let exe_dir = std::env::current_exe()
+                        .ok()
+                        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+                        .unwrap_or_else(|| resource_dir.clone());
+                    let bundle_node = exe_dir.join("node");
+                    let server_js = resource_dir.join("pi-agent-server.js");
+
+                    // On macOS, executables inside Contents/MacOS/ trigger a Dock
+                    // icon when launched. Copy the node binary to a temp location
+                    // outside the app bundle so macOS treats it as a plain daemon.
+                    #[cfg(target_os = "macos")]
+                    let spawn_node = {
+                        let tmp = std::env::temp_dir().join("pi-agent-node");
+                        std::fs::create_dir_all(&tmp).ok();
+                        let dest = tmp.join("node");
+                        // Only copy if not already present (avoids repeated I/O on restart)
+                        if !dest.exists() {
+                            std::fs::copy(&bundle_node, &dest).ok();
+                            use std::os::unix::fs::PermissionsExt;
+                            std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755)).ok();
+                        }
+                        dest
+                    };
+                    #[cfg(not(target_os = "macos"))]
+                    let spawn_node = bundle_node;
+
+                    let mut cmd = std::process::Command::new(&spawn_node);
+                    cmd.arg(&server_js)
+                        .env("PI_AGENT_RESOURCE_DIR", &resource_dir)
+                        .env("PORT", port.to_string())
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null());
+
+                    cmd.spawn()?;
+
+                    wait_for_server(port);
+                    format!("http://127.0.0.1:{port}")
+                }
+                #[cfg(debug_assertions)]
+                unreachable!()
             };
 
             let window = WebviewWindowBuilder::new(

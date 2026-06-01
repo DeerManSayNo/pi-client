@@ -1,10 +1,34 @@
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { existsSync } from "fs";
-import { dirname, join } from "path";
+import { dirname, join, delimiter } from "path";
 import { execPath } from "process";
 
 const execFileAsync = promisify(execFile);
+
+const EXTRA_PATH_DIRS = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"];
+
+function withNpxPath(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const currentPath = env.PATH || env.Path || env.path || "";
+  const parts = currentPath.split(delimiter).filter(Boolean);
+  for (const dir of EXTRA_PATH_DIRS) {
+    if (!parts.includes(dir)) parts.push(dir);
+  }
+  return { ...env, PATH: parts.join(delimiter) };
+}
+
+function findOnPath(command: string, env: NodeJS.ProcessEnv): string | null {
+  const paths = (env.PATH || "").split(delimiter).filter(Boolean);
+  for (const dir of paths) {
+    const candidate = join(dir, command);
+    try {
+      if (existsSync(candidate)) return candidate;
+    } catch {
+      // ignore
+    }
+  }
+  return null;
+}
 
 /**
  * Locate `npx-cli.js` shipped with the running Node.js installation.
@@ -50,13 +74,15 @@ export interface RunNpxResult {
  * shell, so user-controlled arguments are never interpreted as shell syntax.
  */
 export async function runNpx(args: string[], opts: RunNpxOptions = {}): Promise<RunNpxResult> {
+  const env = withNpxPath(opts.env);
   const npxCli = findNpxCli();
+  const npxBin = findOnPath(process.platform === "win32" ? "npx.cmd" : "npx", env);
   const { command, commandArgs } = npxCli
     ? { command: execPath, commandArgs: [npxCli, ...args] }
-    : { command: "npx", commandArgs: args };
+    : { command: npxBin || "npx", commandArgs: args };
   return execFileAsync(command, commandArgs, {
     timeout: opts.timeout,
     cwd: opts.cwd,
-    env: opts.env,
+    env,
   });
 }

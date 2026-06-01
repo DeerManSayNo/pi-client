@@ -1,8 +1,41 @@
 import { NextResponse } from "next/server";
 import { existsSync, readFileSync, writeFileSync } from "fs";
+import { homedir } from "os";
 import { DefaultResourceLoader, getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
+import path from "path";
 
 export const dynamic = "force-dynamic";
+
+function getGlobalSkillDirs(): string[] {
+  const home = homedir();
+  return [
+    path.join(home, ".pi", "agent", "skills"),
+    path.join(home, ".agents", "skills"),
+  ];
+}
+
+function isGlobalSkill(filePath: string): boolean {
+  const globalDirs = getGlobalSkillDirs();
+  for (const dir of globalDirs) {
+    if (filePath.startsWith(dir + path.sep) || filePath.startsWith(dir + "/")) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function isProjectSkill(filePath: string, cwd: string): boolean {
+  const resolved = path.resolve(filePath);
+  const resolvedCwd = path.resolve(cwd);
+  return resolved.startsWith(resolvedCwd + path.sep) || resolved.startsWith(resolvedCwd + "/");
+}
+
+interface SkillWithSource {
+  name: string;
+  description: string;
+  filePath: string;
+  source: "global" | "project";
+}
 
 // GET /api/skills?cwd=<path>
 // Uses DefaultResourceLoader (same logic as AgentSession startup) so settings.json
@@ -16,7 +49,25 @@ export async function GET(req: Request) {
     const loader = new DefaultResourceLoader({ cwd, agentDir: getAgentDir() });
     await loader.reload();
     const { skills, diagnostics } = loader.getSkills();
-    return NextResponse.json({ skills, diagnostics });
+
+    // Categorize skills as global or project
+    const skillsWithSource: SkillWithSource[] = skills.map((skill) => {
+      let source: "global" | "project" = "project";
+      if (isGlobalSkill(skill.filePath)) {
+        source = "global";
+      } else if (isProjectSkill(skill.filePath, cwd)) {
+        source = "project";
+      }
+      // Skills from packages or settings paths default to "project"
+      return {
+        name: skill.name,
+        description: skill.description,
+        filePath: skill.filePath,
+        source,
+      };
+    });
+
+    return NextResponse.json({ skills: skillsWithSource, diagnostics });
   } catch (e) {
     return NextResponse.json({ error: String(e) }, { status: 500 });
   }

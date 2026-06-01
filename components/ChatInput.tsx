@@ -14,6 +14,12 @@ interface ModelOption {
   name: string;
 }
 
+interface SkillOption {
+  name: string;
+  description: string;
+  source: "global" | "project";
+}
+
 interface Props {
   onSend: (message: string, images?: AttachedImage[]) => void;
   onAbort: () => void;
@@ -37,6 +43,7 @@ interface Props {
   retryInfo?: { attempt: number; maxAttempts: number; errorMessage?: string } | null;
   soundEnabled?: boolean;
   onSoundToggle?: () => void;
+  cwd?: string | null;
 }
 
 export interface ChatInputHandle {
@@ -65,6 +72,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   thinkingLevel, onThinkingLevelChange, availableThinkingLevels, thinkingLevelMap,
   retryInfo,
   soundEnabled, onSoundToggle,
+  cwd,
 }: Props, ref) {
   const [value, setValue] = useState("");
   const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
@@ -72,6 +80,14 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const [toolDropdownOpen, setToolDropdownOpen] = useState(false);
   const [thinkingDropdownOpen, setThinkingDropdownOpen] = useState(false);
   const [attachedImages, setAttachedImages] = useState<AttachedImage[]>([]);
+
+  // Skill picker state
+  const [skillPickerOpen, setSkillPickerOpen] = useState(false);
+  const [skills, setSkills] = useState<SkillOption[]>([]);
+  const [skillPickerRect, setSkillPickerRect] = useState<{ top: number; left: number; width: number } | null>(null);
+  const [skillPickerIndex, setSkillPickerIndex] = useState(0);
+  const skillPickerRef = useRef<HTMLDivElement>(null);
+  const skillsFetchRef = useRef<AbortController | null>(null);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
@@ -166,7 +182,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   }, []);
 
   const handleSend = useCallback(() => {
-    const shouldBlock = isComposingRef.current || suppressNextEnterRef.current || Date.now() - lastCompositionEndAtRef.current < 500;
+    const shouldBlock = isComposingRef.current || suppressNextEnterRef.current || Date.now() - lastCompositionEndAtRef.current < 80;
     if (shouldBlock) return;
 
     const currentValue = textareaRef.current?.value ?? value;
@@ -201,10 +217,64 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     }
   }, []);
 
+  const fetchSkills = useCallback(async (cwd: string) => {
+    if (skillsFetchRef.current) {
+      skillsFetchRef.current.abort();
+    }
+    const controller = new AbortController();
+    skillsFetchRef.current = controller;
+    try {
+      const res = await fetch(`/api/skills?cwd=${encodeURIComponent(cwd)}`, { signal: controller.signal });
+      if (!res.ok) return;
+      const data = await res.json();
+      if (!data.skills) return;
+      setSkills(data.skills.filter((s: SkillOption) => !s.name?.startsWith("find-skills")));
+    } catch {
+      // ignore abort or fetch errors
+    }
+  }, []);
+
+  const closeSkillPicker = useCallback(() => {
+    setSkillPickerOpen(false);
+    setSkillPickerIndex(0);
+  }, []);
+
+  const selectSkill = useCallback((skill: SkillOption) => {
+    const ta = textareaRef.current;
+    const currentValue = ta?.value ?? value;
+    // Replace the leading /... text with /skill:name 
+    const rest = currentValue.slice(currentValue.startsWith("/") ? currentValue.indexOf(" ") > 0 ? currentValue.indexOf(" ") : currentValue.length : 0);
+    const newVal = `/skill:${skill.name} ${rest}`.trimEnd() + " ";
+    setValue(newVal);
+    closeSkillPicker();
+    requestAnimationFrame(() => {
+      if (!ta) return;
+      ta.focus();
+      ta.setSelectionRange(newVal.length, newVal.length);
+    });
+  }, [value, closeSkillPicker]);
+
   const handleTextChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
     cancelPendingEnterSend();
-    setValue(e.target.value);
-  }, [cancelPendingEnterSend]);
+    const newValue = e.target.value;
+    setValue(newValue);
+
+    // Skill picker: open when value starts with /
+    if (cwd && newValue.startsWith("/") && !newValue.includes(" ") && !newValue.startsWith("/skill:")) {
+      const ta = textareaRef.current;
+      if (ta) {
+        const rect = ta.getBoundingClientRect();
+        setSkillPickerRect({ top: rect.top, left: rect.left, width: rect.width });
+      }
+      if (!skillPickerOpen) {
+        fetchSkills(cwd);
+        setSkillPickerOpen(true);
+      }
+      setSkillPickerIndex(0);
+    } else {
+      if (skillPickerOpen) closeSkillPicker();
+    }
+  }, [cancelPendingEnterSend, skillPickerOpen, cwd, fetchSkills, closeSkillPicker]);
 
   const handleCompositionStart = useCallback(() => {
     cancelPendingEnterSend();
@@ -234,7 +304,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     suppressNextEnterTimerRef.current = setTimeout(() => {
       suppressNextEnterRef.current = false;
       suppressNextEnterTimerRef.current = null;
-    }, 500);
+    }, 80);
   }, [cancelPendingEnterSend]);
 
   const runSendAction = useCallback(() => {
@@ -249,14 +319,69 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     cancelPendingEnterSend();
     pendingEnterSendTimerRef.current = setTimeout(() => {
       pendingEnterSendTimerRef.current = null;
-      const shouldBlock = isComposingRef.current || suppressNextEnterRef.current || Date.now() - lastCompositionEndAtRef.current < 500;
+      const shouldBlock = isComposingRef.current || suppressNextEnterRef.current || Date.now() - lastCompositionEndAtRef.current < 80;
       if (shouldBlock) return;
       runSendAction();
     }, 80);
   }, [cancelPendingEnterSend, runSendAction]);
 
+  // Filtered skills for the picker
+  const skillPickerFilter = (() => {
+    if (!value.startsWith("/") || value.startsWith("/skill:")) return "";
+    return value.slice(1).toLowerCase();
+  })();
+
+  const filteredSkills = (() => {
+    if (!skillPickerFilter) return skills;
+    const q = skillPickerFilter;
+    return skills.filter(
+      (s) => s.name.toLowerCase().includes(q) || s.description.toLowerCase().includes(q)
+    );
+  })();
+
+  const globalSkills = filteredSkills.filter((s) => s.source === "global");
+  const projectSkills = filteredSkills.filter((s) => s.source === "project");
+
+  // Reset skill picker index when filter changes
+  useEffect(() => {
+    setSkillPickerIndex(0);
+  }, [skillPickerFilter]);
+
+  const handleSkillPickerKeyDown = useCallback((e: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (filteredSkills.length === 0) return;
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setSkillPickerIndex((i) => Math.min(i + 1, filteredSkills.length - 1));
+      return;
+    }
+    if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setSkillPickerIndex((i) => Math.max(i - 1, 0));
+      return;
+    }
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      if (filteredSkills[skillPickerIndex]) {
+        selectSkill(filteredSkills[skillPickerIndex]);
+      }
+      return;
+    }
+    if (e.key === "Escape") {
+      e.preventDefault();
+      closeSkillPicker();
+      return;
+    }
+    // Let other keys pass through for normal typing
+  }, [filteredSkills, skillPickerIndex, selectSkill, closeSkillPicker]);
+
   const handleKeyDown = useCallback(
     (e: KeyboardEvent<HTMLTextAreaElement>) => {
+      // Handle skill picker keys first
+      if (skillPickerOpen) {
+        handleSkillPickerKeyDown(e);
+        return;
+      }
+
       const nativeEvent = e.nativeEvent as KeyboardEvent<HTMLTextAreaElement>["nativeEvent"] & {
         keyCode?: number;
         which?: number;
@@ -267,7 +392,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         nativeEvent.keyCode === 229 ||
         nativeEvent.which === 229 ||
         e.key === "Process";
-      const isImmediatelyAfterComposition = Date.now() - lastCompositionEndAtRef.current < 500;
+      const isImmediatelyAfterComposition = Date.now() - lastCompositionEndAtRef.current < 80;
 
       if (isImeEvent) {
         suppressNextEnterRef.current = true;
@@ -298,7 +423,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         }
       }
     },
-    [cancelPendingEnterSend, scheduleEnterSend]
+    [cancelPendingEnterSend, scheduleEnterSend, skillPickerOpen, handleSkillPickerKeyDown]
   );
 
   const handleInput = useCallback(() => {
@@ -358,6 +483,9 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       }
       if (thinkingDropdownRef.current && !thinkingDropdownRef.current.contains(e.target as Node)) {
         setThinkingDropdownOpen(false);
+      }
+      if (skillPickerRef.current && !skillPickerRef.current.contains(e.target as Node)) {
+        setSkillPickerOpen(false);
       }
     };
     document.addEventListener("mousedown", handler);
@@ -434,6 +562,101 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
           </div>
         )}
 
+        {/* Skill picker dropdown */}
+        {skillPickerOpen && skillPickerRect && (() => {
+          const viewportHeight = window.visualViewport?.height ?? window.innerHeight;
+          const totalSkills = filteredSkills.length;
+          if (totalSkills === 0) return null;
+          const bottom = viewportHeight - skillPickerRect.top + 6;
+          const maxH = Math.max(120, Math.min(skillPickerRect.top - 8, viewportHeight * 0.5));
+          return (
+            <div ref={skillPickerRef} style={{
+              position: "fixed",
+              bottom, left: skillPickerRect.left,
+              zIndex: 501, background: "var(--bg)", border: "1px solid var(--border)",
+              borderRadius: 8, boxShadow: "0 -4px 16px rgba(0,0,0,0.12)",
+              overflow: "hidden", width: "max-content", minWidth: Math.max(skillPickerRect.width, 320), maxWidth: 480,
+              maxHeight: maxH, overflowY: "auto",
+            }}>
+              <div style={{ padding: "5px 12px", fontSize: 10, fontWeight: 600, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.07em" }}>
+                选择技能（使用 ↑↓ 导航，Enter 选择，Esc 关闭）
+              </div>
+              {globalSkills.length > 0 && (
+                <>
+                  <div style={{ padding: "4px 12px 2px", fontSize: 10, fontWeight: 600, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.05em", borderTop: "1px solid var(--border)" }}>
+                    全局技能
+                  </div>
+                  {globalSkills.map((skill, gi) => {
+                    const absIdx = gi;
+                    const isActive = absIdx === skillPickerIndex;
+                    return (
+                      <button
+                        key={skill.name}
+                        onClick={() => selectSkill(skill)}
+                        style={{
+                          display: "flex", alignItems: "flex-start", gap: 8,
+                          width: "100%", padding: "7px 12px",
+                          background: isActive ? "var(--bg-selected)" : "none",
+                          border: "none",
+                          color: isActive ? "var(--text)" : "var(--text-muted)",
+                          cursor: "pointer", fontSize: 12, textAlign: "left",
+                          fontWeight: isActive ? 500 : 400,
+                          lineHeight: 1.5,
+                        }}
+                        onMouseEnter={(e) => { setSkillPickerIndex(absIdx); e.currentTarget.style.background = "var(--bg-hover)"; }}
+                        onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.background = "none"; }}
+                      >
+                        <span style={{ flexShrink: 0, fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--accent)", minWidth: "fit-content" }}>
+                          /skill:{skill.name}
+                        </span>
+                        <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {skill.description}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </>
+              )}
+              {projectSkills.length > 0 && (
+                <>
+                  <div style={{ padding: "4px 12px 2px", fontSize: 10, fontWeight: 600, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.05em", borderTop: "1px solid var(--border)" }}>
+                    项目技能
+                  </div>
+                  {projectSkills.map((skill, pi) => {
+                    const absIdx = globalSkills.length + pi;
+                    const isActive = absIdx === skillPickerIndex;
+                    return (
+                      <button
+                        key={skill.name}
+                        onClick={() => selectSkill(skill)}
+                        style={{
+                          display: "flex", alignItems: "flex-start", gap: 8,
+                          width: "100%", padding: "7px 12px",
+                          background: isActive ? "var(--bg-selected)" : "none",
+                          border: "none",
+                          color: isActive ? "var(--text)" : "var(--text-muted)",
+                          cursor: "pointer", fontSize: 12, textAlign: "left",
+                          fontWeight: isActive ? 500 : 400,
+                          lineHeight: 1.5,
+                        }}
+                        onMouseEnter={(e) => { setSkillPickerIndex(absIdx); e.currentTarget.style.background = "var(--bg-hover)"; }}
+                        onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.background = "none"; }}
+                      >
+                        <span style={{ flexShrink: 0, fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--accent)", minWidth: "fit-content" }}>
+                          /skill:{skill.name}
+                        </span>
+                        <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {skill.description}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </>
+              )}
+            </div>
+          );
+        })()}
+
         {/* Main input */}
         <div
           style={{
@@ -460,6 +683,10 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
             onCompositionStart={handleCompositionStart}
             onCompositionUpdate={handleCompositionUpdate}
             onCompositionEnd={handleCompositionEnd}
+            onBlur={() => {
+              // Delay close so click on skill picker item can fire first
+              setTimeout(() => setSkillPickerOpen(false), 150);
+            }}
             placeholder={
               isStreaming && (onSteer || onFollowUp)
                 ? "Steer 立即注入 / Follow-up 排队…"

@@ -1,7 +1,7 @@
 "use client";
 
 import { open } from "@tauri-apps/plugin-dialog";
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback, useRef, useMemo, type CSSProperties } from "react";
 import type { SessionInfo } from "@/lib/types";
 import { FileExplorer } from "./FileExplorer";
 
@@ -34,28 +34,85 @@ function formatRelativeTime(dateStr: string): string {
   return date.toLocaleDateString();
 }
 
-/** Return the 5 most recently active cwds across all sessions */
-function getRecentCwds(sessions: SessionInfo[]): string[] {
-  const latestByCwd = new Map<string, string>(); // cwd -> most recent modified
-  for (const s of sessions) {
-    if (!s.cwd) continue;
-    const prev = latestByCwd.get(s.cwd);
-    if (!prev || s.modified > prev) {
-      latestByCwd.set(s.cwd, s.modified);
-    }
-  }
-  return [...latestByCwd.entries()]
-    .sort((a, b) => b[1].localeCompare(a[1]))
-    .slice(0, 5)
-    .map(([cwd]) => cwd);
+interface ProjectGroup {
+  cwd: string;
+  sessions: SessionInfo[];
+  latestModified: string;
+  displayName?: string;
+  note?: string;
+  pinned?: boolean;
 }
 
-function shortenCwd(cwd: string, homeDir?: string): string {
-  const path = (homeDir && cwd.startsWith(homeDir)) ? "~" + cwd.slice(homeDir.length) : cwd;
-  const sep = path.includes("/") ? "/" : "\\";
-  const parts = path.split(sep).filter(Boolean);
-  if (parts.length <= 2) return path;
-  return "…/" + parts.slice(-2).join(sep);
+const PROJECT_META_STORAGE_KEY = "pi-agent.project-meta";
+const CUSTOM_CWDS_STORAGE_KEY = "pi-agent.custom-cwds";
+
+interface ProjectMeta {
+  hiddenCwds: string[];
+  pinnedCwds: string[];
+  notes: Record<string, string>;
+  defaultPinInitializedCwds: string[];
+}
+
+function readJson<T>(key: string, fallback: T): T {
+  if (typeof window === "undefined") return fallback;
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(key) ?? "null") as unknown;
+    return parsed && typeof parsed === "object" ? parsed as T : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function writeJson<T>(key: string, value: T) {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(key, JSON.stringify(value));
+}
+
+function readCustomCwds(): string[] {
+  const value = readJson<unknown[]>(CUSTOM_CWDS_STORAGE_KEY, []);
+  return value.filter((v): v is string => typeof v === "string" && v.trim().length > 0);
+}
+
+function writeCustomCwds(cwds: string[]) {
+  writeJson(CUSTOM_CWDS_STORAGE_KEY, [...new Set(cwds)]);
+}
+
+function readProjectMeta(): ProjectMeta {
+  const meta = readJson<Partial<ProjectMeta>>(PROJECT_META_STORAGE_KEY, {});
+  return {
+    hiddenCwds: Array.isArray(meta.hiddenCwds) ? meta.hiddenCwds.filter((v): v is string => typeof v === "string") : [],
+    pinnedCwds: Array.isArray(meta.pinnedCwds) ? meta.pinnedCwds.filter((v): v is string => typeof v === "string") : [],
+    notes: meta.notes && typeof meta.notes === "object" ? meta.notes as Record<string, string> : {},
+    defaultPinInitializedCwds: Array.isArray(meta.defaultPinInitializedCwds) ? meta.defaultPinInitializedCwds.filter((v): v is string => typeof v === "string") : [],
+  };
+}
+
+function writeProjectMeta(meta: ProjectMeta) {
+  writeJson(PROJECT_META_STORAGE_KEY, meta);
+}
+
+/** Group projects by cwd and sort by their newest message/session activity. */
+function buildProjectGroups(sessions: SessionInfo[]): ProjectGroup[] {
+  const byCwd = new Map<string, SessionInfo[]>();
+  for (const s of sessions) {
+    if (!s.cwd) continue;
+    const list = byCwd.get(s.cwd) ?? [];
+    list.push(s);
+    byCwd.set(s.cwd, list);
+  }
+
+  return [...byCwd.entries()]
+    .map(([cwd, list]) => {
+      const sorted = [...list].sort((a, b) => b.modified.localeCompare(a.modified));
+      return { cwd, sessions: sorted, latestModified: sorted[0]?.modified ?? "" };
+    })
+    .sort((a, b) => b.latestModified.localeCompare(a.latestModified));
+}
+
+function getProjectName(cwd: string): string {
+  const normalized = cwd.replace(/[\\/]+$/, "");
+  const parts = normalized.split(/[\\/]/).filter(Boolean);
+  return parts.length > 0 ? parts[parts.length - 1] : cwd;
 }
 
 
@@ -202,9 +259,13 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedCwd, setSelectedCwd] = useState<string | null>(null);
-  const [homeDir, setHomeDir] = useState<string>("");
-  const [dropdownOpen, setDropdownOpen] = useState(false);
-  const dropdownRef = useRef<HTMLDivElement>(null);
+  const [defaultCwd, setDefaultCwd] = useState<string | null>(null);
+  const [customCwds, setCustomCwds] = useState<string[]>(() => readCustomCwds());
+  const [projectMeta, setProjectMeta] = useState<ProjectMeta>(() => readProjectMeta());
+  const [projectMenu, setProjectMenu] = useState<{ cwd: string; x: number; y: number } | null>(null);
+  const [expandedCwds, setExpandedCwds] = useState<Set<string>>(new Set());
+  const [showAllCwds, setShowAllCwds] = useState<Set<string>>(new Set());
+  const autoExpandedRef = useRef(false);
   const [explorerOpen, setExplorerOpen] = useState(true);
   const [explorerKey, setExplorerKey] = useState(0);
   const [sessionRefreshDone, setSessionRefreshDone] = useState(false);
@@ -246,30 +307,40 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     if (explorerRefreshKey !== undefined) setExplorerKey((k) => k + 1);
   }, [explorerRefreshKey]);
 
-  useEffect(() => {
-    fetch("/api/home").then((r) => r.json()).then((d: { home?: string }) => {
-      if (d.home) setHomeDir(d.home);
-    }).catch(() => {});
-  }, []);
-
   const restoredRef = useRef(false);
 
   useEffect(() => {
     onCwdChange?.(selectedCwd);
   }, [selectedCwd, onCwdChange]);
 
-  const handleDefaultCwd = useCallback(async () => {
+  const ensureDefaultCwd = useCallback(async () => {
+    if (defaultCwd) return defaultCwd;
     try {
       const res = await fetch("/api/default-cwd", { method: "POST" });
       const data = await res.json() as { cwd?: string; error?: string };
       if (data.cwd) {
-        setSelectedCwd(data.cwd);
-        setDropdownOpen(false);
+        setDefaultCwd(data.cwd);
+        return data.cwd;
       }
     } catch {
       // ignore
     }
-  }, []);
+    return null;
+  }, [defaultCwd]);
+
+  const handleDefaultCwd = useCallback(async () => {
+    const cwd = await ensureDefaultCwd();
+    if (cwd) {
+      setSelectedCwd(cwd);
+      setExpandedCwds((prev) => new Set(prev).add(cwd));
+    }
+  }, [ensureDefaultCwd]);
+
+  useEffect(() => {
+    if (!loading && !defaultCwd) {
+      void ensureDefaultCwd();
+    }
+  }, [loading, defaultCwd, ensureDefaultCwd]);
 
   // Auto-select cwd and restore session from URL on first load
   useEffect(() => {
@@ -287,9 +358,9 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     }
 
     if (selectedCwd === null) {
-      const cwds = getRecentCwds(allSessions);
-      if (cwds.length > 0) {
-        setSelectedCwd(cwds[0]);
+      const projects = buildProjectGroups(allSessions);
+      if (projects.length > 0) {
+        setSelectedCwd(projects[0].cwd);
       } else {
         handleDefaultCwd();
       }
@@ -305,38 +376,193 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
 
     if (typeof selected === "string") {
       setSelectedCwd(selected);
-      setDropdownOpen(false);
+      setExpandedCwds((prev) => new Set(prev).add(selected));
+      setCustomCwds((prev) => {
+        const next = [selected, ...prev.filter((cwd) => cwd !== selected)];
+        writeCustomCwds(next);
+        return next;
+      });
     }
   }, []);
 
-  // Close dropdown on outside click
-  useEffect(() => {
-    const handler = (e: MouseEvent) => {
-      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
-        setDropdownOpen(false);
-      }
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, []);
-
-  const handleNewSession = useCallback(() => {
-    if (!selectedCwd) return;
+  const handleNewSession = useCallback(async () => {
+    const recentCwd = buildProjectGroups(allSessions)[0]?.cwd;
+    const cwd = selectedCwdProp ?? selectedCwd ?? recentCwd ?? await ensureDefaultCwd();
+    if (!cwd) return;
     // Generate a temporary UUID client-side — no backend call needed.
     // Pi will be spawned lazily when the user sends the first message.
     const tempId = typeof crypto.randomUUID === "function"
       ? crypto.randomUUID()
       : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
-    onNewSession?.(tempId, selectedCwd);
-  }, [selectedCwd, onNewSession]);
+    onNewSession?.(tempId, cwd);
+  }, [selectedCwdProp, selectedCwd, allSessions, ensureDefaultCwd, onNewSession]);
 
-  const recentCwds = getRecentCwds(allSessions);
-  const filteredSessions = selectedCwd
-    ? allSessions.filter((s) => s.cwd === selectedCwd)
-    : allSessions;
+  const sessionProjects = useMemo(() => buildProjectGroups(allSessions), [allSessions]);
+  const projects = useMemo(() => {
+    const byCwd = new Map<string, ProjectGroup>();
+    for (const project of sessionProjects) byCwd.set(project.cwd, project);
+    for (const cwd of customCwds) {
+      if (!byCwd.has(cwd)) byCwd.set(cwd, { cwd, sessions: [], latestModified: "" });
+    }
+    if (defaultCwd && !byCwd.has(defaultCwd)) {
+      byCwd.set(defaultCwd, { cwd: defaultCwd, sessions: [], latestModified: "" });
+    }
 
-  // Build parent-child tree within the filtered set
-  const sessionTree = buildSessionTree(filteredSessions);
+    return [...byCwd.values()]
+      .filter((project) => project.cwd === defaultCwd || !projectMeta.hiddenCwds.includes(project.cwd))
+      .map((project) => ({
+        ...project,
+        displayName: project.cwd === defaultCwd ? "默认" : project.displayName,
+        note: projectMeta.notes[project.cwd]?.trim() || undefined,
+        pinned: projectMeta.pinnedCwds.includes(project.cwd),
+      }))
+      .sort((a, b) => {
+        const aIdx = projectMeta.pinnedCwds.indexOf(a.cwd);
+        const bIdx = projectMeta.pinnedCwds.indexOf(b.cwd);
+        const aPinned = aIdx !== -1;
+        const bPinned = bIdx !== -1;
+        if (aPinned !== bPinned) return aPinned ? -1 : 1;
+        if (aPinned) return aIdx - bIdx;
+        return b.latestModified.localeCompare(a.latestModified);
+      });
+  }, [sessionProjects, customCwds, defaultCwd, projectMeta]);
+  const activeSelectedCwd = selectedCwdProp ?? selectedCwd;
+
+  const updateProjectMeta = useCallback((updater: (prev: ProjectMeta) => ProjectMeta) => {
+    setProjectMeta((prev) => {
+      const next = updater(prev);
+      writeProjectMeta(next);
+      return next;
+    });
+  }, []);
+
+  const handleProjectNote = useCallback((cwd: string) => {
+    const current = projectMeta.notes[cwd] ?? "";
+    const nextNote = window.prompt("项目备注", current);
+    if (nextNote === null) return;
+    updateProjectMeta((prev) => ({
+      ...prev,
+      notes: { ...prev.notes, [cwd]: nextNote.trim() },
+    }));
+  }, [projectMeta.notes, updateProjectMeta]);
+
+  useEffect(() => {
+    if (!defaultCwd || projectMeta.defaultPinInitializedCwds.includes(defaultCwd)) return;
+    updateProjectMeta((prev) => ({
+      ...prev,
+      pinnedCwds: prev.pinnedCwds.includes(defaultCwd) ? prev.pinnedCwds : [defaultCwd, ...prev.pinnedCwds],
+      defaultPinInitializedCwds: [...prev.defaultPinInitializedCwds, defaultCwd],
+    }));
+  }, [defaultCwd, projectMeta.defaultPinInitializedCwds, updateProjectMeta]);
+
+  const handleToggleProjectPinned = useCallback((cwd: string) => {
+    updateProjectMeta((prev) => {
+      const pinned = prev.pinnedCwds.includes(cwd)
+        ? prev.pinnedCwds.filter((item) => item !== cwd)
+        : [cwd, ...prev.pinnedCwds];
+      return { ...prev, pinnedCwds: pinned };
+    });
+  }, [updateProjectMeta]);
+
+  const handleRemoveProjectReference = useCallback((cwd: string) => {
+    if (cwd === defaultCwd) return;
+    updateProjectMeta((prev) => ({
+      ...prev,
+      hiddenCwds: prev.hiddenCwds.includes(cwd) ? prev.hiddenCwds : [...prev.hiddenCwds, cwd],
+      pinnedCwds: prev.pinnedCwds.filter((item) => item !== cwd),
+    }));
+    setCustomCwds((prev) => {
+      const next = prev.filter((item) => item !== cwd);
+      writeCustomCwds(next);
+      return next;
+    });
+    if ((selectedCwdProp ?? selectedCwd) === cwd) void handleDefaultCwd();
+  }, [defaultCwd, selectedCwdProp, selectedCwd, updateProjectMeta, handleDefaultCwd]);
+
+  const handleReselectProjectPath = useCallback(async (cwd: string) => {
+    const selected = await open({ directory: true, multiple: false, title: "重新选定项目路径" });
+    if (typeof selected !== "string" || selected === cwd) return;
+    updateProjectMeta((prev) => {
+      const notes = { ...prev.notes };
+      if (notes[cwd] && !notes[selected]) notes[selected] = notes[cwd];
+      delete notes[cwd];
+      return {
+        hiddenCwds: prev.hiddenCwds.includes(cwd) ? prev.hiddenCwds : [...prev.hiddenCwds, cwd],
+        pinnedCwds: prev.pinnedCwds.includes(cwd)
+          ? [selected, ...prev.pinnedCwds.filter((item) => item !== cwd && item !== selected)]
+          : prev.pinnedCwds.filter((item) => item !== selected),
+        notes,
+        defaultPinInitializedCwds: prev.defaultPinInitializedCwds.map((item) => item === cwd ? selected : item),
+      };
+    });
+    setCustomCwds((prev) => {
+      const next = [selected, ...prev.filter((item) => item !== cwd && item !== selected)];
+      writeCustomCwds(next);
+      return next;
+    });
+    setSelectedCwd(selected);
+    setExpandedCwds((prev) => {
+      const next = new Set(prev);
+      next.delete(cwd);
+      next.add(selected);
+      return next;
+    });
+  }, [updateProjectMeta]);
+
+  useEffect(() => {
+    if (!projectMenu) return;
+    const close = () => setProjectMenu(null);
+    window.addEventListener("click", close);
+    return () => {
+      window.removeEventListener("click", close);
+    };
+  }, [projectMenu]);
+
+  useEffect(() => {
+    if (!defaultCwd) return;
+    setExpandedCwds((prev) => {
+      if (prev.has(defaultCwd)) return prev;
+      const next = new Set(prev);
+      next.add(defaultCwd);
+      return next;
+    });
+  }, [defaultCwd]);
+
+  useEffect(() => {
+    if (loading || projects.length === 0 || autoExpandedRef.current) return;
+    autoExpandedRef.current = true;
+    setExpandedCwds((prev) => new Set([...prev, ...projects.slice(0, 3).map((p) => p.cwd)]));
+  }, [loading, projects]);
+
+  useEffect(() => {
+    if (!selectedSessionId) return;
+    const session = allSessions.find((s) => s.id === selectedSessionId);
+    if (!session?.cwd) return;
+    setExpandedCwds((prev) => {
+      if (prev.has(session.cwd)) return prev;
+      const next = new Set(prev);
+      next.add(session.cwd);
+      return next;
+    });
+  }, [selectedSessionId, allSessions]);
+
+  const toggleProject = useCallback((cwd: string) => {
+    setExpandedCwds((prev) => {
+      const next = new Set(prev);
+      if (next.has(cwd)) next.delete(cwd);
+      else next.add(cwd);
+      return next;
+    });
+  }, []);
+
+  const toggleShowAll = useCallback((cwd: string) => {
+    setShowAllCwds((prev) => {
+      const next = new Set(prev);
+      if (next.has(cwd)) next.delete(cwd);
+      else next.add(cwd);
+      return next;
+    });
+  }, []);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
@@ -353,13 +579,13 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
           <div style={{ display: "flex", gap: 6 }}>
             <button
               onClick={handleNewSession}
-              disabled={!selectedCwd}
+              disabled={false}
               style={{
                 display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
                 background: "var(--bg-hover)",
                 border: "1px solid var(--border)",
-                color: selectedCwd ? "var(--text-muted)" : "var(--text-dim)",
-                cursor: selectedCwd ? "pointer" : "not-allowed",
+                color: "var(--text-muted)",
+                cursor: "pointer",
                 height: 32,
                 paddingLeft: 10,
                 paddingRight: 12,
@@ -370,16 +596,15 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                 flexShrink: 0,
                 transition: "background 0.12s, color 0.12s, border-color 0.12s",
               }}
-              title={selectedCwd ? `在 ${selectedCwd} 中新建会话` : "请先选择项目目录"}
+              title={activeSelectedCwd ? `在 ${activeSelectedCwd} 中新建会话` : "新建会话（将使用最近项目或默认项目）"}
               onMouseEnter={(e) => {
-                if (!selectedCwd) return;
                 e.currentTarget.style.background = "var(--bg-selected)";
                 e.currentTarget.style.color = "var(--accent)";
                 e.currentTarget.style.borderColor = "rgba(37,99,235,0.35)";
               }}
               onMouseLeave={(e) => {
                 e.currentTarget.style.background = "var(--bg-hover)";
-                e.currentTarget.style.color = selectedCwd ? "var(--text-muted)" : "var(--text-dim)";
+                e.currentTarget.style.color = "var(--text-muted)";
                 e.currentTarget.style.borderColor = "var(--border)";
               }}
             >
@@ -431,150 +656,51 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
           </div>
         </div>
 
-        {/* CWD picker */}
-        <div ref={dropdownRef} style={{ position: "relative" }}>
+        <div style={{ display: "flex", gap: 6 }}>
           <button
-            onClick={() => setDropdownOpen((v) => !v)}
+            onClick={handleDefaultCwd}
             style={{
-              width: "100%",
+              flex: 1,
               display: "flex",
               alignItems: "center",
-              padding: "6px 10px",
-              background: selectedCwd ? "var(--bg-hover)" : "rgba(37,99,235,0.06)",
-              border: selectedCwd ? "1px solid var(--border)" : "1px solid rgba(37,99,235,0.4)",
+              justifyContent: "center",
+              gap: 6,
+              height: 30,
+              background: "var(--bg-hover)",
+              border: "1px solid var(--border)",
               borderRadius: 7,
+              color: "var(--text-muted)",
               cursor: "pointer",
-              fontSize: 12,
-              color: "var(--text)",
-              textAlign: "left",
-              transition: "border-color 0.15s, background 0.15s",
+              fontSize: 11,
+            }}
+            title="使用默认目录作为当前新建会话目录"
+          >
+            使用默认目录
+          </button>
+          <button
+            onClick={handleCustomPath}
+            style={{
+              flex: 1,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: 6,
+              height: 30,
+              background: "var(--bg-hover)",
+              border: "1px solid var(--border)",
+              borderRadius: 7,
+              color: "var(--text-muted)",
+              cursor: "pointer",
+              fontSize: 11,
             }}
           >
-            <span
-              style={{
-                flex: 1,
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
-                fontFamily: "var(--font-mono)",
-                fontSize: 11,
-                color: selectedCwd ? "var(--text)" : "var(--text-dim)",
-              }}
-              title={selectedCwd ?? ""}
-            >
-              {selectedCwd ? shortenCwd(selectedCwd, homeDir) : (initialSessionId && !restoredRef.current ? "" : "选择项目目录…")}
-            </span>
+            添加路径…
           </button>
-
-          {dropdownOpen && (
-            <div
-              style={{
-                position: "absolute",
-                top: "calc(100% + 4px)",
-                left: 0,
-                right: 0,
-                zIndex: 100,
-                background: "var(--bg)",
-                border: "1px solid var(--border)",
-                borderRadius: 8,
-                boxShadow: "0 6px 20px rgba(0,0,0,0.10)",
-                overflow: "hidden",
-              }}
-            >
-              {recentCwds.map((cwd) => (
-                <button
-                  key={cwd}
-                  onClick={() => {
-                    setSelectedCwd(cwd);
-                    setDropdownOpen(false);
-                  }}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 7,
-                    width: "100%",
-                    padding: "8px 10px",
-                    background: cwd === selectedCwd ? "var(--bg-selected)" : "none",
-                    border: "none",
-                    borderBottom: "1px solid var(--border)",
-                    color: cwd === selectedCwd ? "var(--text)" : "var(--text-muted)",
-                    cursor: "pointer",
-                    textAlign: "left",
-                    fontSize: 11,
-                    fontFamily: "var(--font-mono)",
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
-                  }}
-                  title={cwd}
-                >
-                  {cwd === selectedCwd && (
-                    <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
-                      <polyline points="1.5 5 4 7.5 8.5 2.5" />
-                    </svg>
-                  )}
-                  {cwd !== selectedCwd && <span style={{ width: 10, flexShrink: 0 }} />}
-                  <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{shortenCwd(cwd, homeDir)}</span>
-                </button>
-              ))}
-
-              {/* Default cwd shortcut */}
-              <button
-                onClick={(e) => { e.stopPropagation(); handleDefaultCwd(); }}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 7,
-                  width: "100%",
-                  padding: "8px 10px",
-                  background: "none",
-                  border: "none",
-                  borderTop: recentCwds.length > 0 ? "1px solid var(--border)" : "none",
-                  color: "var(--text-muted)",
-                  cursor: "pointer",
-                  textAlign: "left",
-                  fontSize: 11,
-                }}
-              >
-                <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
-                  <path d="M1 3A1 1 0 0 1 2 2H4L5 3.5H8.5a.5.5 0 0 1 .5.5v4a.5.5 0 0 1-.5.5h-7A.5.5 0 0 1 1 8V3Z" />
-                </svg>
-                <span>使用默认目录</span>
-              </button>
-
-              {/* Custom path entry */}
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  handleCustomPath();
-                }}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 7,
-                  width: "100%",
-                  padding: "8px 10px",
-                  background: "none",
-                  border: "none",
-                  color: "var(--text-muted)",
-                  cursor: "pointer",
-                  textAlign: "left",
-                  fontSize: 11,
-                }}
-              >
-                <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" style={{ flexShrink: 0 }}>
-                  <line x1="5" y1="1" x2="5" y2="9" />
-                  <line x1="1" y1="5" x2="9" y2="5" />
-                </svg>
-                <span>添加自定义路径…</span>
-              </button>
-            </div>
-          )}
         </div>
       </div>
 
-      {/* Session list */}
-      <div style={{ flex: explorerOpen && (selectedCwdProp || selectedCwd) ? "1 1 0" : "1 1 auto", overflowY: "auto", padding: "0", minHeight: 80 }}>
+      {/* Project/session list */}
+      <div style={{ flex: explorerOpen && activeSelectedCwd ? "1 1 0" : "1 1 auto", overflowY: "auto", padding: "0", minHeight: 80 }}>
         {loading && (
           <div style={{ padding: "16px 14px", color: "var(--text-muted)", fontSize: 12 }}>
             加载中...
@@ -585,26 +711,96 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             {error}
           </div>
         )}
-        {!loading && !error && filteredSessions.length === 0 && (
+        {!loading && !error && projects.length === 0 && (
           <div style={{ padding: "16px 14px", color: "var(--text-muted)", fontSize: 12 }}>
             未找到任何会话
           </div>
         )}
-        {sessionTree.map((node) => (
-          <SessionTreeItem
-            key={node.session.id}
-            node={node}
+        {!loading && !error && projects.map((project) => (
+          <ProjectSection
+            key={project.cwd}
+            project={project}
+            expanded={expandedCwds.has(project.cwd)}
+            showAll={showAllCwds.has(project.cwd)}
             selectedSessionId={selectedSessionId}
+            onToggle={() => toggleProject(project.cwd)}
+            onToggleShowAll={() => toggleShowAll(project.cwd)}
             onSelectSession={onSelectSession}
             onRenamed={loadSessions}
             onSessionDeleted={(id) => {
               onSessionDeleted?.(id);
               loadSessions();
             }}
-            depth={0}
+            onContextMenu={(event) => {
+              event.preventDefault();
+              setProjectMenu({ cwd: project.cwd, x: event.clientX, y: event.clientY });
+            }}
           />
         ))}
       </div>
+
+      {projectMenu && (() => {
+        const project = projects.find((p) => p.cwd === projectMenu.cwd);
+        if (!project) return null;
+        const isDefault = project.cwd === defaultCwd;
+        const pinned = projectMeta.pinnedCwds.includes(project.cwd);
+        const itemStyle: CSSProperties = {
+          width: "100%",
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          padding: "7px 9px",
+          background: "transparent",
+          border: "none",
+          borderRadius: 7,
+          color: "var(--text-muted)",
+          cursor: "pointer",
+          textAlign: "left",
+          fontSize: 12,
+        };
+        return (
+          <div
+            style={{
+              position: "fixed",
+              left: projectMenu.x,
+              top: projectMenu.y,
+              zIndex: 1000,
+              width: 178,
+              padding: 6,
+              background: "var(--bg-panel)",
+              border: "1px solid var(--border)",
+              borderRadius: 10,
+              boxShadow: "0 12px 28px rgba(0,0,0,0.16)",
+            }}
+            onClick={(e) => e.stopPropagation()}
+            onContextMenu={(e) => e.preventDefault()}
+          >
+            <div style={{ padding: "5px 8px 7px", color: "var(--text-dim)", fontSize: 10, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={project.cwd}>
+              {project.displayName ?? getProjectName(project.cwd)}
+            </div>
+            <button style={itemStyle} onClick={() => { setProjectMenu(null); void handleReselectProjectPath(project.cwd); }}>
+              重新选定路径
+            </button>
+            <button style={itemStyle} onClick={() => { setProjectMenu(null); handleProjectNote(project.cwd); }}>
+              备注
+            </button>
+            <button
+              style={itemStyle}
+              onClick={() => { setProjectMenu(null); handleToggleProjectPinned(project.cwd); }}
+            >
+              {pinned ? "取消置顶" : "置顶"}
+            </button>
+            <div style={{ height: 1, background: "var(--border)", margin: "5px 4px" }} />
+            <button
+              style={{ ...itemStyle, color: isDefault ? "var(--text-dim)" : "#ef4444", cursor: isDefault ? "default" : "pointer", opacity: isDefault ? 0.45 : 1 }}
+              disabled={isDefault}
+              onClick={() => { setProjectMenu(null); handleRemoveProjectReference(project.cwd); }}
+            >
+              删除项目引入
+            </button>
+          </div>
+        );
+      })()}
 
       {/* File Explorer section */}
       {(selectedCwdProp || selectedCwd) && (
@@ -690,6 +886,144 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                 onAtMention={onAtMention}
               />
             </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+function ProjectSection({
+  project,
+  expanded,
+  showAll,
+  selectedSessionId,
+  onToggle,
+  onToggleShowAll,
+  onSelectSession,
+  onRenamed,
+  onSessionDeleted,
+  onContextMenu,
+}: {
+  project: ProjectGroup;
+  expanded: boolean;
+  showAll: boolean;
+  selectedSessionId: string | null;
+  onToggle: () => void;
+  onToggleShowAll: () => void;
+  onSelectSession: (s: SessionInfo) => void;
+  onRenamed?: () => void;
+  onSessionDeleted?: (id: string) => void;
+  onContextMenu?: (event: React.MouseEvent) => void;
+}) {
+  const selectedInProject = selectedSessionId ? project.sessions.find((s) => s.id === selectedSessionId) : undefined;
+  let visibleSessions = showAll ? project.sessions : project.sessions.slice(0, 2);
+  if (!showAll && selectedInProject && !visibleSessions.some((s) => s.id === selectedInProject.id)) {
+    visibleSessions = [...visibleSessions, selectedInProject];
+  }
+  const hiddenSessionCount = Math.max(0, project.sessions.length - 2);
+  const sessionTree = buildSessionTree(project.sessions);
+
+  return (
+    <div
+      style={{ borderBottom: "1px solid var(--border)" }}
+      onContextMenu={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        onContextMenu?.(event);
+      }}
+      onMouseDown={(event) => {
+        if (event.button !== 2) return;
+        event.preventDefault();
+        event.stopPropagation();
+        onContextMenu?.(event);
+      }}
+    >
+      <button
+        onClick={onToggle}
+        style={{
+          width: "100%",
+          display: "flex",
+          alignItems: "center",
+          gap: 7,
+          padding: "5px 10px",
+          background: "none",
+          border: "none",
+          color: "var(--text)",
+          cursor: "pointer",
+          textAlign: "left",
+        }}
+        title={project.cwd}
+      >
+        <svg
+          width="9" height="9" viewBox="0 0 10 10" fill="none"
+          stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"
+          style={{ transform: expanded ? "rotate(90deg)" : "none", transition: "transform 0.15s", flexShrink: 0, color: "var(--text-dim)" }}
+        >
+          <polyline points="3 2 7 5 3 8" />
+        </svg>
+        <div style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: 8 }}>
+          <span
+            aria-hidden="true"
+            style={{
+              width: 6,
+              height: 6,
+              borderRadius: "50%",
+              background: project.pinned ? "var(--text-dim)" : "transparent",
+              flexShrink: 0,
+            }}
+          />
+          <span style={{ flex: 1, minWidth: 0, fontSize: 11, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {project.displayName ?? getProjectName(project.cwd)}{project.note ? ` · ${project.note}` : ""}
+          </span>
+          <span style={{ color: "var(--text-dim)", fontSize: 10, whiteSpace: "nowrap", flexShrink: 0 }}>
+            {project.sessions.length} 个对话{project.latestModified ? ` · ${formatRelativeTime(project.latestModified)}` : ""}
+          </span>
+        </div>
+      </button>
+
+      {expanded && (
+        <div>
+          {showAll ? sessionTree.map((node) => (
+            <SessionTreeItem
+              key={node.session.id}
+              node={node}
+              selectedSessionId={selectedSessionId}
+              onSelectSession={onSelectSession}
+              onRenamed={onRenamed}
+              onSessionDeleted={onSessionDeleted}
+              depth={0}
+            />
+          )) : visibleSessions.map((session) => (
+            <SessionItem
+              key={session.id}
+              session={session}
+              isSelected={session.id === selectedSessionId}
+              onClick={() => onSelectSession(session)}
+              onRenamed={onRenamed}
+              onDeleted={(id) => onSessionDeleted?.(id)}
+              depth={0}
+            />
+          ))}
+          {project.sessions.length > 2 && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onToggleShowAll(); }}
+              style={{
+                width: "100%",
+                padding: "4px 14px 6px 32px",
+                background: "none",
+                border: "none",
+                color: "var(--text-dim)",
+                cursor: "pointer",
+                fontSize: 10,
+                textAlign: "left",
+              }}
+              onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text-muted)"; }}
+              onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-dim)"; }}
+            >
+              {showAll ? "收起" : `更多 ${hiddenSessionCount} 条`}
+            </button>
           )}
         </div>
       )}

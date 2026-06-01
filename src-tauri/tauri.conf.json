@@ -16,7 +16,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["app", "dmg", "nsis"],
+    "targets": ["dmg", "nsis"],
     "externalBin": [
       "binaries/node"
     ],
