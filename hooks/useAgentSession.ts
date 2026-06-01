@@ -58,6 +58,7 @@ export interface UseAgentSessionOptions {
   newSessionCwd: string | null;
   onAgentEnd?: (changedFiles?: string[]) => void;
   onSessionCreated?: (session: SessionInfo) => void;
+  onSessionStarted?: (session: SessionInfo | null) => void;
   onSessionForked?: (newSessionId: string) => void;
   modelsRefreshKey?: number;
   chatInputRef?: React.RefObject<ChatInputHandle | null>;
@@ -82,7 +83,7 @@ export interface AttachedImage {
 
 export function useAgentSession(opts: UseAgentSessionOptions) {
   const {
-    session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked,
+    session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionStarted, onSessionForked,
     modelsRefreshKey, onSystemPromptChange,
   } = opts;
 
@@ -339,6 +340,21 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     dispatch({ type: "start" });
     pendingScrollToUserRef.current = true;
 
+    let optimisticNewSession: SessionInfo | null = null;
+    if (isNew && newSessionCwd) {
+      optimisticNewSession = {
+        id: `pending-${Date.now().toString(36)}`,
+        path: "",
+        cwd: newSessionCwd,
+        name: undefined,
+        created: new Date().toISOString(),
+        modified: new Date().toISOString(),
+        messageCount: 1,
+        firstMessage: message,
+      };
+      onSessionStarted?.(optimisticNewSession);
+    }
+
     const piImages = images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
 
     try {
@@ -384,12 +400,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         });
       }
     } catch (e) {
+      if (optimisticNewSession) onSessionStarted?.(null);
       console.error("Failed to send message:", e);
       setAgentRunning(false);
       setAgentPhase(null);
       dispatch({ type: "end" });
     }
-  }, [isNew, newSessionCwd, newSessionModel, toolPreset, thinkingLevel, session, agentRunning, connectEvents, onSessionCreated]);
+  }, [isNew, newSessionCwd, newSessionModel, toolPreset, thinkingLevel, session, agentRunning, connectEvents, onSessionCreated, onSessionStarted]);
 
   const handleAbort = useCallback(async () => {
     const sid = sessionIdRef.current;

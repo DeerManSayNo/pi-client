@@ -12,6 +12,7 @@ interface Props {
   initialSessionId?: string | null;
   onInitialRestoreDone?: () => void;
   refreshKey?: number;
+  optimisticSession?: SessionInfo | null;
   onSessionDeleted?: (sessionId: string) => void;
   selectedCwd?: string | null;
   onCwdChange?: (cwd: string | null) => void;
@@ -254,7 +255,7 @@ function PiAgentTitle() {
   );
 }
 
-export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onAtMention }: Props) {
+export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, onInitialRestoreDone, refreshKey, optimisticSession, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onAtMention }: Props) {
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -272,6 +273,25 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const [explorerRefreshDone, setExplorerRefreshDone] = useState(false);
   const sessionRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const explorerRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const sidebarRef = useRef<HTMLDivElement>(null);
+  const headerRef = useRef<HTMLDivElement>(null);
+  const splitterRef = useRef<HTMLDivElement>(null);
+  const splitPercentRef = useRef(50);
+  const [isDraggingSplitter, setIsDraggingSplitter] = useState(false);
+  const [isHoveringSplitter, setIsHoveringSplitter] = useState(false);
+  const [splitPercent, setSplitPercent] = useState(() => {
+    if (typeof window === "undefined") return 50;
+    try {
+      const stored = localStorage.getItem("pi-agent.sidebar-split-percent");
+      if (stored) {
+        const n = Number(stored);
+        if (n >= 10 && n <= 90) return n;
+      }
+    } catch { /* ignore */ }
+    return 50;
+  });
+
+  useEffect(() => { splitPercentRef.current = splitPercent; }, [splitPercent]);
 
   const loadSessions = useCallback(async (showLoading = false) => {
     const controller = new AbortController();
@@ -302,6 +322,44 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     initialLoadDone.current = true;
     loadSessions(isFirst);
   }, [loadSessions, refreshKey]);
+
+  const handleSplitterMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    const startY = e.clientY;
+    const startPercent = splitPercentRef.current;
+    const sidebarEl = sidebarRef.current;
+    const headerEl = headerRef.current;
+    if (!sidebarEl) return;
+    const sidebarHeight = sidebarEl.offsetHeight;
+    const headerHeight = headerEl?.offsetHeight ?? 0;
+    const availableHeight = sidebarHeight - headerHeight;
+    if (availableHeight <= 0) return;
+
+    document.body.style.cursor = 'row-resize';
+    document.body.style.userSelect = 'none';
+    setIsDraggingSplitter(true);
+
+    const handleMouseMove = (e: MouseEvent) => {
+      const deltaY = e.clientY - startY;
+      const deltaPercent = (deltaY / availableHeight) * 100;
+      const newPercent = Math.max(10, Math.min(90, startPercent + deltaPercent));
+      setSplitPercent(newPercent);
+    };
+
+    const handleMouseUp = () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      setIsDraggingSplitter(false);
+      try {
+        localStorage.setItem("pi-agent.sidebar-split-percent", String(splitPercentRef.current));
+      } catch { /* ignore */ }
+    };
+
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+  }, []);
 
   useEffect(() => {
     if (explorerRefreshKey !== undefined) setExplorerKey((k) => k + 1);
@@ -342,13 +400,20 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     }
   }, [loading, defaultCwd, ensureDefaultCwd]);
 
+  const displayedSessions = useMemo(() => {
+    if (!optimisticSession) return allSessions;
+    const existing = allSessions.find((s) => s.id === optimisticSession.id);
+    if (existing) return allSessions;
+    return [optimisticSession, ...allSessions];
+  }, [allSessions, optimisticSession]);
+
   // Auto-select cwd and restore session from URL on first load
   useEffect(() => {
     if (loading) return;
 
     if (initialSessionId && !restoredRef.current) {
       restoredRef.current = true;
-      const target = allSessions.find((s) => s.id === initialSessionId);
+      const target = displayedSessions.find((s) => s.id === initialSessionId);
       if (target) {
         setSelectedCwd(target.cwd);
         onSelectSession(target, true);
@@ -358,14 +423,14 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     }
 
     if (selectedCwd === null) {
-      const projects = buildProjectGroups(allSessions);
+      const projects = buildProjectGroups(displayedSessions);
       if (projects.length > 0) {
         setSelectedCwd(projects[0].cwd);
       } else {
         handleDefaultCwd();
       }
     }
-  }, [loading, allSessions, selectedCwd, initialSessionId, onSelectSession, onInitialRestoreDone, handleDefaultCwd]);
+  }, [loading, displayedSessions, selectedCwd, initialSessionId, onSelectSession, onInitialRestoreDone, handleDefaultCwd]);
 
   const handleCustomPath = useCallback(async () => {
     const selected = await open({
@@ -386,7 +451,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   }, []);
 
   const handleNewSession = useCallback(async () => {
-    const recentCwd = buildProjectGroups(allSessions)[0]?.cwd;
+    const recentCwd = buildProjectGroups(displayedSessions)[0]?.cwd;
     const cwd = selectedCwdProp ?? selectedCwd ?? recentCwd ?? await ensureDefaultCwd();
     if (!cwd) return;
     // Generate a temporary UUID client-side — no backend call needed.
@@ -395,9 +460,9 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       ? crypto.randomUUID()
       : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
     onNewSession?.(tempId, cwd);
-  }, [selectedCwdProp, selectedCwd, allSessions, ensureDefaultCwd, onNewSession]);
+  }, [selectedCwdProp, selectedCwd, displayedSessions, ensureDefaultCwd, onNewSession]);
 
-  const sessionProjects = useMemo(() => buildProjectGroups(allSessions), [allSessions]);
+  const sessionProjects = useMemo(() => buildProjectGroups(displayedSessions), [displayedSessions]);
   const projects = useMemo(() => {
     const byCwd = new Map<string, ProjectGroup>();
     for (const project of sessionProjects) byCwd.set(project.cwd, project);
@@ -536,7 +601,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
 
   useEffect(() => {
     if (!selectedSessionId) return;
-    const session = allSessions.find((s) => s.id === selectedSessionId);
+    const session = displayedSessions.find((s) => s.id === selectedSessionId);
     if (!session?.cwd) return;
     setExpandedCwds((prev) => {
       if (prev.has(session.cwd)) return prev;
@@ -544,7 +609,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       next.add(session.cwd);
       return next;
     });
-  }, [selectedSessionId, allSessions]);
+  }, [selectedSessionId, displayedSessions]);
 
   const toggleProject = useCallback((cwd: string) => {
     setExpandedCwds((prev) => {
@@ -565,9 +630,10 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   }, []);
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
+    <div ref={sidebarRef} style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
       {/* Header */}
       <div
+        ref={headerRef}
         style={{
           padding: "12px 10px 10px",
           borderBottom: "1px solid var(--border)",
@@ -700,7 +766,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       </div>
 
       {/* Project/session list */}
-      <div style={{ flex: explorerOpen && activeSelectedCwd ? "1 1 0" : "1 1 auto", overflowY: "auto", padding: "0", minHeight: 80 }}>
+      <div style={{ flex: explorerOpen && activeSelectedCwd ? `${splitPercent} 1 0` : "1 1 auto", overflowY: "auto", padding: "0", minHeight: 80 }}>
         {loading && (
           <div style={{ padding: "16px 14px", color: "var(--text-muted)", fontSize: 12 }}>
             加载中...
@@ -802,19 +868,37 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         );
       })()}
 
+      {/* Draggable splitter handle */}
+      {explorerOpen && (selectedCwdProp || selectedCwd) && (
+        <div
+          ref={splitterRef}
+          onMouseDown={handleSplitterMouseDown}
+          style={{
+            height: 6,
+            flexShrink: 0,
+            cursor: 'row-resize',
+            borderTop: `1px solid ${isDraggingSplitter || isHoveringSplitter ? 'var(--text-muted)' : 'var(--text-dim)'}`,
+            background: 'var(--bg-subtle)',
+            transition: isDraggingSplitter ? 'none' : 'border-color 0.15s',
+          }}
+          onMouseEnter={() => setIsHoveringSplitter(true)}
+          onMouseLeave={() => setIsHoveringSplitter(false)}
+        />
+      )}
+
       {/* File Explorer section */}
       {(selectedCwdProp || selectedCwd) && (
         <div
           style={{
-            borderTop: "1px solid var(--border)",
+            background: "var(--bg-subtle)",
             display: "flex",
             flexDirection: "column",
-            flex: explorerOpen ? "1 1 0" : "0 0 auto",
+            flex: explorerOpen ? `${100 - splitPercent} 1 0` : "0 0 auto",
             minHeight: 0,
             overflow: "hidden",
           }}
         >
-          <div style={{ display: "flex", alignItems: "center", flexShrink: 0 }}>
+          <div style={{ display: "flex", alignItems: "center", flexShrink: 0, paddingTop: 2 }}>
             <button
               onClick={() => setExplorerOpen((v) => !v)}
               style={{

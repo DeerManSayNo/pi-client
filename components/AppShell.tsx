@@ -52,6 +52,7 @@ export function AppShell() {
   const searchParams = useSearchParams();
   const { isDark, toggleTheme } = useTheme();
   const [selectedSession, setSelectedSession] = useState<SessionInfo | null>(null);
+  const [pendingSession, setPendingSession] = useState<SessionInfo | null>(null);
   // When user clicks +, we only store the cwd — no fake session id
   const [newSessionCwd, setNewSessionCwd] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
@@ -61,6 +62,17 @@ export function AppShell() {
   const [modelsRefreshKey, setModelsRefreshKey] = useState(0);
   const [skillsConfigOpen, setSkillsConfigOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const SIDEBAR_MIN = 180;
+  const SIDEBAR_MAX = 500;
+  const [sidebarWidth, setSidebarWidth] = useState<number>(() => {
+    if (typeof window === "undefined") return 260;
+    const stored = window.localStorage.getItem("pi-agent.sidebar-width");
+    const parsed = stored ? parseInt(stored, 10) : 260;
+    return Number.isFinite(parsed) ? Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, parsed)) : 260;
+  });
+  const [isResizing, setIsResizing] = useState(false);
+  const resizeStartX = useRef(0);
+  const resizeStartWidth = useRef(260);
   const chatInputRef = useRef<ChatInputHandle | null>(null);
   const topBarRef = useRef<HTMLDivElement>(null);
   const projectDropdownRef = useRef<HTMLDivElement>(null);
@@ -229,6 +241,7 @@ export function AppShell() {
   }, [router]);
 
   const handleSelectSession = useCallback((session: SessionInfo, isRestore = false) => {
+    setPendingSession(null);
     setNewSessionCwd(null);
     setSelectedSession(session);
     setSessionKey((k) => k + 1);
@@ -248,6 +261,7 @@ export function AppShell() {
   }, [router]);
 
   const handleNewSession = useCallback((_sessionId: string, cwd: string) => {
+    setPendingSession(null);
     setSelectedSession(null);
     setNewSessionCwd(cwd);
     setSessionKey((k) => k + 1);
@@ -256,8 +270,18 @@ export function AppShell() {
     router.replace("/", { scroll: false });
   }, [router]);
 
+  const handleSessionStarted = useCallback((session: SessionInfo | null) => {
+    if (!session) {
+      setPendingSession(null);
+      return;
+    }
+    setPendingSession(session);
+    setRefreshKey((k) => k + 1);
+  }, []);
+
   // Called by ChatWindow when a new session gets its real id from pi
   const handleSessionCreated = useCallback((session: SessionInfo) => {
+    setPendingSession(null);
     setNewSessionCwd(null);
     setSelectedSession(session);
     setRefreshKey((k) => k + 1);
@@ -278,6 +302,36 @@ export function AppShell() {
   const handleInitialRestoreDone = useCallback(() => {
     setInitialSessionRestored(true);
   }, []);
+
+  // ── Sidebar resize handlers ──
+  const handleResizeStart = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    setIsResizing(true);
+    resizeStartX.current = e.clientX;
+    resizeStartWidth.current = sidebarWidth;
+  }, [sidebarWidth]);
+
+  useEffect(() => {
+    if (!isResizing) return;
+    const handleMove = (e: MouseEvent) => {
+      const delta = e.clientX - resizeStartX.current;
+      const next = Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, resizeStartWidth.current + delta));
+      setSidebarWidth(next);
+    };
+    const handleUp = () => {
+      setIsResizing(false);
+      setSidebarWidth((w) => {
+        if (typeof window !== "undefined") window.localStorage.setItem("pi-agent.sidebar-width", String(w));
+        return w;
+      });
+    };
+    window.addEventListener("mousemove", handleMove);
+    window.addEventListener("mouseup", handleUp);
+    return () => {
+      window.removeEventListener("mousemove", handleMove);
+      window.removeEventListener("mouseup", handleUp);
+    };
+  }, [isResizing]);
 
   const handleSessionDeleted = useCallback((sessionId: string) => {
     setRefreshKey((k) => k + 1);
@@ -339,6 +393,7 @@ export function AppShell() {
         initialSessionId={initialSessionId}
         onInitialRestoreDone={handleInitialRestoreDone}
         refreshKey={refreshKey}
+        optimisticSession={pendingSession ?? selectedSession}
         onSessionDeleted={handleSessionDeleted}
         selectedCwd={selectedSession?.cwd ?? newSessionCwd ?? activeCwd ?? null}
         onCwdChange={handleCwdChange}
@@ -419,16 +474,38 @@ export function AppShell() {
       <div
         className={`sidebar-container${sidebarOpen ? " sidebar-open" : " sidebar-closed"}`}
         style={{
+          width: sidebarOpen ? sidebarWidth : 0,
+          minWidth: sidebarOpen ? SIDEBAR_MIN : 0,
           background: "var(--bg-panel)",
           borderRight: "1px solid var(--border)",
           display: "flex",
           flexDirection: "column",
           flexShrink: 0,
           zIndex: 200,
+          transition: isResizing ? "none" : undefined,
         }}
       >
         {sidebarContent}
       </div>
+
+      {/* Resize handle */}
+      {sidebarOpen && (
+        <div
+          onMouseDown={handleResizeStart}
+          style={{
+            width: 5,
+            cursor: "col-resize",
+            flexShrink: 0,
+            background: isResizing ? "var(--accent)" : "transparent",
+            transition: isResizing ? "none" : "background 0.15s",
+            zIndex: 201,
+            marginLeft: -2,
+            marginRight: -2,
+          }}
+          onMouseEnter={(e) => { if (!isResizing) e.currentTarget.style.background = "var(--border)"; }}
+          onMouseLeave={(e) => { if (!isResizing) e.currentTarget.style.background = "transparent"; }}
+        />
+      )}
 
       {/* Center: chat */}
       <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minWidth: 0 }}>
@@ -788,6 +865,7 @@ export function AppShell() {
               newSessionCwd={effectiveNewSessionCwd}
               onAgentEnd={handleAgentEnd}
               onSessionCreated={handleSessionCreated}
+              onSessionStarted={handleSessionStarted}
               onSessionForked={handleSessionForked}
               modelsRefreshKey={modelsRefreshKey}
               chatInputRef={chatInputRef}

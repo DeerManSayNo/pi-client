@@ -116,13 +116,14 @@ function TreeNode({
           display: "flex",
           alignItems: "center",
           gap: 4,
-          paddingLeft: 8 + depth * 14,
+          paddingLeft: 6 + depth * 12,
           paddingRight: 8,
           height: 24,
           cursor: "pointer",
           background: hovered ? "var(--bg-hover)" : "transparent",
-          borderRadius: 4,
+          borderRadius: 3,
           userSelect: "none",
+          transition: "background 0.08s",
         }}
       >
         {node.isDir && (
@@ -140,7 +141,7 @@ function TreeNode({
         </span>
         <span
           style={{
-            fontSize: 12,
+            fontSize: 11,
             color: "var(--text)",
             overflow: "hidden",
             textOverflow: "ellipsis",
@@ -198,7 +199,7 @@ function TreeNode({
             <TreeNode key={child.fullPath} node={child} depth={depth + 1} cwd={cwd} onOpenFile={onOpenFile} onAtMention={onAtMention} expandedPaths={expandedPaths} onToggleExpanded={onToggleExpanded} refreshKey={refreshKey} />
           ))}
           {children.length === 0 && loaded && (
-            <div style={{ paddingLeft: 8 + (depth + 1) * 14, fontSize: 11, color: "var(--text-dim)", height: 22, display: "flex", alignItems: "center" }}>
+            <div style={{ paddingLeft: 6 + (depth + 1) * 12 + 14, fontSize: 10, color: "var(--text-dim)", height: 22, display: "flex", alignItems: "center", fontStyle: "italic" }}>
               空文件夹
             </div>
           )}
