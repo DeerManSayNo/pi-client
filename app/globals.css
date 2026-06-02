@@ -252,8 +252,16 @@ span.linenumber {
     min-width: 0;
     border-right: none !important;
   }
+  .sidebar-container.sidebar-compact {
+    width: 56px;
+    min-width: 56px;
+  }
+  .sidebar-container.sidebar-compact > * {
+    width: 56px;
+    min-width: 56px;
+  }
   /* keep inner content at fixed width so it doesn't reflow during animation */
-  .sidebar-container > * {
+  .sidebar-container:not(.sidebar-compact) > * {
     width: 260px;
     min-width: 260px;
   }

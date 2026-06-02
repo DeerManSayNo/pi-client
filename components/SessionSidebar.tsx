@@ -20,6 +20,7 @@ interface Props {
   onOpenFile?: (filePath: string, fileName: string) => void;
   explorerRefreshKey?: number;
   onAtMention?: (relativePath: string) => void;
+  compact?: boolean;
 }
 
 function formatRelativeTime(dateStr: string): string {
@@ -117,6 +118,10 @@ function getProjectName(cwd: string): string {
   return parts.length > 0 ? parts[parts.length - 1] : cwd;
 }
 
+function getInitial(text: string | null | undefined): string {
+  const trimmed = (text ?? "").trim();
+  return Array.from(trimmed)[0]?.toUpperCase() ?? "•";
+}
 
 
 interface SessionTreeNode {
@@ -256,7 +261,7 @@ function PiAgentTitle() {
   );
 }
 
-export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, onInitialRestoreDone, refreshKey, optimisticSession, runningSessionIds = new Set(), onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onAtMention }: Props) {
+export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, onInitialRestoreDone, refreshKey, optimisticSession, runningSessionIds = new Set(), onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onAtMention, compact = false }: Props) {
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -266,6 +271,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const [projectMeta, setProjectMeta] = useState<ProjectMeta>(() => readProjectMeta());
   const [projectMenu, setProjectMenu] = useState<{ cwd: string; x: number; y: number } | null>(null);
   const [expandedCwds, setExpandedCwds] = useState<Set<string>>(new Set());
+  const [allProjectsState, setAllProjectsState] = useState<"expanded" | "compact" | "collapsed">("expanded");
   const [showAllCwds, setShowAllCwds] = useState<Set<string>>(new Set());
   const autoExpandedRef = useRef(false);
   const [explorerOpen, setExplorerOpen] = useState(true);
@@ -636,27 +642,27 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       <div
         ref={headerRef}
         style={{
-          padding: "12px 10px 10px",
-          borderBottom: "1px solid var(--border)",
+          padding: compact ? "8px 6px" : "12px 10px 8px",
           flexShrink: 0,
         }}
       >
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
-          <PiAgentTitle />
+        <div style={{ display: "flex", alignItems: "center", justifyContent: compact ? "center" : "space-between", marginBottom: compact ? 0 : 6 }}>
+          {!compact && <PiAgentTitle />}
           <div style={{ display: "flex", gap: 6 }}>
             <button
               onClick={handleNewSession}
               disabled={false}
               style={{
                 display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
-                background: "transparent",
-                border: "none",
+                background: compact ? "var(--bg-hover)" : "transparent",
+                border: compact ? "1px solid var(--border)" : "none",
                 color: "var(--text-muted)",
                 cursor: "pointer",
-                height: 32,
-                paddingLeft: 10,
-                paddingRight: 12,
-                borderRadius: 7,
+                height: compact ? 34 : 32,
+                width: compact ? 34 : undefined,
+                paddingLeft: compact ? 0 : 10,
+                paddingRight: compact ? 0 : 12,
+                borderRadius: compact ? 999 : 7,
                 fontSize: 12,
                 fontWeight: 500,
                 letterSpacing: "-0.01em",
@@ -664,12 +670,13 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                 transition: "background 0.12s, color 0.12s",
               }}
               title={activeSelectedCwd ? `在 ${activeSelectedCwd} 中新建会话` : "新建会话（将使用最近项目或默认项目）"}
+              aria-label="新建会话"
               onMouseEnter={(e) => {
                 e.currentTarget.style.background = "var(--bg-hover)";
                 e.currentTarget.style.color = "var(--accent)";
               }}
               onMouseLeave={(e) => {
-                e.currentTarget.style.background = "transparent";
+                e.currentTarget.style.background = compact ? "var(--bg-hover)" : "transparent";
                 e.currentTarget.style.color = "var(--text-muted)";
               }}
             >
@@ -677,7 +684,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                 <line x1="6" y1="1" x2="6" y2="11" />
                 <line x1="1" y1="6" x2="11" y2="6" />
               </svg>
-              新建
+              {!compact && "新建"}
             </button>
 
           </div>
@@ -685,24 +692,59 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
 
       </div>
 
+      {/* 全部项目 — collapse entire project list */}
+      {projects.length > 0 && (
+        <div
+          onClick={() => setAllProjectsState((prev) => prev === "expanded" ? "compact" : prev === "compact" ? "collapsed" : "expanded")}
+          style={{
+            padding: compact ? "5px 0" : "2px 14px 4px",
+            fontSize: 12,
+            color: "var(--text-muted)",
+            cursor: "pointer",
+            userSelect: "none",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: compact ? "center" : undefined,
+            gap: compact ? 0 : 6,
+            flexShrink: 0,
+          }}
+          onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
+          onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-muted)"; }}
+          title={compact ? (allProjectsState === "expanded" ? "收起" : allProjectsState === "compact" ? "折叠" : "展开全部") : undefined}
+        >
+          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            {allProjectsState === "expanded" ? (
+              <polyline points="18 15 12 9 6 15" />
+            ) : allProjectsState === "compact" ? (
+              <><line x1="8" y1="12" x2="16" y2="12" /></>
+            ) : (
+              <polyline points="6 9 12 15 18 9" />
+            )}
+          </svg>
+          {!compact && "全部项目"}
+        </div>
+      )}
+
       {/* Project/session list */}
-      <div style={{ flex: explorerOpen && activeSelectedCwd ? `${splitPercent} 1 0` : "1 1 auto", overflowY: "auto", padding: "0", minHeight: 80 }}>
+      <div style={{ flex: compact ? "1 1 auto" : explorerOpen && activeSelectedCwd ? `${splitPercent} 1 0` : "1 1 auto", overflowY: "auto", padding: compact ? "6px 0" : "0", minHeight: 80 }}>
         {loading && (
-          <div style={{ padding: "16px 14px", color: "var(--text-muted)", fontSize: 12 }}>
-            加载中...
+          <div style={{ padding: compact ? "8px 0" : "16px 14px", color: "var(--text-muted)", fontSize: 12, textAlign: compact ? "center" : undefined }}>
+            {compact ? "…" : "加载中..."}
           </div>
         )}
         {error && (
-          <div style={{ padding: "12px 14px", color: "#f87171", fontSize: 12 }}>
-            {error}
+          <div style={{ padding: compact ? "8px 4px" : "12px 14px", color: "#f87171", fontSize: 12, textAlign: compact ? "center" : undefined }}>
+            {compact ? "!" : error}
           </div>
         )}
         {!loading && !error && projects.length === 0 && (
-          <div style={{ padding: "16px 14px", color: "var(--text-muted)", fontSize: 12 }}>
-            未找到任何会话
+          <div style={{ padding: compact ? "8px 4px" : "16px 14px", color: "var(--text-muted)", fontSize: 12, textAlign: compact ? "center" : undefined }}>
+            {compact ? "—" : "未找到任何会话"}
           </div>
         )}
-        {!loading && !error && projects.map((project) => (
+        {!loading && !error && (
+          <>
+            {allProjectsState !== "collapsed" && (allProjectsState === "compact" ? projects.slice(0, 2) : projects).map((project, i) => (
           <ProjectSection
             key={project.cwd}
             project={project}
@@ -722,21 +764,29 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
               event.preventDefault();
               setProjectMenu({ cwd: project.cwd, x: event.clientX, y: event.clientY });
             }}
+            compact={compact}
+            isActiveProject={project.cwd === activeSelectedCwd}
+            maxSessions={allProjectsState === "compact" ? 2 : undefined}
           />
         ))}
-        <div style={{ padding: "4px 14px 6px", display: "flex", justifyContent: "center" }}>
+          </>
+        )}
+        <div style={{ padding: compact ? "6px 0" : "4px 14px 6px", display: "flex", justifyContent: "center" }}>
           <button
             onClick={handleCustomPath}
             style={{
               display: "flex",
               alignItems: "center",
-              gap: 4,
+              justifyContent: compact ? "center" : undefined,
+              gap: compact ? 0 : 4,
               background: "transparent",
               border: "none",
               color: "var(--text-muted)",
               cursor: "pointer",
               fontSize: 12,
-              padding: "3px 6px",
+              padding: compact ? 0 : "3px 6px",
+              width: compact ? 30 : undefined,
+              height: compact ? 30 : undefined,
               borderRadius: 5,
               transition: "color 0.15s, background 0.15s",
             }}
@@ -751,7 +801,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             }}
           >
             <span style={{ fontSize: 15, lineHeight: 1 }}>+</span>
-            <span>添加项目</span>
+            {!compact && <span>添加项目</span>}
           </button>
         </div>
       </div>
@@ -820,7 +870,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       })()}
 
       {/* Draggable splitter handle */}
-      {explorerOpen && (selectedCwdProp || selectedCwd) && (
+      {explorerOpen && !compact && (selectedCwdProp || selectedCwd) && (
         <div
           ref={splitterRef}
           onMouseDown={handleSplitterMouseDown}
@@ -838,7 +888,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       )}
 
       {/* File Explorer section */}
-      {(selectedCwdProp || selectedCwd) && (
+      {!compact && (selectedCwdProp || selectedCwd) && (
         <div
           style={{
             background: "var(--bg-subtle)",
@@ -941,6 +991,9 @@ function ProjectSection({
   onRenamed,
   onSessionDeleted,
   onContextMenu,
+  compact = false,
+  isActiveProject = false,
+  maxSessions,
 }: {
   project: ProjectGroup;
   expanded: boolean;
@@ -953,14 +1006,20 @@ function ProjectSection({
   onRenamed?: () => void;
   onSessionDeleted?: (id: string) => void;
   onContextMenu?: (event: React.MouseEvent) => void;
+  compact?: boolean;
+  isActiveProject?: boolean;
+  maxSessions?: number;
 }) {
   const selectedInProject = selectedSessionId ? project.sessions.find((s) => s.id === selectedSessionId) : undefined;
-  let visibleSessions = showAll ? project.sessions : project.sessions.slice(0, 2);
-  if (!showAll && selectedInProject && !visibleSessions.some((s) => s.id === selectedInProject.id)) {
+  const limit = maxSessions ?? (showAll ? project.sessions.length : 2);
+  let visibleSessions = project.sessions.slice(0, limit);
+  if (selectedInProject && !visibleSessions.some((s) => s.id === selectedInProject.id)) {
     visibleSessions = [...visibleSessions, selectedInProject];
   }
-  const hiddenSessionCount = Math.max(0, project.sessions.length - 2);
+  const hiddenSessionCount = maxSessions !== undefined ? Math.max(0, project.sessions.length - maxSessions) : Math.max(0, project.sessions.length - (showAll ? project.sessions.length : 2));
   const sessionTree = buildSessionTree(project.sessions);
+  const projectTitle = project.displayName ?? getProjectName(project.cwd);
+  const projectInitial = getInitial(projectTitle);
 
   return (
     <div
@@ -978,14 +1037,26 @@ function ProjectSection({
       }}
     >
       <button
-        onClick={onToggle}
+        onClick={() => {
+          if (compact && project.sessions.length > 0) {
+            onSelectSession(project.sessions[0]);
+          } else {
+            onToggle();
+          }
+        }}
         style={{
-          width: "100%",
+          margin: compact ? "3px 6px" : undefined,
+          borderRadius: compact ? 999 : 0,
+          width: compact ? "calc(100% - 12px)" : "100%",
           display: "flex",
           alignItems: "center",
-          gap: 7,
-          padding: "5px 10px",
-          background: "var(--bg-subtle)",
+          height: compact ? 30 : undefined,
+          justifyContent: compact ? "center" : undefined,
+          gap: compact ? 0 : 7,
+          padding: compact ? "0" : "5px 10px",
+          background: compact
+            ? (isActiveProject ? "var(--bg-selected)" : "transparent")
+            : "var(--bg-subtle)",
           border: "none",
           color: "var(--text)",
           cursor: "pointer",
@@ -993,62 +1064,58 @@ function ProjectSection({
           transition: "background 0.12s",
         }}
         onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
-        onMouseLeave={(e) => { e.currentTarget.style.background = "var(--bg-subtle)"; }}
+        onMouseLeave={(e) => { e.currentTarget.style.background = compact ? (isActiveProject ? "var(--bg-selected)" : "transparent") : "var(--bg-subtle)"; }}
         title={project.cwd}
       >
-        <svg
-          width="9" height="9" viewBox="0 0 10 10" fill="none"
-          stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"
-          style={{ transform: expanded ? "rotate(90deg)" : "none", transition: "transform 0.15s", flexShrink: 0, color: "var(--text-dim)" }}
-        >
-          <polyline points="3 2 7 5 3 8" />
-        </svg>
-        <div style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: 8 }}>
+        {compact ? (
           <span
             aria-hidden="true"
             style={{
-              width: 6,
-              height: 6,
+              width: 30,
+              height: 30,
               borderRadius: "50%",
-              background: project.pinned ? "var(--text-dim)" : "transparent",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              background: selectedInProject || isActiveProject ? "var(--accent)" : project.pinned ? "var(--text-muted)" : "var(--bg)",
+              color: selectedInProject || isActiveProject || project.pinned ? "#fff" : "var(--text)",
+              border: selectedInProject || isActiveProject ? "1px solid var(--accent)" : "1px solid var(--border)",
+              boxShadow: selectedInProject || isActiveProject ? "0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent)" : undefined,
               flexShrink: 0,
+              fontSize: 13,
+              fontWeight: 700,
+              fontFamily: "var(--font-mono)",
+              lineHeight: 1,
             }}
-          />
-          <span style={{ flex: 1, minWidth: 0, fontSize: 11, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-            {project.displayName ?? getProjectName(project.cwd)}{project.note ? ` · ${project.note}` : ""}
+          >
+            {projectInitial}
           </span>
-          <span style={{ color: "var(--text-dim)", fontSize: 10, whiteSpace: "nowrap", flexShrink: 0 }}>
-            {project.sessions.length} 个对话{project.latestModified ? ` · ${formatRelativeTime(project.latestModified)}` : ""}
-          </span>
-        </div>
+        ) : (
+          <>
+            <svg width="9" height="9" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" style={{ transform: expanded ? "rotate(90deg)" : "none", transition: "transform 0.15s", flexShrink: 0, color: "var(--text-dim)" }}>
+              <polyline points="3 2 7 5 3 8" />
+            </svg>
+            <div style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: 8 }}>
+              <span aria-hidden="true" style={{ width: 6, height: 6, borderRadius: "50%", background: project.pinned ? "var(--text-dim)" : "transparent", flexShrink: 0 }} />
+              <span style={{ flex: 1, minWidth: 0, fontSize: 11, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {projectTitle}{project.note ? ` · ${project.note}` : ""}
+              </span>
+              <span style={{ color: "var(--text-dim)", fontSize: 10, whiteSpace: "nowrap", flexShrink: 0 }}>
+                {project.sessions.length} 个对话{project.latestModified ? ` · ${formatRelativeTime(project.latestModified)}` : ""}
+              </span>
+            </div>
+          </>
+        )}
       </button>
 
-      {expanded && (
+      {(compact || expanded) && (
         <div>
-          {showAll ? sessionTree.map((node) => (
-            <SessionTreeItem
-              key={node.session.id}
-              node={node}
-              selectedSessionId={selectedSessionId}
-              runningSessionIds={runningSessionIds}
-              onSelectSession={onSelectSession}
-              onRenamed={onRenamed}
-              onSessionDeleted={onSessionDeleted}
-              depth={0}
-            />
+          {showAll && !compact && maxSessions === undefined ? sessionTree.map((node) => (
+            <SessionTreeItem key={node.session.id} node={node} selectedSessionId={selectedSessionId} runningSessionIds={runningSessionIds} onSelectSession={onSelectSession} onRenamed={onRenamed} onSessionDeleted={onSessionDeleted} depth={0} compact={compact} />
           )) : visibleSessions.map((session) => (
-            <SessionItem
-              key={session.id}
-              session={session}
-              isSelected={session.id === selectedSessionId}
-              isRunning={runningSessionIds.has(session.id)}
-              onClick={() => onSelectSession(session)}
-              onRenamed={onRenamed}
-              onDeleted={(id) => onSessionDeleted?.(id)}
-              depth={0}
-            />
+            <SessionItem key={session.id} session={session} isSelected={session.id === selectedSessionId} isRunning={runningSessionIds.has(session.id)} onClick={() => onSelectSession(session)} onRenamed={onRenamed} onDeleted={(id) => onSessionDeleted?.(id)} depth={0} compact={compact} />
           ))}
-          {project.sessions.length > 2 && (
+          {project.sessions.length > 2 && !compact && maxSessions === undefined && (
             <button
               onClick={(e) => { e.stopPropagation(); onToggleShowAll(); }}
               style={{
@@ -1081,6 +1148,7 @@ function SessionTreeItem({
   onRenamed,
   onSessionDeleted,
   depth,
+  compact = false,
 }: {
   node: SessionTreeNode;
   selectedSessionId: string | null;
@@ -1089,6 +1157,7 @@ function SessionTreeItem({
   onRenamed?: () => void;
   onSessionDeleted?: (id: string) => void;
   depth: number;
+  compact?: boolean;
 }) {
   const [collapsed, setCollapsed] = useState(false);
   const hasChildren = node.children.length > 0;
@@ -1096,8 +1165,7 @@ function SessionTreeItem({
   return (
     <div>
       <div style={{ position: "relative" }}>
-        {/* Indent line for child sessions */}
-        {depth > 0 && (
+        {depth > 0 && !compact && (
           <div style={{
             position: "absolute",
             left: depth * 12 + 6,
@@ -1118,6 +1186,7 @@ function SessionTreeItem({
           hasChildren={hasChildren}
           collapsed={collapsed}
           onToggleCollapse={() => setCollapsed((v) => !v)}
+          compact={compact}
         />
       </div>
       {hasChildren && !collapsed && (
@@ -1132,6 +1201,7 @@ function SessionTreeItem({
               onRenamed={onRenamed}
               onSessionDeleted={onSessionDeleted}
               depth={depth + 1}
+              compact={compact}
             />
           ))}
         </div>
@@ -1151,6 +1221,7 @@ function SessionItem({
   hasChildren = false,
   collapsed = false,
   onToggleCollapse,
+  compact = false,
 }: {
   session: SessionInfo;
   isSelected: boolean;
@@ -1162,6 +1233,7 @@ function SessionItem({
   hasChildren?: boolean;
   collapsed?: boolean;
   onToggleCollapse?: () => void;
+  compact?: boolean;
 }) {
   const [hovered, setHovered] = useState(false);
   const [renaming, setRenaming] = useState(false);
@@ -1171,6 +1243,7 @@ function SessionItem({
   const inputRef = useRef<HTMLInputElement>(null);
 
   const title = session.name || session.firstMessage.slice(0, 50) || session.id.slice(0, 12);
+  const sessionInitial = getInitial(title);
 
   const startRename = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
@@ -1218,7 +1291,7 @@ function SessionItem({
   }, []);
 
   // Fixed-height outer wrapper — content swaps in place so the list never reflows
-  const ITEM_HEIGHT = 54;
+  const ITEM_HEIGHT = compact ? 28 : 54;
 
   return (
     <div
@@ -1229,15 +1302,18 @@ function SessionItem({
         height: ITEM_HEIGHT,
         display: "flex",
         alignItems: "center",
-        paddingLeft: depth > 0 ? depth * 12 + 14 : 14,
-        paddingRight: 8,
+        justifyContent: compact ? "center" : undefined,
+        paddingLeft: compact ? 0 : depth > 0 ? depth * 12 + 14 : 14,
+        paddingRight: compact ? 0 : 8,
         cursor: confirmDelete || renaming ? "default" : "pointer",
         background: confirmDelete
           ? "rgba(239,68,68,0.06)"
           : isSelected ? "var(--bg-selected)" : hovered ? "var(--bg-hover)" : "transparent",
-        borderLeft: confirmDelete
+        borderLeft: compact ? "none" : confirmDelete
           ? "2px solid #ef4444"
           : isSelected ? "2px solid var(--accent)" : "2px solid transparent",
+        borderRadius: compact ? 8 : 0,
+        margin: compact ? "2px 6px" : 0,
         transition: "background 0.1s",
         opacity: deleting ? 0.5 : 1,
         gap: 6,
@@ -1312,8 +1388,35 @@ function SessionItem({
       ) : (
         /* ── Normal view ── */
         <>
+          {compact && (
+            <span
+              aria-hidden="true"
+              style={{
+                width: 28,
+                height: 28,
+                borderRadius: "50%",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                background: isSelected ? "transparent" : "transparent",
+                color: isSelected ? "var(--accent)" : "var(--text-muted)",
+                border: isSelected ? "1.5px solid var(--accent)" : "1px solid var(--border)",
+                boxShadow: isSelected ? "0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent)" : undefined,
+                fontSize: 11,
+                fontWeight: 600,
+                fontFamily: "var(--font-mono)",
+                lineHeight: 1,
+                position: "relative",
+              }}
+            >
+              {sessionInitial}
+              {isRunning && <span className="session-running-dot" style={{ position: "absolute", right: -3, bottom: -3, width: 9, height: 9, borderWidth: 2 }} />}
+            </span>
+          )}
+          {!compact && (
+            <>
           {/* Fork indicator for child sessions */}
-          {depth > 0 && (
+          {depth > 0 && !compact && (
             <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="var(--text-dim)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
               <line x1="6" y1="3" x2="6" y2="15" />
               <circle cx="18" cy="6" r="3" />
@@ -1373,7 +1476,7 @@ function SessionItem({
           )}
 
           {/* Action buttons — shown on hover */}
-          {hovered && (
+          {hovered && !compact && (
             <div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
               <button
                 onClick={startRename}
@@ -1431,6 +1534,8 @@ function SessionItem({
                 </svg>
               </button>
             </div>
+          )}
+            </>
           )}
         </>
       )}

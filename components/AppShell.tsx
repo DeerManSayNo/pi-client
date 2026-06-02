@@ -1,7 +1,7 @@
 "use client";
 
 import { open } from "@tauri-apps/plugin-dialog";
-import { useState, useCallback, useRef, useEffect, useMemo } from "react";
+import { useState, useCallback, useRef, useEffect, useMemo, type CSSProperties } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { SessionSidebar } from "./SessionSidebar";
 import { ChatWindow } from "./ChatWindow";
@@ -12,6 +12,9 @@ import { SkillsConfig } from "./SkillsConfig";
 import { useTheme } from "@/hooks/useTheme";
 import type { SessionInfo } from "@/lib/types";
 import type { ChatInputHandle } from "./ChatInput";
+
+type DraggableStyle = CSSProperties & { WebkitAppRegion?: "drag" | "no-drag" };
+type SidebarMode = "open" | "compact" | "closed";
 
 const SKIP_AUTO_OPEN_SUFFIXES = [".jsonl"];
 
@@ -55,6 +58,9 @@ export function AppShell() {
   const [pendingSession, setPendingSession] = useState<SessionInfo | null>(null);
   // When user clicks +, we only store the cwd — no fake session id
   const [newSessionCwd, setNewSessionCwd] = useState<string | null>(null);
+  // Session tabs — browser-style in top bar
+  const [sessionTabs, setSessionTabs] = useState<SessionInfo[]>([]);
+  const [activeSessionTabId, setActiveSessionTabId] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [sessionKey, setSessionKey] = useState(0);
   const [explorerRefreshKey, setExplorerRefreshKey] = useState(0);
@@ -63,7 +69,10 @@ export function AppShell() {
   const [skillsConfigOpen, setSkillsConfigOpen] = useState(false);
   const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(new Set());
   const pendingSessionIdRef = useRef<string | null>(null);
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sidebarMode, setSidebarMode] = useState<SidebarMode>("open");
+  const sidebarOpen = sidebarMode !== "closed";
+  const sidebarCompact = sidebarMode === "compact";
+  const SIDEBAR_COMPACT = 56;
   const SIDEBAR_MIN = 180;
   const SIDEBAR_MAX = 500;
   const [sidebarWidth, setSidebarWidth] = useState<number>(() => {
@@ -280,6 +289,11 @@ export function AppShell() {
     // cannot list it yet, so the sidebar must keep showing the optimistic row.
     setNewSessionCwd(null);
     setSelectedSession(session);
+    setSessionTabs((prev) => {
+      if (prev.find((t) => t.id === session.id)) return prev;
+      return [...prev, session];
+    });
+    setActiveSessionTabId(session.id);
     setSessionKey((k) => k + 1);
     setSystemPrompt(null);
     setInitialSessionRestored(true);
@@ -331,6 +345,11 @@ export function AppShell() {
     setPendingSession(session);
     setNewSessionCwd(null);
     setSelectedSession(session);
+    setSessionTabs((prev) => {
+      if (prev.find((t) => t.id === session.id)) return prev;
+      return [...prev, session];
+    });
+    setActiveSessionTabId(session.id);
     setRefreshKey((k) => k + 1);
     router.replace(`?session=${encodeURIComponent(session.id)}`, { scroll: false });
   }, [router, setSessionRunning]);
@@ -424,6 +443,28 @@ export function AppShell() {
     });
   }, [fileTabs]);
 
+  const handleCloseSessionTab = useCallback((sessionId: string) => {
+    setSessionTabs((prev) => {
+      const next = prev.filter((t) => t.id !== sessionId);
+      // If closing the active tab, switch to previous or clear
+      if (selectedSession?.id === sessionId) {
+        const remaining = next.filter((t) => t.id !== sessionId);
+        if (remaining.length > 0) {
+          const nextSession = remaining[remaining.length - 1];
+          setSelectedSession(nextSession);
+          setActiveSessionTabId(nextSession.id);
+          setSessionKey((k) => k + 1);
+          setSystemPrompt(null);
+        } else {
+          setSelectedSession(null);
+          setActiveSessionTabId(null);
+          setNewSessionCwd(null);
+        }
+      }
+      return next;
+    });
+  }, [selectedSession]);
+
   // Show chat area if a session is selected, or if we have a cwd to start a new session in
   const effectiveNewSessionCwd = newSessionCwd ?? (selectedSession === null && activeCwd ? activeCwd : null);
   const showChat = selectedSession !== null || effectiveNewSessionCwd !== null;
@@ -433,7 +474,17 @@ export function AppShell() {
   const activeFileTab = fileTabs.find((t) => t.id === activeFileTabId) ?? null;
 
   const sidebarContent = (
-    <>
+    <div
+      style={{
+        width: sidebarCompact ? SIDEBAR_COMPACT : "100%",
+        minWidth: sidebarCompact ? SIDEBAR_COMPACT : "100%",
+        height: "100%",
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "stretch",
+        overflow: "hidden",
+      }}
+    >
       <SessionSidebar
         selectedSessionId={selectedSession?.id ?? null}
         onSelectSession={handleSelectSession}
@@ -449,8 +500,9 @@ export function AppShell() {
         onOpenFile={handleOpenFile}
         explorerRefreshKey={explorerRefreshKey}
         onAtMention={handleAtMention}
+        compact={sidebarCompact}
       />
-      <div style={{ padding: "8px", flexShrink: 0, display: "flex", justifyContent: "space-between", gap: 4 }}>
+      <div style={{ padding: sidebarCompact ? "8px 0" : "8px", flexShrink: 0, display: "flex", flexDirection: sidebarCompact ? "column" : "row", alignItems: "center", justifyContent: sidebarCompact ? "center" : "space-between", gap: 4 }}>
         {([
           {
             label: "模型配置",
@@ -485,26 +537,167 @@ export function AppShell() {
             disabled={disabled}
             title={label}
             style={{
-              flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
-              height: 32, padding: 0, background: "none", border: "none",
-              borderRadius: 9, color: "var(--text-muted)", cursor: disabled ? "default" : "pointer",
+              flex: sidebarCompact ? "0 0 auto" : 1,
+              width: sidebarCompact ? 30 : undefined,
+              height: sidebarCompact ? 30 : 32,
+              display: "flex", alignItems: "center", justifyContent: "center", gap: sidebarCompact ? 0 : 6,
+              padding: 0,
+              background: sidebarCompact ? "var(--bg-hover)" : "none",
+              border: sidebarCompact ? "1px solid var(--border)" : "none",
+              borderRadius: sidebarCompact ? 999 : 9, color: "var(--text-muted)", cursor: disabled ? "default" : "pointer",
               fontSize: 12, opacity: disabled ? 0.35 : 1,
               transition: "background 0.12s, color 0.12s",
             }}
             onMouseEnter={(e) => { if (!disabled) { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text)"; } }}
-            onMouseLeave={(e) => { e.currentTarget.style.background = "none"; e.currentTarget.style.color = "var(--text-muted)"; }}
+            onMouseLeave={(e) => { e.currentTarget.style.background = sidebarCompact ? "var(--bg-hover)" : "none"; e.currentTarget.style.color = "var(--text-muted)"; }}
           >
             {icon}
-            {label}
+            {!sidebarCompact && label}
           </button>
         ))}
       </div>
-    </>
+    </div>
   );
 
   return (
     <>
-    <div style={{ display: "flex", height: "100dvh", overflow: "hidden", background: "var(--bg)" }}>
+    {/* Custom titlebar content — rendered in the native macOS traffic-light row. */}
+    <div
+      data-tauri-drag-region="deep"
+      style={{
+        position: "fixed",
+        top: 0,
+        left: 0,
+        right: 0,
+        height: 28,
+        zIndex: 900,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        background: "var(--bg-panel)",
+        borderBottom: "1px solid var(--border)",
+        WebkitAppRegion: "drag",
+      } as DraggableStyle}
+    >
+      <div data-tauri-drag-region style={{ fontSize: 13, fontWeight: 700, color: "var(--text)", opacity: 0.85, pointerEvents: "none" }}>pi-agent</div>
+      <button
+        data-tauri-drag-region="false"
+        onClick={() => setSidebarMode((mode) => mode === "open" ? "compact" : mode === "compact" ? "closed" : "open")}
+        title={sidebarMode === "open" ? "收缩侧边栏" : sidebarMode === "compact" ? "隐藏侧边栏" : "显示侧边栏"}
+        aria-label={sidebarMode === "open" ? "收缩侧边栏" : sidebarMode === "compact" ? "隐藏侧边栏" : "显示侧边栏"}
+        aria-pressed={sidebarOpen}
+        style={{
+          position: "absolute",
+          left: 78,
+          top: 2,
+          width: 24,
+          height: 24,
+          padding: 0,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          background: "transparent",
+          border: "1px solid transparent",
+          borderRadius: 7,
+          color: "var(--text-muted)",
+          cursor: "pointer",
+          transition: "color 0.12s, background 0.12s, border-color 0.12s",
+          WebkitAppRegion: "no-drag",
+        } as DraggableStyle}
+        onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; e.currentTarget.style.background = "var(--bg-hover)"; }}
+        onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-muted)"; e.currentTarget.style.background = "transparent"; }}
+      >
+        {sidebarMode === "closed" ? (
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+            <line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="18" x2="21" y2="18" />
+          </svg>
+        ) : sidebarMode === "compact" ? (
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="6.5" y1="3" x2="6.5" y2="21" />
+          </svg>
+        ) : (
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="9" y1="3" x2="9" y2="21" />
+          </svg>
+        )}
+      </button>
+      <button
+        data-tauri-drag-region="false"
+        onClick={(e) => {
+          const rect = e.currentTarget.getBoundingClientRect();
+          toggleTheme({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
+        }}
+        title={isDark ? "切换为浅色模式" : "切换为深色模式"}
+        aria-label={isDark ? "切换为浅色模式" : "切换为深色模式"}
+        aria-pressed={isDark}
+        style={{
+          position: "absolute",
+          right: 40,
+          top: 2,
+          width: 24,
+          height: 24,
+          padding: 0,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          background: "transparent",
+          border: "1px solid transparent",
+          borderRadius: 7,
+          color: "var(--text-muted)",
+          cursor: "pointer",
+          transition: "color 0.12s, background 0.12s, border-color 0.12s",
+          WebkitAppRegion: "no-drag",
+        } as DraggableStyle}
+        onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; e.currentTarget.style.background = "var(--bg-hover)"; }}
+        onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-muted)"; e.currentTarget.style.background = "transparent"; }}
+      >
+        {isDark ? (
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="12" cy="12" r="5" />
+            <line x1="12" y1="1" x2="12" y2="3" /><line x1="12" y1="21" x2="12" y2="23" />
+            <line x1="4.22" y1="4.22" x2="5.64" y2="5.64" /><line x1="18.36" y1="18.36" x2="19.78" y2="19.78" />
+            <line x1="1" y1="12" x2="3" y2="12" /><line x1="21" y1="12" x2="23" y2="12" />
+            <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" /><line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
+          </svg>
+        ) : (
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+          </svg>
+        )}
+      </button>
+      <button
+        data-tauri-drag-region="false"
+        onClick={() => setRightPanelOpen((v) => !v)}
+        title={rightPanelOpen ? "隐藏文件面板" : "显示文件面板"}
+        aria-label={rightPanelOpen ? "隐藏文件面板" : "显示文件面板"}
+        aria-pressed={rightPanelOpen}
+        style={{
+          position: "absolute",
+          right: 10,
+          top: 2,
+          width: 24,
+          height: 24,
+          padding: 0,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          background: rightPanelOpen ? "var(--bg-selected)" : "transparent",
+          border: "1px solid transparent",
+          borderRadius: 7,
+          color: rightPanelOpen ? "var(--text)" : "var(--text-muted)",
+          cursor: "pointer",
+          transition: "color 0.12s, background 0.12s, border-color 0.12s",
+          WebkitAppRegion: "no-drag",
+        } as DraggableStyle}
+        onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; e.currentTarget.style.background = "var(--bg-hover)"; }}
+        onMouseLeave={(e) => { e.currentTarget.style.color = rightPanelOpen ? "var(--text)" : "var(--text-muted)"; e.currentTarget.style.background = rightPanelOpen ? "var(--bg-selected)" : "transparent"; }}
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="15" y1="3" x2="15" y2="21" />
+        </svg>
+      </button>
+    </div>
+    <div style={{ display: "flex", height: "calc(100dvh - 28px)", marginTop: 28, overflow: "hidden", background: "var(--bg)" }}>
       {/* Mobile overlay backdrop */}
       <div
         className="sidebar-overlay-backdrop"
@@ -521,10 +714,10 @@ export function AppShell() {
 
       {/* Left sidebar */}
       <div
-        className={`sidebar-container${sidebarOpen ? " sidebar-open" : " sidebar-closed"}`}
+        className={`sidebar-container${sidebarOpen ? " sidebar-open" : " sidebar-closed"}${sidebarCompact ? " sidebar-compact" : ""}`}
         style={{
-          width: sidebarOpen ? sidebarWidth : 0,
-          minWidth: sidebarOpen ? SIDEBAR_MIN : 0,
+          width: sidebarMode === "closed" ? 0 : sidebarCompact ? SIDEBAR_COMPACT : sidebarWidth,
+          minWidth: sidebarMode === "closed" ? 0 : sidebarCompact ? SIDEBAR_COMPACT : SIDEBAR_MIN,
           background: "var(--bg-panel)",
           borderRight: "1px solid var(--border)",
           display: "flex",
@@ -538,7 +731,7 @@ export function AppShell() {
       </div>
 
       {/* Resize handle */}
-      {sidebarOpen && (
+      {sidebarMode === "open" && (
         <div
           onMouseDown={handleResizeStart}
           style={{
@@ -560,86 +753,99 @@ export function AppShell() {
       <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minWidth: 0 }}>
         {/* Top bar with sidebar toggle */}
         <div ref={topBarRef} style={{ display: "flex", alignItems: "center", flexShrink: 0, borderBottom: "1px solid var(--border)", height: 36, background: "var(--bg-panel)" }}>
-          <button
-            onClick={() => setSidebarOpen((v) => !v)}
-            title={sidebarOpen ? "隐藏侧边栏" : "显示侧边栏"}
-            style={{
-              display: "flex", alignItems: "center", justifyContent: "center",
-              width: 36, height: 36, padding: 0,
-              background: "none", border: "none", borderRight: "1px solid var(--border)",
-              color: "var(--text-muted)", cursor: "pointer", flexShrink: 0, transition: "color 0.12s",
-            }}
-            onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
-            onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-muted)"; }}
-          >
-            {sidebarOpen ? (
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="9" y1="3" x2="9" y2="21" />
-              </svg>
-            ) : (
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-                <line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="18" x2="21" y2="18" />
-              </svg>
-            )}
-          </button>
-          <button
-            onClick={(e) => {
-              const rect = e.currentTarget.getBoundingClientRect();
-              toggleTheme({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
-            }}
-            title={isDark ? "切换为浅色模式" : "切换为深色模式"}
-            aria-label={isDark ? "切换为浅色模式" : "切换为深色模式"}
-            aria-pressed={isDark}
-            style={{
-              display: "flex", alignItems: "center", justifyContent: "center",
-              width: 36, height: 36, padding: 0,
-              background: "none", border: "none", borderRight: "1px solid var(--border)",
-              color: "var(--text-muted)", cursor: "pointer", flexShrink: 0, transition: "color 0.12s",
-            }}
-            onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
-            onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-muted)"; }}
-          >
-            {isDark ? (
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <circle cx="12" cy="12" r="5" />
-                <line x1="12" y1="1" x2="12" y2="3" /><line x1="12" y1="21" x2="12" y2="23" />
-                <line x1="4.22" y1="4.22" x2="5.64" y2="5.64" /><line x1="18.36" y1="18.36" x2="19.78" y2="19.78" />
-                <line x1="1" y1="12" x2="3" y2="12" /><line x1="21" y1="12" x2="23" y2="12" />
-                <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" /><line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
-              </svg>
-            ) : (
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
-              </svg>
-            )}
-          </button>
           {showChat && (
-            <div style={{ display: "flex", alignItems: "stretch", height: "100%" }}>
+            <>
               <button
                 ref={systemBtnRef}
                 onClick={() => toggleTopPanel("system")}
                 style={{
-                  display: "flex", alignItems: "center", gap: 6,
-                  height: "100%", padding: "0 12px",
-                  background: activeTopPanel === "system" ? "var(--bg-selected)" : "none",
-                  border: "none",
-                  borderTop: activeTopPanel === "system" ? "2px solid var(--accent)" : "2px solid transparent",
-                  borderRight: "1px solid var(--border)",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  width: 30, height: 30, padding: 0,
+                  background: activeTopPanel === "system" ? "var(--bg-selected)" : "transparent",
+                  border: "none", borderRadius: 8,
                   cursor: "pointer",
                   color: activeTopPanel === "system" ? "var(--text)" : "var(--text-muted)",
-                  fontSize: 11, whiteSpace: "nowrap", transition: "color 0.1s, background 0.1s",
+                  marginLeft: 8, flexShrink: 0,
+                  transition: "color 0.1s, background 0.1s",
                 }}
-                onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
-                onMouseLeave={(e) => { e.currentTarget.style.color = activeTopPanel === "system" ? "var(--text)" : "var(--text-muted)"; }}
+                title="系统提示词"
+                aria-label="系统提示词"
+                onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text)"; }}
+                onMouseLeave={(e) => { e.currentTarget.style.background = activeTopPanel === "system" ? "var(--bg-selected)" : "transparent"; e.currentTarget.style.color = activeTopPanel === "system" ? "var(--text)" : "var(--text-muted)"; }}
               >
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: systemPrompt ? "var(--accent)" : "var(--text-dim)", flexShrink: 0 }}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: systemPrompt ? "var(--accent)" : "currentColor" }}>
                   <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
                   <polyline points="14 2 14 8 20 8" />
                   <line x1="8" y1="13" x2="16" y2="13" />
                   <line x1="8" y1="17" x2="13" y2="17" />
                 </svg>
-                <span>系统提示词</span>
               </button>
+          </>
+          )}
+          {/* Session tabs — inside top bar, to the right of system icon */}
+          {sessionTabs.length > 0 && (
+            <div style={{ flex: 1, minWidth: 0, alignSelf: "stretch", display: "flex", alignItems: "stretch", overflowX: "auto", overflowY: "hidden", gap: 2 }}>
+              {sessionTabs.map((tab) => {
+                const isActive = tab.id === (selectedSession?.id ?? activeSessionTabId);
+                const title = tab.name || tab.firstMessage?.slice(0, 100) || tab.id.slice(0, 16);
+                return (
+                  <div
+                    key={tab.id}
+                    onClick={() => handleSelectSession(tab)}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 4,
+                      padding: "0 10px",
+                      background: "transparent",
+                      borderRadius: "6px 6px 0 0",
+                      borderBottom: isActive ? "2px solid var(--text-muted)" : "2px solid transparent",
+                      cursor: "pointer",
+                      fontSize: 12,
+                      color: isActive ? "var(--text)" : "var(--text-muted)",
+                      whiteSpace: "nowrap",
+                      maxWidth: 160,
+                      flexShrink: 0,
+                      userSelect: "none",
+                      transition: "background 0.1s, color 0.1s",
+                      marginBottom: -1,
+                    }}
+                    title={title}
+                    onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
+                    onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
+                  >
+                    {(() => {
+                      const displayName = tab.name || tab.firstMessage?.slice(0, 40) || tab.id.slice(0, 8);
+                      return (
+                        <span style={{ overflow: "hidden", textOverflow: "ellipsis", fontWeight: isActive ? 500 : 400, opacity: tab.name ? 1 : 0.7 }}>
+                          {displayName.length > 14 ? displayName.slice(0, 12) + "…" : displayName}
+                        </span>
+                      );
+                    })()}
+                    <button
+                      onClick={(e) => { e.stopPropagation(); handleCloseSessionTab(tab.id); }}
+                      style={{
+                        display: "flex", alignItems: "center", justifyContent: "center",
+                        width: 16, height: 16, padding: 0, flexShrink: 0,
+                        background: "transparent", border: "none", borderRadius: 3,
+                        color: "var(--text-dim)", cursor: "pointer",
+                        fontSize: 12, lineHeight: 1,
+                      }}
+                      title="关闭"
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.background = "var(--bg-hover)";
+                        e.currentTarget.style.color = "var(--text)";
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.background = "transparent";
+                        e.currentTarget.style.color = "var(--text-dim)";
+                      }}
+                    >
+                      ×
+                    </button>
+                  </div>
+                );
+              })}
             </div>
           )}
           {/* Session stats — right-aligned in top bar */}
@@ -679,7 +885,7 @@ export function AppShell() {
                   marginLeft: "auto",
                   display: "flex", alignItems: "center", gap: 10,
                   paddingLeft: 12,
-                  paddingRight: rightPanelOpen ? 12 : 48,
+                  paddingRight: 12,
                   height: "100%",
                   fontSize: 11, color: "var(--text-muted)",
                   whiteSpace: "nowrap", cursor: "default",
@@ -1002,19 +1208,6 @@ export function AppShell() {
           background: "var(--bg)",
         }}
       >
-        {/* Right panel tab bar */}
-        <div style={{ display: "flex", alignItems: "center", flexShrink: 0, background: "var(--bg-panel)", borderBottom: "1px solid var(--border)", height: 36 }}>
-          <div style={{ flex: 1, overflow: "hidden" }}>
-            <TabBar
-              tabs={fileTabs}
-              activeTabId={activeFileTabId ?? ""}
-              onSelectTab={setActiveFileTabId}
-              onCloseTab={handleCloseFileTab}
-            />
-          </div>
-
-        </div>
-
         {/* File content */}
         <div style={{ flex: 1, overflow: "hidden" }}>
           {activeFileTab?.filePath ? (
@@ -1027,25 +1220,6 @@ export function AppShell() {
         </div>
       </div>
     </div>
-    {/* File panel toggle — always visible at top-right */}
-    <button
-      onClick={() => setRightPanelOpen((v) => !v)}
-      title={rightPanelOpen ? "隐藏文件面板" : "显示文件面板"}
-      style={{
-        position: "fixed", top: 0, right: 0, zIndex: 300,
-        display: "flex", alignItems: "center", justifyContent: "center",
-        width: 36, height: 36, padding: 0,
-        background: "var(--bg-panel)", border: "none", borderLeft: "1px solid var(--border)", borderBottom: "1px solid var(--border)",
-        color: rightPanelOpen ? "var(--text)" : "var(--text-muted)",
-        cursor: "pointer", transition: "color 0.12s",
-      }}
-      onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
-      onMouseLeave={(e) => { e.currentTarget.style.color = rightPanelOpen ? "var(--text)" : "var(--text-muted)"; }}
-    >
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="15" y1="3" x2="15" y2="21" />
-      </svg>
-    </button>
     {modelsConfigOpen && <ModelsConfig onClose={() => { setModelsConfigOpen(false); setModelsRefreshKey((k) => k + 1); }} />}
     {skillsConfigOpen && (activeCwd ?? selectedSession?.cwd ?? newSessionCwd) && (
       <SkillsConfig cwd={(activeCwd ?? selectedSession?.cwd ?? newSessionCwd)!} onClose={() => setSkillsConfigOpen(false)} />
