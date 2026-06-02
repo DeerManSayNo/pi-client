@@ -134,6 +134,7 @@ export function AppShell() {
   const [projectCwds, setProjectCwds] = useState<string[]>([]);
   const [customCwds, setCustomCwds] = useState<string[]>(() => readCustomCwds());
   const effectiveProjectCwd = selectedSession?.cwd ?? newSessionCwd ?? activeCwd ?? defaultCwd;
+  const projectLocked = selectedSession !== null || pendingSession !== null;
   // True once the initial ?session= URL param has been resolved (or confirmed absent)
   const [initialSessionRestored, setInitialSessionRestored] = useState<boolean>(() => !searchParams.get("session"));
   // Suppresses sessionKey bump in handleCwdChange during the initial URL restore
@@ -173,8 +174,10 @@ export function AppShell() {
     return result;
   }, [defaultCwd, effectiveProjectCwd, customCwds, projectCwds]);
 
+  const effectiveProjectName = effectiveProjectCwd ? getProjectName(effectiveProjectCwd) : "选择项目";
+
   const switchProject = useCallback((cwd: string) => {
-    if (!cwd || cwd === "__add__") return;
+    if (!cwd || cwd === "__add__" || projectLocked) return;
     setSelectedSession(null);
     setNewSessionCwd(cwd);
     setActiveCwd(cwd);
@@ -183,9 +186,10 @@ export function AppShell() {
     setSystemPrompt(null);
     setActiveTopPanel(null);
     router.replace("/", { scroll: false });
-  }, [router]);
+  }, [projectLocked, router]);
 
   const handleAddProjectFromTopBar = useCallback(async () => {
+    if (projectLocked) return;
     let cwd: string | null = null;
     try {
       const selected = await open({ directory: true, multiple: false, title: "选择项目目录" });
@@ -205,22 +209,21 @@ export function AppShell() {
       return next;
     });
     switchProject(finalCwd);
-  }, [defaultCwd, effectiveProjectCwd, switchProject]);
-
-  const handleProjectSelectChange = useCallback((value: string) => {
-    if (value === "__add__") void handleAddProjectFromTopBar();
-    else switchProject(value);
-  }, [handleAddProjectFromTopBar, switchProject]);
+  }, [defaultCwd, effectiveProjectCwd, projectLocked, switchProject]);
 
   useEffect(() => {
     if (!projectDropdownOpen) return;
+    if (projectLocked) {
+      setProjectDropdownOpen(false);
+      return;
+    }
     const handlePointerDown = (event: PointerEvent) => {
       if (projectDropdownRef.current?.contains(event.target as Node)) return;
       setProjectDropdownOpen(false);
     };
     window.addEventListener("pointerdown", handlePointerDown);
     return () => window.removeEventListener("pointerdown", handlePointerDown);
-  }, [projectDropdownOpen]);
+  }, [projectDropdownOpen, projectLocked]);
 
   useEffect(() => {
     let cancelled = false;
@@ -768,10 +771,47 @@ export function AppShell() {
 
         {/* Chat content */}
         <div style={{ flex: 1, overflow: "hidden", position: "relative" }}>
-          {/* Project selector — always visible top-left in content area */}
-          <div
-            ref={projectDropdownRef}
-            style={{
+          {showChat && effectiveProjectName !== "选择项目" && (
+            <div
+              aria-hidden="true"
+              style={{
+                position: "absolute",
+                inset: 0,
+                zIndex: 0,
+                pointerEvents: "none",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                padding: 64,
+                overflow: "hidden",
+              }}
+            >
+              <div
+                style={{
+                  maxWidth: "96%",
+                  boxSizing: "border-box",
+                  color: "var(--text)",
+                  opacity: isDark ? 0.035 : 0.045,
+                  fontSize: "clamp(48px, 10vw, 160px)",
+                  fontWeight: 900,
+                  letterSpacing: "-0.05em",
+                  lineHeight: 1.15,
+                  padding: "0.12em 0.08em",
+                  textAlign: "center",
+                  whiteSpace: "normal",
+                  overflowWrap: "anywhere",
+                  userSelect: "none",
+                }}
+              >
+                {effectiveProjectName}
+              </div>
+            </div>
+          )}
+          {/* Project selector — only shown before a conversation starts */}
+          {!projectLocked && (
+            <div
+              ref={projectDropdownRef}
+              style={{
               position: "absolute",
               top: 12,
               left: 12,
@@ -780,8 +820,11 @@ export function AppShell() {
           >
             <button
               type="button"
-              onClick={() => setProjectDropdownOpen((v) => !v)}
-              title={effectiveProjectCwd ?? "选择项目"}
+              onClick={() => {
+                if (projectLocked) return;
+                setProjectDropdownOpen((v) => !v);
+              }}
+              title={projectLocked ? `${effectiveProjectCwd ?? "当前项目"}（对话开始后不可切换）` : (effectiveProjectCwd ?? "选择项目")}
               style={{
                 display: "flex",
                 alignItems: "center",
@@ -795,28 +838,30 @@ export function AppShell() {
                 fontSize: 14,
                 fontWeight: 700,
                 outline: "none",
-                cursor: "pointer",
+                cursor: projectLocked ? "default" : "pointer",
               }}
             >
               <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {projectOptions.find((project) => project.cwd === effectiveProjectCwd)?.label ?? "选择项目"}
+                {effectiveProjectName}
               </span>
-              <svg
-                width="14"
-                height="14"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2.2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                style={{ color: "var(--text-muted)", flexShrink: 0, transform: projectDropdownOpen ? "rotate(180deg)" : "none", transition: "transform 0.12s" }}
-              >
-                <polyline points="6 9 12 15 18 9" />
-              </svg>
+              {!projectLocked && (
+                <svg
+                  width="14"
+                  height="14"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2.2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  style={{ color: "var(--text-muted)", flexShrink: 0, transform: projectDropdownOpen ? "rotate(180deg)" : "none", transition: "transform 0.12s" }}
+                >
+                  <polyline points="6 9 12 15 18 9" />
+                </svg>
+              )}
             </button>
 
-            {projectDropdownOpen && (
+            {projectDropdownOpen && !projectLocked && (
               <div
                 style={{
                   position: "absolute",
@@ -904,22 +949,26 @@ export function AppShell() {
               </div>
             )}
           </div>
+          )}
           {showChat ? (
-            <ChatWindow
-              key={sessionKey}
-              session={selectedSession}
-              newSessionCwd={effectiveNewSessionCwd}
-              onAgentEnd={handleAgentEnd}
-              onSessionCreated={handleSessionCreated}
-              onSessionStarted={handleSessionStarted}
-              onAgentRunningChange={setSessionRunning}
-              onSessionForked={handleSessionForked}
-              modelsRefreshKey={modelsRefreshKey}
-              chatInputRef={chatInputRef}
-              onSystemPromptChange={handleSystemPromptChange}
-              onSessionStatsChange={handleSessionStatsChange}
-              onContextUsageChange={handleContextUsageChange}
-            />
+            <div style={{ position: "relative", zIndex: 1, height: "100%" }}>
+              <ChatWindow
+                key={sessionKey}
+                session={selectedSession}
+                newSessionCwd={effectiveNewSessionCwd}
+                onAgentEnd={handleAgentEnd}
+                onSessionCreated={handleSessionCreated}
+                onSessionStarted={handleSessionStarted}
+                onAgentRunningChange={setSessionRunning}
+                onSessionForked={handleSessionForked}
+                modelsRefreshKey={modelsRefreshKey}
+                chatInputRef={chatInputRef}
+                onSystemPromptChange={handleSystemPromptChange}
+                onSessionStatsChange={handleSessionStatsChange}
+                onContextUsageChange={handleContextUsageChange}
+                onOpenFile={handleOpenFile}
+              />
+            </div>
           ) : showPlaceholder ? (
             activeCwd ? (
               <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-muted)", fontSize: 15 }}>

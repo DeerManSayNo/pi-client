@@ -649,8 +649,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
               disabled={false}
               style={{
                 display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
-                background: "var(--bg-hover)",
-                border: "1px solid var(--border)",
+                background: "transparent",
+                border: "none",
                 color: "var(--text-muted)",
                 cursor: "pointer",
                 height: 32,
@@ -661,18 +661,16 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                 fontWeight: 500,
                 letterSpacing: "-0.01em",
                 flexShrink: 0,
-                transition: "background 0.12s, color 0.12s, border-color 0.12s",
+                transition: "background 0.12s, color 0.12s",
               }}
               title={activeSelectedCwd ? `在 ${activeSelectedCwd} 中新建会话` : "新建会话（将使用最近项目或默认项目）"}
               onMouseEnter={(e) => {
-                e.currentTarget.style.background = "var(--bg-selected)";
+                e.currentTarget.style.background = "var(--bg-hover)";
                 e.currentTarget.style.color = "var(--accent)";
-                e.currentTarget.style.borderColor = "rgba(37,99,235,0.35)";
               }}
               onMouseLeave={(e) => {
-                e.currentTarget.style.background = "var(--bg-hover)";
+                e.currentTarget.style.background = "transparent";
                 e.currentTarget.style.color = "var(--text-muted)";
-                e.currentTarget.style.borderColor = "var(--border)";
               }}
             >
               <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
@@ -681,89 +679,10 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
               </svg>
               新建
             </button>
-            <button
-              onClick={() => loadSessions(false)}
-              style={{
-                display: "flex", alignItems: "center", justifyContent: "center",
-                background: sessionRefreshDone ? "rgba(74,222,128,0.18)" : "var(--bg-hover)",
-                border: `1px solid ${sessionRefreshDone ? "rgba(74,222,128,0.4)" : "var(--border)"}`,
-                color: sessionRefreshDone ? "#4ade80" : "var(--text-muted)",
-                cursor: "pointer",
-                width: 32, height: 32,
-                borderRadius: 7,
-                padding: 0,
-                flexShrink: 0,
-                transition: "background 0.3s, color 0.3s, border-color 0.3s",
-              }}
-              onMouseEnter={(e) => {
-                if (sessionRefreshDone) return;
-                e.currentTarget.style.background = "var(--bg-selected)";
-                e.currentTarget.style.color = "var(--accent)";
-                e.currentTarget.style.borderColor = "rgba(37,99,235,0.35)";
-              }}
-              onMouseLeave={(e) => {
-                if (sessionRefreshDone) return;
-                e.currentTarget.style.background = "var(--bg-hover)";
-                e.currentTarget.style.color = "var(--text-muted)";
-                e.currentTarget.style.borderColor = "var(--border)";
-              }}
-              title="刷新会话列表"
-            >
-              {sessionRefreshDone ? (
-                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#4ade80" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                  <polyline points="20 6 9 17 4 12" />
-                </svg>
-              ) : (
-                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
-                  <path d="M3 3v5h5" />
-                </svg>
-              )}
-            </button>
+
           </div>
         </div>
 
-        <div style={{ display: "flex", gap: 6 }}>
-          <button
-            onClick={handleDefaultCwd}
-            style={{
-              flex: 1,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              gap: 6,
-              height: 30,
-              background: "var(--bg-hover)",
-              border: "1px solid var(--border)",
-              borderRadius: 7,
-              color: "var(--text-muted)",
-              cursor: "pointer",
-              fontSize: 11,
-            }}
-            title="使用默认目录作为当前新建会话目录"
-          >
-            使用默认目录
-          </button>
-          <button
-            onClick={handleCustomPath}
-            style={{
-              flex: 1,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              gap: 6,
-              height: 30,
-              background: "var(--bg-hover)",
-              border: "1px solid var(--border)",
-              borderRadius: 7,
-              color: "var(--text-muted)",
-              cursor: "pointer",
-              fontSize: 11,
-            }}
-          >
-            添加路径…
-          </button>
-        </div>
       </div>
 
       {/* Project/session list */}
@@ -805,6 +724,36 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             }}
           />
         ))}
+        <div style={{ padding: "4px 14px 6px", display: "flex", justifyContent: "center" }}>
+          <button
+            onClick={handleCustomPath}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 4,
+              background: "transparent",
+              border: "none",
+              color: "var(--text-muted)",
+              cursor: "pointer",
+              fontSize: 12,
+              padding: "3px 6px",
+              borderRadius: 5,
+              transition: "color 0.15s, background 0.15s",
+            }}
+            title="添加自定义路径"
+            onMouseEnter={(e) => {
+              e.currentTarget.style.color = "var(--accent)";
+              e.currentTarget.style.background = "var(--bg-hover)";
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.color = "var(--text-muted)";
+              e.currentTarget.style.background = "transparent";
+            }}
+          >
+            <span style={{ fontSize: 15, lineHeight: 1 }}>+</span>
+            <span>添加项目</span>
+          </button>
+        </div>
       </div>
 
       {projectMenu && (() => {
@@ -879,7 +828,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             height: 6,
             flexShrink: 0,
             cursor: 'row-resize',
-            borderTop: `1px solid ${isDraggingSplitter || isHoveringSplitter ? 'var(--text-muted)' : 'var(--text-dim)'}`,
+            borderTop: `1px solid ${isDraggingSplitter || isHoveringSplitter ? 'var(--text-muted)' : 'transparent'}`,
             background: 'var(--bg-subtle)',
             transition: isDraggingSplitter ? 'none' : 'border-color 0.15s',
           }}
@@ -1015,7 +964,7 @@ function ProjectSection({
 
   return (
     <div
-      style={{ borderBottom: "1px solid var(--border)" }}
+      style={{ borderBottom: "none", marginBottom: 2 }}
       onContextMenu={(event) => {
         event.preventDefault();
         event.stopPropagation();
@@ -1036,12 +985,15 @@ function ProjectSection({
           alignItems: "center",
           gap: 7,
           padding: "5px 10px",
-          background: "none",
+          background: "var(--bg-subtle)",
           border: "none",
           color: "var(--text)",
           cursor: "pointer",
           textAlign: "left",
+          transition: "background 0.12s",
         }}
+        onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
+        onMouseLeave={(e) => { e.currentTarget.style.background = "var(--bg-subtle)"; }}
         title={project.cwd}
       >
         <svg

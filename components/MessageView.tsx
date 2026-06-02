@@ -19,16 +19,25 @@ import type {
   ThinkingContent,
 } from "@/lib/types";
 
+interface WatchdogInfo {
+  eventIdleMs: number;
+  contentIdleMs: number;
+  eventThresholdMs: number;
+  contentThresholdMs: number;
+}
+
 interface Props {
   message: AgentMessage;
   isStreaming?: boolean;
   toolResults?: Map<string, ToolResultMessage>;
   modelNames?: Record<string, string>;
+  watchdogInfo?: WatchdogInfo | null;
   entryId?: string;
   onFork?: (entryId: string) => void;
   forking?: boolean;
   showTimestamp?: boolean;
   prevTimestamp?: number;
+  onResend?: (message: string, entryId?: string) => void;
 }
 
 function formatTime(ts?: number): string | null {
@@ -63,12 +72,12 @@ function copyText(text: string): Promise<void> {
   }
 }
 
-export function MessageView({ message, isStreaming, toolResults, modelNames, entryId, onFork, forking, showTimestamp, prevTimestamp }: Props) {
+export function MessageView({ message, isStreaming, toolResults, modelNames, watchdogInfo, entryId, onFork, forking, showTimestamp, prevTimestamp, onResend }: Props) {
   if (message.role === "user") {
-    return <UserMessageView message={message as UserMessage} entryId={entryId} onFork={onFork} forking={forking} />;
+    return <UserMessageView message={message as UserMessage} entryId={entryId} onFork={onFork} forking={forking} onResend={onResend} />;
   }
   if (message.role === "assistant") {
-    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} modelNames={modelNames} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} />;
+    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} modelNames={modelNames} watchdogInfo={watchdogInfo} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} />;
   }
   if (message.role === "toolResult") {
     // Rendered inline under its toolCall — skip standalone rendering if paired
@@ -77,15 +86,13 @@ export function MessageView({ message, isStreaming, toolResults, modelNames, ent
   return null;
 }
 
-function UserMessageView({ message, entryId, onFork, forking }: {
+function UserMessageView({ message, entryId, onResend }: {
   message: UserMessage;
   entryId?: string;
   onFork?: (entryId: string) => void;
   forking?: boolean;
+  onResend?: (message: string, entryId?: string) => void;
 }) {
-  const [hovered, setHovered] = useState(false);
-  const [copied, setCopied] = useState(false);
-
   const content =
     typeof message.content === "string"
       ? message.content
@@ -99,157 +106,235 @@ function UserMessageView({ message, entryId, onFork, forking }: {
       ? []
       : message.content.filter((b): b is ImageContent => b.type === "image");
 
-  const time = formatTime(message.timestamp);
-  const canFork = !!entryId && !!onFork;
+  const [expanded, setExpanded] = useState(false);
+  const [editValue, setEditValue] = useState(content);
+  const editorRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const canResend = !!onResend && !!entryId;
 
-  const copyContent = () => {
-    copyText(content).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    });
+  useEffect(() => {
+    setEditValue(content);
+  }, [content]);
+
+  const resizeTextarea = () => {
+    const ta = textareaRef.current;
+    if (!ta) return;
+    ta.style.height = "auto";
+    ta.style.height = `${Math.min(Math.max(ta.scrollHeight, 24), 200)}px`;
   };
 
+  useEffect(() => {
+    if (expanded) requestAnimationFrame(resizeTextarea);
+  }, [expanded, editValue]);
+
+  const handleCancel = () => {
+    setEditValue(content);
+    setExpanded(false);
+  };
+
+  useEffect(() => {
+    if (!expanded) return;
+
+    const handlePointerDown = (event: PointerEvent) => {
+      const editor = editorRef.current;
+      if (!editor) return;
+      if (event.target instanceof Node && !editor.contains(event.target)) {
+        setEditValue(content);
+        setExpanded(false);
+      }
+    };
+
+    document.addEventListener("pointerdown", handlePointerDown);
+    return () => document.removeEventListener("pointerdown", handlePointerDown);
+  }, [expanded, content]);
+
+  const handleSendEdit = () => {
+    const trimmed = editValue.trim();
+    if (!trimmed) return;
+    onResend?.(trimmed, entryId);
+    setExpanded(false);
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      handleSendEdit();
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      handleCancel();
+    }
+  };
+
+  const renderImages = () => imageBlocks.length > 0 && (
+    <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: content ? 10 : 0 }}>
+      {imageBlocks.map((img, i) => {
+        const flat = img as unknown as { data?: string; mimeType?: string };
+        const src = img.source
+          ? img.source.type === "base64"
+            ? `data:${img.source.media_type};base64,${img.source.data}`
+            : img.source.url ?? ""
+          : flat.data
+            ? `data:${flat.mimeType};base64,${flat.data}`
+            : "";
+        return (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            key={i}
+            src={src}
+            alt=""
+            style={{ maxWidth: 260, maxHeight: 220, borderRadius: 8, objectFit: "contain", display: "block", border: "1px solid var(--border)" }}
+          />
+        );
+      })}
+    </div>
+  );
+
   return (
-    <div
-      style={{ marginBottom: 16, display: "flex", flexDirection: "column", alignItems: "flex-end" }}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-    >
-      <div style={{ display: "flex", alignItems: "flex-end", gap: 6, maxWidth: "85%" }}>
-        <div
+    <div style={{ marginBottom: 24, display: "flex", justifyContent: "center", width: "100%" }}>
+      {!expanded ? (
+        <button
+          type="button"
+          onClick={() => canResend && setExpanded(true)}
+          title={canResend ? "点击编辑并重新发送" : undefined}
           style={{
-            flex: 1,
-            minWidth: 0,
-            background: "var(--user-bg)",
-            border: "1px solid rgba(59,130,246,0.2)",
-            borderRadius: 12,
-            padding: "8px 12px",
-            fontSize: 14,
-            lineHeight: 1.6,
+            width: "min(100%, 72rem)",
+            display: "block",
+            textAlign: "left",
+            padding: "10px 14px",
+            background: "var(--bg)",
+            border: "1px solid color-mix(in srgb, var(--border) 70%, transparent)",
+            borderRadius: 14,
             color: "var(--text)",
-            whiteSpace: "pre-wrap",
-            wordBreak: "break-word",
+            cursor: canResend ? "pointer" : "default",
+            font: "inherit",
+            boxShadow: "0 1px 2px rgba(15,23,42,0.04), 0 8px 24px -12px rgba(15,23,42,0.10)",
+            transition: "border-color 0.15s, background 0.15s, box-shadow 0.15s",
+          }}
+          onMouseEnter={(e) => {
+            if (!canResend) return;
+            e.currentTarget.style.borderColor = "rgba(148,163,184,0.55)";
+            e.currentTarget.style.boxShadow = "0 0 0 1px rgba(148,163,184,0.12)";
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.borderColor = "var(--border)";
+            e.currentTarget.style.boxShadow = "none";
           }}
         >
-          {imageBlocks.length > 0 && (
-            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: content ? 8 : 0 }}>
-              {imageBlocks.map((img, i) => {
-                // lib/types.ts ImageContent uses {source:{type,data,media_type,url}}
-                // pi-ai on-disk format uses flat {data, mimeType} — handle both
-                const flat = img as unknown as { data?: string; mimeType?: string };
-                const src = img.source
-                  ? img.source.type === "base64"
-                    ? `data:${img.source.media_type};base64,${img.source.data}`
-                    : img.source.url ?? ""
-                  : flat.data
-                    ? `data:${flat.mimeType};base64,${flat.data}`
-                    : "";
-                return (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img
-                    key={i}
-                    src={src}
-                    alt=""
-                    style={{ maxWidth: 240, maxHeight: 240, borderRadius: 6, objectFit: "contain", display: "block", border: "1px solid rgba(59,130,246,0.15)" }}
-                  />
-                );
-              })}
-            </div>
-          )}
-          {content}
-        </div>
-
-      </div>
-
-      {/* Bottom row: action buttons + timestamp */}
-      {(time || canFork || true) && (
-        <div style={{
-          display: "flex", alignItems: "center", justifyContent: "flex-end",
-          gap: 6, marginTop: 3,
-        }}>
-          <div style={{
-            display: "flex", gap: 3,
-            opacity: hovered ? 1 : 0,
-            pointerEvents: hovered ? "auto" : "none",
-            transition: "opacity 0.12s",
-          }}>
-            <button
-              onClick={copyContent}
-              title="复制消息"
-              style={{
-                display: "flex", alignItems: "center", gap: 4,
-                padding: "3px 8px", height: 22,
-                background: "none", border: "none",
-                borderRadius: 5,
-                color: copied ? "var(--accent)" : "var(--text-dim)",
-                cursor: "pointer",
-                fontSize: 11, fontWeight: 400,
-                whiteSpace: "nowrap",
-                transition: "color 0.12s",
-              }}
-              onMouseEnter={(e) => { if (!copied) e.currentTarget.style.color = "var(--accent)"; }}
-              onMouseLeave={(e) => { if (!copied) e.currentTarget.style.color = "var(--text-dim)"; }}
-            >
-              {copied ? (
-                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                  <polyline points="20 6 9 17 4 12" />
-                </svg>
-              ) : (
-                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                  <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
-                  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-                </svg>
-              )}
-              {copied ? "已复制" : "复制"}
-            </button>
+          {renderImages()}
+          <div
+            style={{
+              fontSize: 14,
+              lineHeight: 1.6,
+              fontWeight: 400,
+              whiteSpace: "pre-wrap",
+              wordBreak: "break-word",
+            }}
+          >
+            {content}
           </div>
-          {canFork && (
-            <div style={{
-              display: "flex", gap: 3,
-              opacity: (hovered || forking) ? 1 : 0,
-              pointerEvents: (hovered || forking) ? "auto" : "none",
-              transition: "opacity 0.12s",
-            }}>
-              <button
-                  onClick={() => { onFork!(entryId!); }}
-                  disabled={forking}
-                  title={forking ? "正在创建新会话…" : "新建会话 — 从此处消息起创建一个新的独立会话"}
-                  style={{
-                    display: "flex", alignItems: "center", gap: 4,
-                    padding: "3px 8px", height: 22,
-                    background: "none", border: "none",
-                    borderRadius: 5,
-                    color: forking ? "var(--accent)" : "var(--text-dim)",
-                    cursor: forking ? "not-allowed" : "pointer",
-                    fontSize: 11, fontWeight: 400,
-                    whiteSpace: "nowrap",
-                    transition: "color 0.12s",
-                  }}
-                  onMouseEnter={(e) => { if (!forking) e.currentTarget.style.color = "var(--accent)"; }}
-                  onMouseLeave={(e) => { if (!forking) e.currentTarget.style.color = "var(--text-dim)"; }}
-                >
-                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                    <line x1="6" y1="3" x2="6" y2="15" />
-                    <circle cx="18" cy="6" r="3" />
-                    <circle cx="6" cy="18" r="3" />
-                    <path d="M18 9a9 9 0 0 1-9 9" />
-                  </svg>
-                  {forking ? "创建中…" : "新建会话"}
-                </button>
-            </div>
-          )}
-          {time && <span style={{ fontSize: 10, color: "var(--text-dim)" }}>{time}</span>}
+        </button>
+      ) : (
+        <div
+          ref={editorRef}
+          style={{
+            width: "min(100%, 72rem)",
+            display: "flex",
+            gap: 8,
+            alignItems: "center",
+            background: "var(--bg)",
+            border: "1px solid color-mix(in srgb, var(--border) 70%, transparent)",
+            borderRadius: 14,
+            padding: "10px 10px 10px 14px",
+            boxShadow: "0 1px 2px rgba(15,23,42,0.04), 0 8px 24px -12px rgba(15,23,42,0.10)",
+            transition: "border-color 0.15s, background 0.15s, box-shadow 0.15s",
+          }}
+        >
+          <div style={{ flex: 1, minWidth: 0 }}>
+            {renderImages()}
+            <textarea
+              ref={textareaRef}
+              value={editValue}
+              onChange={(e) => setEditValue(e.target.value)}
+              onKeyDown={handleKeyDown}
+              rows={1}
+              autoFocus
+              style={{
+                width: "100%",
+                minHeight: 24,
+                maxHeight: 200,
+                padding: 0,
+                background: "transparent",
+                border: "none",
+                outline: "none",
+                resize: "none",
+                overflow: "auto",
+                color: "var(--text)",
+                fontFamily: "inherit",
+                fontSize: 14,
+                fontWeight: 400,
+                lineHeight: 1.6,
+              }}
+            />
+          </div>
+
+            <button
+              type="button"
+              onClick={handleCancel}
+              style={{
+                flexShrink: 0,
+                alignSelf: "flex-end",
+                padding: "7px 10px",
+                background: "none",
+                border: "none",
+                borderRadius: 8,
+                color: "var(--text-muted)",
+                cursor: "pointer",
+                fontSize: 13,
+                fontWeight: 500,
+                letterSpacing: "-0.01em",
+              }}
+            >
+              取消
+            </button>
+            <button
+              type="button"
+              onClick={handleSendEdit}
+              disabled={!editValue.trim()}
+              style={{
+                flexShrink: 0,
+                alignSelf: "flex-end",
+                display: "flex", alignItems: "center", gap: 6,
+                padding: "7px 14px",
+                background: editValue.trim() ? "var(--accent)" : "var(--bg-panel)",
+                border: "none",
+                borderRadius: 8,
+                color: editValue.trim() ? "#fff" : "var(--text-dim)",
+                cursor: editValue.trim() ? "pointer" : "not-allowed",
+                fontSize: 13,
+                fontWeight: 600,
+                letterSpacing: "-0.01em",
+                boxShadow: editValue.trim() ? "0 1px 3px rgba(37,99,235,0.25)" : "none",
+                transition: "background 0.15s, box-shadow 0.15s",
+              }}
+              title="发送"
+            >
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <line x1="2" y1="7" x2="11" y2="7" />
+                <polyline points="7.5 3 12 7 7.5 11" />
+              </svg>
+              发送
+            </button>
         </div>
       )}
     </div>
   );
 }
-
 function AssistantMessageView({
   message,
   isStreaming,
   toolResults,
   modelNames,
+  watchdogInfo,
   showTimestamp,
   prevTimestamp,
 }: {
@@ -257,6 +342,7 @@ function AssistantMessageView({
   isStreaming?: boolean;
   toolResults?: Map<string, ToolResultMessage>;
   modelNames?: Record<string, string>;
+  watchdogInfo?: WatchdogInfo | null;
   showTimestamp?: boolean;
   prevTimestamp?: number;
 }) {
@@ -406,6 +492,21 @@ function AssistantMessageView({
                     return (
                       <span style={{ marginLeft: 6, padding: "1px 6px", borderRadius: 4, background: bg, color: "#fff", fontSize: 11, fontWeight: 400 }}>
                         {tps.toFixed(1)} t/s
+                      </span>
+                    );
+                  })()}
+                  {watchdogInfo && (() => {
+                    const eventLeft = Math.max(0, Math.ceil((watchdogInfo.eventThresholdMs - watchdogInfo.eventIdleMs) / 1000));
+                    const contentLeft = Math.max(0, Math.ceil((watchdogInfo.contentThresholdMs - watchdogInfo.contentIdleMs) / 1000));
+                    const eventTriggered = watchdogInfo.eventIdleMs >= watchdogInfo.eventThresholdMs;
+                    const contentTriggered = watchdogInfo.contentIdleMs >= watchdogInfo.contentThresholdMs;
+                    const color = eventTriggered || contentTriggered ? "#e01a4f" : eventLeft <= 10 || contentLeft <= 10 ? "#f9c22e" : "var(--text-dim)";
+                    return (
+                      <span
+                        title={`业务事件静默 ${Math.floor(watchdogInfo.eventIdleMs / 1000)}s / ${Math.floor(watchdogInfo.eventThresholdMs / 1000)}s；内容停滞 ${Math.floor(watchdogInfo.contentIdleMs / 1000)}s / ${Math.floor(watchdogInfo.contentThresholdMs / 1000)}s`}
+                        style={{ marginLeft: 6, color, fontSize: 11, fontVariantNumeric: "tabular-nums" }}
+                      >
+                        事件 {eventTriggered ? "检查中" : `${eventLeft}s`} · 内容 {contentTriggered ? "检查中" : `${contentLeft}s`}
                       </span>
                     );
                   })()}

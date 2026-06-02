@@ -2,6 +2,7 @@ import path from "path";
 import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
 import { cacheSessionPath } from "./session-reader";
 import type { AgentSessionLike, ToolInfo } from "./pi-types";
+import { getLiveIslandClient } from "./live-island-client";
 
 // ============================================================================
 // Types
@@ -81,9 +82,18 @@ export class AgentSessionWrapper {
   }
 
   start(): void {
+    const liveIsland = getLiveIslandClient();
+    const cwd = this.inner.sessionManager.getCwd();
+    liveIsland.trackSession(this.inner.sessionId, cwd);
+
     this.unsubscribe = this.inner.subscribe((event: AgentEvent) => {
       this.resetIdleTimer();
       for (const l of this.listeners) l(event);
+
+      // Forward to AIControls Live Island
+      const currentCwd = this.inner.sessionManager.getCwd();
+      liveIsland.handleEvent(this.inner.sessionId, currentCwd, event);
+
       if (event.type === "tool_execution_start" && typeof event.toolCallId === "string") {
         this.pendingToolEvents.set(event.toolCallId, event);
         return;
@@ -95,9 +105,8 @@ export class AgentSessionWrapper {
         this.pendingToolEvents.delete(event.toolCallId);
       }
       const changedFilePath = extractChangedFilePath(sourceEvent);
-      const cwd = this.inner.sessionManager.getCwd();
-      if (changedFilePath && cwd) {
-        const resolved = resolveChangedFilePath(changedFilePath, cwd);
+      if (changedFilePath && currentCwd) {
+        const resolved = resolveChangedFilePath(changedFilePath, currentCwd);
         if (resolved) {
           for (const l of this.listeners) l({ type: "agent_file_changed", filePath: resolved, toolName: extractToolName(sourceEvent) });
         }
@@ -129,6 +138,10 @@ export class AgentSessionWrapper {
 
     switch (type) {
       case "prompt": {
+        // Record prompt text for Live Island display
+        if (command.message) {
+          getLiveIslandClient().recordPrompt(this.inner.sessionId, command.message as string);
+        }
         // Fire and forget — events come via subscribe
         const promptImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
         this.inner.prompt(command.message as string, promptImages?.length ? { images: promptImages } : undefined).catch(() => {});

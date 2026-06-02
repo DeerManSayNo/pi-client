@@ -5,6 +5,7 @@ import type { AgentMessage, SessionInfo } from "@/lib/types";
 import { MessageView } from "./MessageView";
 import { ChatInput, type ChatInputHandle } from "./ChatInput";
 import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
+import { ChangedFilesList } from "./ChangedFilesList";
 import { useAgentSession, type AgentPhase } from "@/hooks/useAgentSession";
 import { useAudio } from "@/hooks/useAudio";
 import { useDragDrop } from "@/hooks/useDragDrop";
@@ -22,6 +23,7 @@ interface Props {
   onSystemPromptChange?: (prompt: string | null) => void;
   onSessionStatsChange?: (stats: { tokens: { input: number; output: number; cacheRead: number; cacheWrite: number }; cost?: number } | null) => void;
   onContextUsageChange?: (usage: { percent: number | null; contextWindow: number; tokens: number | null } | null) => void;
+  onOpenFile?: (filePath: string, fileName: string) => void;
 }
 
 function phaseLabel(phase: AgentPhase): string {
@@ -57,6 +59,8 @@ const TYPEWRITER_PHRASES = [
   "做您的小黄鸭。",
 ];
 
+const AUTO_SCROLL_THRESHOLD = 80;
+
 function Typewriter({ phrases }: { phrases: string[] }) {
   const [phraseIdx, setPhraseIdx] = useState(() => Math.floor(Math.random() * phrases.length));
   const [text, setText] = useState("");
@@ -91,11 +95,20 @@ function Typewriter({ phrases }: { phrases: string[] }) {
   );
 }
 
-export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionStarted, onAgentRunningChange, onSessionForked, modelsRefreshKey, chatInputRef, onSystemPromptChange, onSessionStatsChange, onContextUsageChange }: Props) {
+export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionStarted, onAgentRunningChange, onSessionForked, modelsRefreshKey, chatInputRef, onSystemPromptChange, onSessionStatsChange, onContextUsageChange, onOpenFile }: Props) {
+  // Track changed files from agent_end event
+  const [changedFiles, setChangedFiles] = useState<string[]>([]);
+  const wrappedOnAgentEnd = useCallback((cf?: string[]) => {
+    if (cf && cf.length > 0) {
+      setChangedFiles(cf);
+    }
+    onAgentEnd?.(cf);
+  }, [onAgentEnd]);
+
   const {
     loading, error, messages, entryIds, streamState,
     agentRunning, modelNames, modelList, modelThinkingLevels, modelThinkingLevelMaps, toolPreset, thinkingLevel,
-    retryInfo, contextUsage, forkingEntryId,
+    retryInfo, contextUsage, forkingEntryId, watchdogInfo,
     isCompacting, compactError, displayModel: displayModelValue, sessionStats,
     agentPhase,
     isNew,
@@ -105,9 +118,17 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
     handleCompact, handleSteer, handleFollowUp, handleAbortCompaction,
     handleToolPresetChange, handleThinkingLevelChange, handleAgentEventRef,
   } = useAgentSession({
-    session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionStarted, onSessionForked,
+    session, newSessionCwd, onAgentEnd: wrappedOnAgentEnd, onSessionCreated, onSessionStarted, onSessionForked,
     modelsRefreshKey, onSystemPromptChange,
   });
+
+  const handleResend = useCallback((message: string) => {
+    if (agentRunning && handleSteer) {
+      handleSteer(message);
+    } else if (!agentRunning) {
+      handleSend(message);
+    }
+  }, [agentRunning, handleSteer, handleSend]);
 
   useEffect(() => {
     onAgentRunningChange?.(session?.id, agentRunning);
@@ -119,10 +140,13 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
   const soundEnabledRef = useRef(soundEnabled);
   soundEnabledRef.current = soundEnabled;
 
-  // Wrap agent event handler to play sound on agent_end
+  // Wrap agent event handler to play sound on agent_end and clear changed files on agent_start
   const origHandler = handleAgentEventRef.current;
   useEffect(() => {
     handleAgentEventRef.current = (event) => {
+      if (event.type === "agent_start") {
+        setChangedFiles([]);
+      }
       if (event.type === "agent_end" && soundEnabledRef.current) {
         playDoneSoundRef.current();
       }
@@ -162,17 +186,95 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
   const visibleMessages = messages.filter((m) => m.role === "user" || m.role === "assistant");
   const messageRefs = useMessageRefs(visibleMessages.length);
   const liveStreamEndRef = useRef<HTMLDivElement | null>(null);
+  const [shouldAutoScroll, setShouldAutoScroll] = useState(true);
+  const shouldAutoScrollRef = useRef(true);
+  const userScrollIntentRef = useRef(false);
+  const userScrollIntentTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const markUserScrollIntent = useCallback(() => {
+    userScrollIntentRef.current = true;
+    if (userScrollIntentTimerRef.current) clearTimeout(userScrollIntentTimerRef.current);
+    userScrollIntentTimerRef.current = setTimeout(() => {
+      userScrollIntentRef.current = false;
+    }, 200);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (userScrollIntentTimerRef.current) clearTimeout(userScrollIntentTimerRef.current);
+    };
+  }, []);
+
+  const setAutoScroll = useCallback((enabled: boolean) => {
+    shouldAutoScrollRef.current = enabled;
+    setShouldAutoScroll(enabled);
+  }, []);
+
+  const isNearBottom = useCallback(() => {
+    const container = scrollContainerRef.current;
+    if (!container) return true;
+
+    // During streaming we track the live tail, not the temporary bottom spacer.
+    const liveEnd = liveStreamEndRef.current;
+    if (agentRunning && liveEnd) {
+      const containerRect = container.getBoundingClientRect();
+      const liveEndRect = liveEnd.getBoundingClientRect();
+      return liveEndRect.bottom - containerRect.bottom < AUTO_SCROLL_THRESHOLD;
+    }
+
+    return container.scrollHeight - container.scrollTop - container.clientHeight < AUTO_SCROLL_THRESHOLD;
+  }, [agentRunning, scrollContainerRef]);
+
+  const scrollToLiveBottom = useCallback((behavior: ScrollBehavior = "auto") => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+
+    const liveEnd = liveStreamEndRef.current;
+    if (agentRunning && liveEnd) {
+      const containerRect = container.getBoundingClientRect();
+      const liveEndRect = liveEnd.getBoundingClientRect();
+      const nextTop = container.scrollTop + (liveEndRect.bottom - containerRect.bottom);
+      container.scrollTo({ top: nextTop, behavior });
+      return;
+    }
+
+    container.scrollTo({ top: container.scrollHeight - container.clientHeight, behavior });
+  }, [agentRunning, scrollContainerRef]);
+
+  const handleScroll = useCallback(() => {
+    const nearBottom = isNearBottom();
+    if (nearBottom) {
+      setAutoScroll(true);
+      return;
+    }
+
+    // Only user-initiated upward scrolling pauses tracking. Programmatic scrolls
+    // from session loading / prompt positioning should not fight streaming follow.
+    if (userScrollIntentRef.current) {
+      setAutoScroll(false);
+    }
+  }, [isNearBottom, setAutoScroll]);
+
+  const handleResumeAutoScroll = useCallback(() => {
+    setAutoScroll(true);
+    scrollToLiveBottom("smooth");
+  }, [scrollToLiveBottom, setAutoScroll]);
+
+  useEffect(() => {
+    setAutoScroll(true);
+  }, [session?.id, isNew, setAutoScroll]);
 
   useEffect(() => {
     if (!agentRunning) return;
-    const anchor = liveStreamEndRef.current;
-    if (!anchor) return;
+    if (!shouldAutoScrollRef.current) return;
 
     const frame = requestAnimationFrame(() => {
-      anchor.scrollIntoView({ block: "end", behavior: "auto" });
+      if (shouldAutoScrollRef.current) {
+        scrollToLiveBottom("auto");
+      }
     });
     return () => cancelAnimationFrame(frame);
-  }, [agentRunning, streamState.streamingMessage, agentPhase]);
+  }, [agentRunning, streamState.streamingMessage, agentPhase, scrollToLiveBottom]);
 
   const isEmptyNew = isNew && messages.length === 0 && !streamState.isStreaming && !agentRunning;
 
@@ -306,7 +408,13 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
       ) : (
       <>
       <div className="relative flex flex-1 overflow-hidden">
-        <div ref={scrollContainerRef} className="flex-1 overflow-y-auto pt-4 [scrollbar-width:none]">
+        <div
+          ref={scrollContainerRef}
+          onScroll={handleScroll}
+          onWheel={markUserScrollIntent}
+          onTouchStart={markUserScrollIntent}
+          className="flex-1 overflow-y-auto pt-4 [scrollbar-width:none]"
+        >
           <div className="mx-auto max-w-[820px] px-4">
 
             {(() => {
@@ -348,6 +456,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
                     forking={forkingEntryId === entryIds[idx]}
                     showTimestamp={showTimestamp}
                     prevTimestamp={idx > 0 ? (messages[idx - 1] as import("@/lib/types").AgentMessage & { timestamp?: number }).timestamp : undefined}
+                    onResend={session && entryIds[idx] ? handleResend : undefined}
                   />
                 );
                 if (!isVisible) return view;
@@ -363,7 +472,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
             })()}
 
             {streamState.isStreaming && streamState.streamingMessage && (
-              <MessageView message={streamState.streamingMessage as AgentMessage} isStreaming modelNames={modelNames} />
+              <MessageView message={streamState.streamingMessage as AgentMessage} isStreaming modelNames={modelNames} watchdogInfo={watchdogInfo} />
             )}
 
             {agentRunning && !streamState.streamingMessage && (
@@ -378,9 +487,28 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
               <div style={{ height: scrollContainerRef.current ? scrollContainerRef.current.clientHeight : "80vh" }} />
             )}
 
+            {!agentRunning && changedFiles.length > 0 && (
+              <ChangedFilesList
+                files={changedFiles}
+                cwd={session?.cwd ?? newSessionCwd ?? null}
+                onOpenFile={onOpenFile ? (fp) => {
+                  const name = fp.split(/[\\/]/).filter(Boolean).pop() ?? fp;
+                  onOpenFile(fp, name);
+                } : undefined}
+              />
+            )}
             <div ref={messagesEndRef} />
           </div>
         </div>
+        {!shouldAutoScroll && agentRunning && (
+          <button
+            type="button"
+            onClick={handleResumeAutoScroll}
+            className="absolute bottom-4 left-1/2 z-20 -translate-x-1/2 rounded-full border border-border bg-bg-panel px-3 py-1.5 text-xs text-text shadow-lg transition hover:bg-bg-hover"
+          >
+            回到底部
+          </button>
+        )}
         <ChatMinimap
           messages={messages}
           streamingMessage={streamState.streamingMessage}

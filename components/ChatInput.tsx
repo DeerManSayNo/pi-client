@@ -86,6 +86,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const [skills, setSkills] = useState<SkillOption[]>([]);
   const [skillPickerRect, setSkillPickerRect] = useState<{ top: number; left: number; width: number } | null>(null);
   const [skillPickerIndex, setSkillPickerIndex] = useState(0);
+  const [selectedSkill, setSelectedSkill] = useState<SkillOption | null>(null);
   const skillPickerRef = useRef<HTMLDivElement>(null);
   const skillsFetchRef = useRef<AbortController | null>(null);
 
@@ -102,6 +103,9 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const suppressNextEnterTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingEnterSendTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastCompositionEndAtRef = useRef(0);
+  // Sync isStreaming prop to a ref to avoid stale closure in handleSend / runSendAction.
+  const isStreamingRef = useRef(isStreaming);
+  isStreamingRef.current = isStreaming;
 
   useImperativeHandle(ref, () => ({
     insertIfEmpty(text: string) {
@@ -181,24 +185,33 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     });
   }, []);
 
+  const cancelPendingEnterSend = useCallback(() => {
+    if (pendingEnterSendTimerRef.current) {
+      clearTimeout(pendingEnterSendTimerRef.current);
+      pendingEnterSendTimerRef.current = null;
+    }
+  }, []);
+
   const handleSend = useCallback(() => {
+    cancelPendingEnterSend();
     const shouldBlock = isComposingRef.current || suppressNextEnterRef.current || Date.now() - lastCompositionEndAtRef.current < 80;
     if (shouldBlock) return;
 
     const currentValue = textareaRef.current?.value ?? value;
-    const msg = currentValue.trim();
+    const msg = (selectedSkill ? `/skill:${selectedSkill.name} ${currentValue}` : currentValue).trim();
     if (!msg && !attachedImages.length) return;
-    if (isStreaming) return;
+    if (isStreamingRef.current) return;
     onSend(msg, attachedImages.length ? attachedImages : undefined);
     setValue("");
+    setSelectedSkill(null);
     clearImages();
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
     }
-  }, [value, attachedImages, isStreaming, onSend, clearImages]);
+  }, [value, selectedSkill, attachedImages, onSend, clearImages, cancelPendingEnterSend]);
 
   const sendQueued = useCallback((mode: "steer" | "followup") => {
-    const msg = value.trim();
+    const msg = (selectedSkill ? `/skill:${selectedSkill.name} ${value}` : value).trim();
     if (!msg && !attachedImages.length) return;
     if (mode === "steer" && onSteer) {
       onSteer(msg, attachedImages.length ? attachedImages : undefined);
@@ -206,16 +219,10 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       onFollowUp(msg, attachedImages.length ? attachedImages : undefined);
     }
     setValue("");
+    setSelectedSkill(null);
     clearImages();
     if (textareaRef.current) textareaRef.current.style.height = "auto";
-  }, [value, attachedImages, onSteer, onFollowUp, clearImages]);
-
-  const cancelPendingEnterSend = useCallback(() => {
-    if (pendingEnterSendTimerRef.current) {
-      clearTimeout(pendingEnterSendTimerRef.current);
-      pendingEnterSendTimerRef.current = null;
-    }
-  }, []);
+  }, [value, selectedSkill, attachedImages, onSteer, onFollowUp, clearImages]);
 
   const fetchSkills = useCallback(async (cwd: string) => {
     if (skillsFetchRef.current) {
@@ -242,15 +249,15 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const selectSkill = useCallback((skill: SkillOption) => {
     const ta = textareaRef.current;
     const currentValue = ta?.value ?? value;
-    // Replace the leading /... text with /skill:name 
-    const rest = currentValue.slice(currentValue.startsWith("/") ? currentValue.indexOf(" ") > 0 ? currentValue.indexOf(" ") : currentValue.length : 0);
-    const newVal = `/skill:${skill.name} ${rest}`.trimEnd() + " ";
-    setValue(newVal);
+    const firstSpace = currentValue.indexOf(" ");
+    const rest = currentValue.startsWith("/") && firstSpace >= 0 ? currentValue.slice(firstSpace + 1) : "";
+    setSelectedSkill(skill);
+    setValue(rest);
     closeSkillPicker();
     requestAnimationFrame(() => {
       if (!ta) return;
       ta.focus();
-      ta.setSelectionRange(newVal.length, newVal.length);
+      ta.setSelectionRange(rest.length, rest.length);
     });
   }, [value, closeSkillPicker]);
 
@@ -258,9 +265,10 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     cancelPendingEnterSend();
     const newValue = e.target.value;
     setValue(newValue);
+    if (selectedSkill && newValue.startsWith("/")) setSelectedSkill(null);
 
     // Skill picker: open when value starts with /
-    if (cwd && newValue.startsWith("/") && !newValue.includes(" ") && !newValue.startsWith("/skill:")) {
+    if (cwd && !selectedSkill && newValue.startsWith("/") && !newValue.includes(" ") && !newValue.startsWith("/skill:")) {
       const ta = textareaRef.current;
       if (ta) {
         const rect = ta.getBoundingClientRect();
@@ -274,7 +282,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     } else {
       if (skillPickerOpen) closeSkillPicker();
     }
-  }, [cancelPendingEnterSend, skillPickerOpen, cwd, fetchSkills, closeSkillPicker]);
+  }, [cancelPendingEnterSend, skillPickerOpen, selectedSkill, cwd, fetchSkills, closeSkillPicker]);
 
   const handleCompositionStart = useCallback(() => {
     cancelPendingEnterSend();
@@ -308,12 +316,12 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   }, [cancelPendingEnterSend]);
 
   const runSendAction = useCallback(() => {
-    if (isStreaming && (onSteer || onFollowUp)) {
+    if (isStreamingRef.current && (onSteer || onFollowUp)) {
       sendQueued(onSteer ? "steer" : "followup");
     } else {
       handleSend();
     }
-  }, [isStreaming, onSteer, onFollowUp, sendQueued, handleSend]);
+  }, [onSteer, onFollowUp, sendQueued, handleSend]);
 
   const scheduleEnterSend = useCallback(() => {
     cancelPendingEnterSend();
@@ -359,7 +367,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       setSkillPickerIndex((i) => Math.max(i - 1, 0));
       return;
     }
-    if (e.key === "Enter" && !e.shiftKey) {
+    if ((e.key === "Enter" && !e.shiftKey) || e.key === "Tab") {
       e.preventDefault();
       if (filteredSkills[skillPickerIndex]) {
         selectSkill(filteredSkills[skillPickerIndex]);
@@ -380,6 +388,20 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       if (skillPickerOpen) {
         handleSkillPickerKeyDown(e);
         return;
+      }
+
+      if (selectedSkill && (e.key === "Backspace" || e.key === "Delete")) {
+        const ta = e.currentTarget;
+        const start = ta.selectionStart ?? 0;
+        const end = ta.selectionEnd ?? 0;
+        const isEmpty = ta.value.length === 0;
+        const isBackspaceAtStart = e.key === "Backspace" && start === 0 && end === 0;
+        const isDeleteAtStart = e.key === "Delete" && start === 0 && end === 0;
+        if (isEmpty || isBackspaceAtStart || isDeleteAtStart) {
+          e.preventDefault();
+          setSelectedSkill(null);
+          return;
+        }
       }
 
       const nativeEvent = e.nativeEvent as KeyboardEvent<HTMLTextAreaElement>["nativeEvent"] & {
@@ -673,6 +695,85 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
             transition: "border-color 0.15s, background 0.15s, box-shadow 0.15s",
           } as React.CSSProperties}
         >
+          {selectedSkill && (
+            <span
+              title={`当前启用 skill: ${selectedSkill.name}`}
+              style={{
+                flexShrink: 0,
+                alignSelf: "center",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 6,
+                maxWidth: 240,
+                height: 28,
+                padding: "0 8px 0 10px",
+                borderRadius: 999,
+                background: "color-mix(in srgb, var(--accent) 6%, transparent)",
+                border: "1px solid color-mix(in srgb, var(--accent) 13%, transparent)",
+                color: "color-mix(in srgb, var(--accent) 55%, var(--text-muted))",
+                fontSize: 13,
+                fontWeight: 500,
+                letterSpacing: "-0.01em",
+                backdropFilter: "blur(8px)",
+                boxShadow: "inset 0 1px 0 rgba(255,255,255,0.10), 0 1px 2px rgba(15,23,42,0.03)",
+              }}
+            >
+              <span
+                aria-hidden="true"
+                style={{
+                  width: 5,
+                  height: 5,
+                  borderRadius: "50%",
+                  background: "currentColor",
+                  opacity: 0.45,
+                  flexShrink: 0,
+                }}
+              />
+              <span
+                style={{
+                  minWidth: 0,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {selectedSkill.name}
+              </span>
+              <button
+                type="button"
+                onClick={() => { setSelectedSkill(null); textareaRef.current?.focus(); }}
+                aria-label={`移除 skill ${selectedSkill.name}`}
+                title="移除技能"
+                style={{
+                  flexShrink: 0,
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  width: 18,
+                  height: 18,
+                  marginRight: -3,
+                  border: "none",
+                  borderRadius: "50%",
+                  background: "transparent",
+                  color: "inherit",
+                  cursor: "pointer",
+                  padding: 0,
+                  opacity: 0.42,
+                  outline: "none",
+                  transition: "background 120ms ease, opacity 120ms ease, color 120ms ease",
+                }}
+                onMouseEnter={(e) => { e.currentTarget.style.background = "color-mix(in srgb, currentColor 9%, transparent)"; e.currentTarget.style.opacity = "0.85"; }}
+                onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.opacity = "0.42"; }}
+                onFocus={(e) => { e.currentTarget.style.background = "color-mix(in srgb, currentColor 9%, transparent)"; e.currentTarget.style.opacity = "0.9"; }}
+                onBlur={(e) => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.opacity = "0.42"; }}
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round">
+                  <path d="M18 6 6 18" />
+                  <path d="m6 6 12 12" />
+                </svg>
+              </button>
+            </span>
+          )}
           <textarea
             ref={textareaRef}
             value={value}
@@ -716,16 +817,16 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 <button
                   type="button"
                   onClick={() => sendQueued("steer")}
-                  disabled={!value.trim() && !attachedImages.length}
+                  disabled={!value.trim() && !attachedImages.length && !selectedSkill}
                   title="打断 Agent 当前运行，立即注入消息"
                   style={{
                     display: "flex", alignItems: "center", gap: 5,
                     padding: "7px 12px",
-                    background: (value.trim() || attachedImages.length) ? "rgba(234,179,8,0.12)" : "none",
+                    background: (value.trim() || attachedImages.length || selectedSkill) ? "rgba(234,179,8,0.12)" : "none",
                     border: "1px solid rgba(234,179,8,0.35)",
                     borderRadius: 8,
-                    color: (value.trim() || attachedImages.length) ? "rgba(180,130,0,1)" : "var(--text-dim)",
-                    cursor: (value.trim() || attachedImages.length) ? "pointer" : "not-allowed",
+                    color: (value.trim() || attachedImages.length || selectedSkill) ? "rgba(180,130,0,1)" : "var(--text-dim)",
+                    cursor: (value.trim() || attachedImages.length || selectedSkill) ? "pointer" : "not-allowed",
                     fontSize: 13, fontWeight: 600, letterSpacing: "-0.01em",
                     transition: "background 0.12s",
                   }}
@@ -740,16 +841,16 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 <button
                   type="button"
                   onClick={() => sendQueued("followup")}
-                  disabled={!value.trim() && !attachedImages.length}
+                  disabled={!value.trim() && !attachedImages.length && !selectedSkill}
                   title="在 Agent 完成后排队发送"
                   style={{
                     display: "flex", alignItems: "center", gap: 5,
                     padding: "7px 12px",
-                    background: (value.trim() || attachedImages.length) ? "rgba(129,140,248,0.12)" : "none",
+                    background: (value.trim() || attachedImages.length || selectedSkill) ? "rgba(129,140,248,0.12)" : "none",
                     border: "1px solid rgba(129,140,248,0.35)",
                     borderRadius: 8,
-                    color: (value.trim() || attachedImages.length) ? "rgba(99,102,241,1)" : "var(--text-dim)",
-                    cursor: (value.trim() || attachedImages.length) ? "pointer" : "not-allowed",
+                    color: (value.trim() || attachedImages.length || selectedSkill) ? "rgba(99,102,241,1)" : "var(--text-dim)",
+                    cursor: (value.trim() || attachedImages.length || selectedSkill) ? "pointer" : "not-allowed",
                     fontSize: 13, fontWeight: 600, letterSpacing: "-0.01em",
                     transition: "background 0.12s",
                   }}
@@ -766,21 +867,21 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
             <button
               type="button"
               onClick={handleSend}
-              disabled={!value.trim() && !attachedImages.length}
+              disabled={!value.trim() && !attachedImages.length && !selectedSkill}
               style={{
                 flexShrink: 0,
                 alignSelf: "flex-end",
                 display: "flex", alignItems: "center", gap: 6,
                 padding: "7px 14px",
-                background: (value.trim() || attachedImages.length) ? "var(--accent)" : "var(--bg-panel)",
+                background: (value.trim() || attachedImages.length || selectedSkill) ? "var(--accent)" : "var(--bg-panel)",
                 border: "none",
                 borderRadius: 8,
-                color: (value.trim() || attachedImages.length) ? "#fff" : "var(--text-dim)",
-                cursor: (value.trim() || attachedImages.length) ? "pointer" : "not-allowed",
+                color: (value.trim() || attachedImages.length || selectedSkill) ? "#fff" : "var(--text-dim)",
+                cursor: (value.trim() || attachedImages.length || selectedSkill) ? "pointer" : "not-allowed",
                 fontSize: 13,
                 fontWeight: 600,
                 letterSpacing: "-0.01em",
-                boxShadow: (value.trim() || attachedImages.length) ? "0 1px 3px rgba(37,99,235,0.25)" : "none",
+                boxShadow: (value.trim() || attachedImages.length || selectedSkill) ? "0 1px 3px rgba(37,99,235,0.25)" : "none",
                 transition: "background 0.15s, box-shadow 0.15s",
               }}
             >

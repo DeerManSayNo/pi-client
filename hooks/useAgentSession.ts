@@ -6,6 +6,50 @@ import { normalizeCompletedMessage, normalizeCompletedMessages, normalizeToolCal
 import { sendAgentCommand } from "@/lib/agent-client";
 import type { ToolEntry } from "@/components/ToolPanel";
 
+/**
+ * Compress expanded skill content back to /skill:name form for display.
+ * The pi SDK's _expandSkillCommand replaces /skill:name args with the full
+ * skill file content when saving to .jsonl. This reverses that expansion
+ * purely for display purposes — the model still receives the full content.
+ *
+ * Expanded format:
+ *   <skill name="xxx" location="...">\n...\n</skill>\n\nargs
+ *
+ * Compressed format:
+ *   /skill:xxx args
+ */
+function compressSkillText(text: string): string {
+  const match = text.match(/^<skill name="([^"]+)"[^>]*>[\s\S]*?<\/skill>(?:\n\n)?([\s\S]*)$/);
+  if (!match) return text;
+  const skillName = match[1];
+  const args = match[2].trim();
+  return args ? `/skill:${skillName} ${args}` : `/skill:${skillName}`;
+}
+
+function compressMessageContent(msg: AgentMessage): AgentMessage {
+  if (msg.role !== "user") return msg;
+  const content = msg.content;
+  if (typeof content === "string") {
+    const compressed = compressSkillText(content);
+    return compressed !== content ? { ...msg, content: compressed } : msg;
+  }
+  if (Array.isArray(content)) {
+    let changed = false;
+    const newContent = content.map((block) => {
+      if (block.type === "text" && typeof block.text === "string") {
+        const compressed = compressSkillText(block.text);
+        if (compressed !== block.text) {
+          changed = true;
+          return { ...block, text: compressed };
+        }
+      }
+      return block;
+    });
+    return changed ? { ...msg, content: newContent } : msg;
+  }
+  return msg;
+}
+
 export interface SessionData {
   sessionId: string;
   filePath: string;
@@ -81,6 +125,57 @@ export interface AttachedImage {
   previewUrl: string;
 }
 
+function userContentKey(msg: AgentMessage | Partial<AgentMessage>): string | null {
+  if (msg.role !== "user") return null;
+  const content = (msg as { content?: unknown }).content;
+  if (typeof content === "string") {
+    return JSON.stringify([{ type: "text", text: compressSkillText(content).trim() }]);
+  }
+  if (!Array.isArray(content)) return null;
+
+  const parts = content.map((block) => {
+    if (typeof block !== "object" || block === null || !("type" in block)) return block;
+    if (block.type === "text" && "text" in block && typeof block.text === "string") {
+      return { type: "text", text: compressSkillText(block.text).trim() };
+    }
+    if (block.type === "image" && "source" in block && typeof block.source === "object" && block.source !== null) {
+      const source = block.source as { media_type?: unknown; data?: unknown; url?: unknown };
+      return {
+        type: "image",
+        mediaType: typeof source.media_type === "string" ? source.media_type : "",
+        data: typeof source.data === "string" ? source.data : "",
+        url: typeof source.url === "string" ? source.url : "",
+      };
+    }
+    return block;
+  });
+  return JSON.stringify(parts);
+}
+
+function getStreamingContentLength(msg: Partial<AgentMessage> | null | undefined): number {
+  const content = msg?.content;
+  if (!Array.isArray(content)) return typeof content === "string" ? content.length : 0;
+  let chars = 0;
+  for (const block of content) {
+    if (typeof block !== "object" || block === null || !("type" in block)) continue;
+    if (block.type === "text" && "text" in block && typeof block.text === "string") {
+      chars += block.text.length;
+    } else if (block.type === "thinking" && "thinking" in block && typeof block.thinking === "string") {
+      chars += block.thinking.length;
+    } else if (block.type === "toolCall" && "input" in block) {
+      chars += JSON.stringify(block.input ?? {}).length;
+    }
+  }
+  return chars;
+}
+
+export type WatchdogInfo = {
+  eventIdleMs: number;
+  contentIdleMs: number;
+  eventThresholdMs: number;
+  contentThresholdMs: number;
+};
+
 export function useAgentSession(opts: UseAgentSessionOptions) {
   const {
     session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionStarted, onSessionForked,
@@ -112,6 +207,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [isCompacting, setIsCompacting] = useState(false);
   const [compactError, setCompactError] = useState<string | null>(null);
   const [agentPhase, setAgentPhase] = useState<AgentPhase>(null);
+  const [watchdogInfo, setWatchdogInfo] = useState<WatchdogInfo | null>(null);
 
   const eventSourceRef = useRef<EventSource | null>(null);
   const sessionIdRef = useRef<string | null>(session?.id ?? null);
@@ -123,6 +219,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const pendingScrollToUserRef = useRef(false);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+  const lastAgentEventAtRef = useRef(Date.now());
+  const lastContentChangedAtRef = useRef(Date.now());
+  const lastContentLengthRef = useRef(0);
+  const watchdogCheckingRef = useRef(false);
+  const autoContinueSentRef = useRef(false);
 
   const setNewSessionModel = opts.setNewSessionModel ?? setNewSessionModelState;
   const setToolPresetState = opts.setToolPreset ?? setToolPreset;
@@ -167,7 +268,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const d = await res.json() as SessionData & { agentState?: { running: boolean; state?: { isStreaming?: boolean; isCompacting?: boolean; contextUsage?: { percent: number | null; contextWindow: number; tokens: number | null } | null; systemPrompt?: string; thinkingLevel?: string } } };
       setData(d);
-      setMessages(normalizeCompletedMessages(d.context.messages));
+      setMessages(normalizeCompletedMessages(d.context.messages.map(compressMessageContent)));
       setEntryIds(d.context.entryIds ?? []);
       setCurrentModelOverride(null);
       setError(null);
@@ -228,6 +329,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [agentRunning]);
 
   const handleAgentEvent = useCallback((event: AgentEvent) => {
+    lastAgentEventAtRef.current = Date.now();
     switch (event.type) {
       case "agent_file_changed": {
         const filePath = event.filePath;
@@ -237,6 +339,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         break;
       }
       case "agent_start":
+        lastAgentEventAtRef.current = Date.now();
+        lastContentChangedAtRef.current = Date.now();
+        lastContentLengthRef.current = 0;
         setAgentRunning(true);
         setAgentPhase({ kind: "waiting_model" });
         dispatch({ type: "start" });
@@ -263,8 +368,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       case "message_start":
       case "message_update": {
         const msg = event.message as Partial<AgentMessage> | undefined;
-        if (msg) {
-          dispatch({ type: "update", message: normalizeToolCalls(msg as AgentMessage) });
+        if (msg?.role === "assistant") {
+          const normalizedMsg = normalizeToolCalls(msg as AgentMessage);
+          const nextLen = getStreamingContentLength(normalizedMsg);
+          if (nextLen !== lastContentLengthRef.current) {
+            lastContentLengthRef.current = nextLen;
+            lastContentChangedAtRef.current = Date.now();
+          }
+          dispatch({ type: "update", message: normalizedMsg });
         }
         setAgentPhase(null);
         break;
@@ -272,7 +383,19 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       case "message_end": {
         const completed = event.message as AgentMessage | undefined;
         if (completed) {
-          setMessages((prev) => [...prev, normalizeCompletedMessage(completed)]);
+          const normalized = normalizeCompletedMessage(completed);
+          setMessages((prev) => {
+            // We optimistically append the user's prompt in handleSend/handleFollowUp.
+            // pi may later emit a message_end for that same user message; don't append it again.
+            if (normalized.role === "user") {
+              const completedKey = userContentKey(normalized);
+              const lastUser = [...prev].reverse().find((m) => m.role === "user");
+              if (completedKey && lastUser && userContentKey(lastUser) === completedKey) {
+                return prev;
+              }
+            }
+            return [...prev, normalized];
+          });
         }
         dispatch({ type: "reset" });
         setAgentPhase({ kind: "waiting_model" });
@@ -324,7 +447,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const handleSend = useCallback(async (message: string, images?: AttachedImage[]) => {
     if (!message.trim() && !images?.length) return;
-    if (agentRunning) return;
+    if (agentRunningRef.current) return;
+    // Set the ref immediately to prevent duplicate sends before React re-renders
+    agentRunningRef.current = true;
+    autoContinueSentRef.current = false;
+    lastAgentEventAtRef.current = Date.now();
+    lastContentChangedAtRef.current = Date.now();
+    lastContentLengthRef.current = 0;
 
     const imageBlocks = images?.map((img) => ({ type: "image" as const, source: { type: "base64" as const, media_type: img.mimeType, data: img.data } }));
     const userMsg: AgentMessage = {
@@ -406,7 +535,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setAgentPhase(null);
       dispatch({ type: "end" });
     }
-  }, [isNew, newSessionCwd, newSessionModel, toolPreset, thinkingLevel, session, agentRunning, connectEvents, onSessionCreated, onSessionStarted]);
+  }, [isNew, newSessionCwd, newSessionModel, toolPreset, thinkingLevel, session, connectEvents, onSessionCreated, onSessionStarted]);
 
   const handleAbort = useCallback(async () => {
     const sid = sessionIdRef.current;
@@ -488,6 +617,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const sid = sessionIdRef.current;
     if (!sid) return;
     setMessages((prev) => [...prev, { role: "user", content: message, timestamp: Date.now() } as AgentMessage]);
+    autoContinueSentRef.current = false;
+    lastAgentEventAtRef.current = Date.now();
+    lastContentChangedAtRef.current = Date.now();
+    lastContentLengthRef.current = 0;
     const piImages = images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
     try {
       await sendAgentCommand(sid, {
@@ -499,6 +632,106 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       console.error("Failed to follow up:", e);
     }
   }, []);
+
+  const WATCHDOG_STALE_EVENT_MS = 30_000;
+  const WATCHDOG_STALE_CONTENT_MS = 45_000;
+  const WATCHDOG_CHECK_INTERVAL_MS = 5_000;
+
+  // Keep a lightweight UI-facing counter so users can see when the watchdog is
+  // getting close to intervening.
+  useEffect(() => {
+    if (!agentRunning) {
+      setWatchdogInfo(null);
+      return;
+    }
+
+    const update = () => {
+      const now = Date.now();
+      setWatchdogInfo({
+        eventIdleMs: now - lastAgentEventAtRef.current,
+        contentIdleMs: now - lastContentChangedAtRef.current,
+        eventThresholdMs: WATCHDOG_STALE_EVENT_MS,
+        contentThresholdMs: WATCHDOG_STALE_CONTENT_MS,
+      });
+    };
+    update();
+    const id = setInterval(update, 1000);
+    return () => clearInterval(id);
+  }, [agentRunning]);
+
+  // Business watchdog for cases where the SSE connection is alive but the
+  // streaming turn appears stuck or the terminal events were missed. It first
+  // asks the server for the authoritative AgentSession state. If the backend is
+  // still running, only reconnect the SSE stream. If the backend has already
+  // stopped while the UI still thinks it is running, reload the session and send
+  // one automatic "continue" follow-up for this stalled turn.
+  useEffect(() => {
+    if (!agentRunning) return;
+    const STALE_EVENT_MS = WATCHDOG_STALE_EVENT_MS;
+    const STALE_CONTENT_MS = WATCHDOG_STALE_CONTENT_MS;
+    const CHECK_INTERVAL_MS = WATCHDOG_CHECK_INTERVAL_MS;
+
+    const id = setInterval(async () => {
+      const sid = sessionIdRef.current;
+      if (!sid || !agentRunningRef.current || watchdogCheckingRef.current) return;
+
+      const now = Date.now();
+      const noRecentEvent = now - lastAgentEventAtRef.current > STALE_EVENT_MS;
+      const noContentGrowth = lastContentLengthRef.current > 0 && now - lastContentChangedAtRef.current > STALE_CONTENT_MS;
+      if (!noRecentEvent && !noContentGrowth) return;
+
+      watchdogCheckingRef.current = true;
+      try {
+        const res = await fetch(`/api/agent/${encodeURIComponent(sid)}`, { cache: "no-store" });
+        const d = await res.json().catch(() => ({})) as { running?: boolean; state?: { isStreaming?: boolean; isCompacting?: boolean } };
+
+        if (d.running && d.state?.isCompacting) {
+          connectEvents(sid);
+          lastAgentEventAtRef.current = Date.now();
+          return;
+        }
+
+        if (d.running && d.state?.isStreaming !== false) {
+          connectEvents(sid);
+          lastAgentEventAtRef.current = Date.now();
+          return;
+        }
+
+        await loadSession(sid);
+        setAgentRunning(false);
+        setAgentPhase(null);
+        dispatch({ type: "end" });
+
+        if (!autoContinueSentRef.current) {
+          autoContinueSentRef.current = true;
+          lastAgentEventAtRef.current = Date.now();
+          lastContentChangedAtRef.current = Date.now();
+          lastContentLengthRef.current = 0;
+          agentRunningRef.current = true;
+          setMessages((prev) => [...prev, { role: "user", content: "continue", timestamp: Date.now() } as AgentMessage]);
+          setAgentRunning(true);
+          setAgentPhase({ kind: "waiting_model" });
+          dispatch({ type: "start" });
+          connectEvents(sid);
+          try {
+            await sendAgentCommand(sid, { type: "follow_up", message: "continue" });
+          } catch (e) {
+            console.error("Agent watchdog auto-continue failed:", e);
+            agentRunningRef.current = false;
+            setAgentRunning(false);
+            setAgentPhase(null);
+            dispatch({ type: "end" });
+          }
+        }
+      } catch (e) {
+        console.error("Agent watchdog failed:", e);
+      } finally {
+        watchdogCheckingRef.current = false;
+      }
+    }, CHECK_INTERVAL_MS);
+
+    return () => clearInterval(id);
+  }, [agentRunning, connectEvents, loadSession]);
 
   const handleAbortCompaction = useCallback(async () => {
     const sid = sessionIdRef.current;
@@ -627,7 +860,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     agentRunning, modelNames, modelList, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, toolPreset, thinkingLevel,
     retryInfo, contextUsage, systemPrompt, forkingEntryId,
     isCompacting, compactError, currentModel, displayModel, sessionStats,
-    agentPhase,
+    agentPhase, watchdogInfo,
     isNew,
     // Refs
     sessionIdRef, eventSourceRef, messagesEndRef, scrollContainerRef,
