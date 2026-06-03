@@ -4,7 +4,7 @@ import { cacheSessionPath } from "./session-reader";
 import type { AgentSessionLike, ToolInfo } from "./pi-types";
 import { getLiveIslandClient } from "./live-island-client";
 import { applyRolePromptToSystemPrompt } from "./roles";
-import { applyGlobalConfigToPrompt, isGlobalSystemPromptSectionEnabled } from "./system-prompt-decomposer";
+import { applyRolePromptConfigToPrompt, isRoleSystemPromptSectionEnabled } from "./system-prompt-decomposer";
 
 // ============================================================================
 // Types
@@ -80,18 +80,21 @@ export class AgentSessionWrapper {
   private _alive = true;
   private roleId: string | null = null;
   private temporaryRoleSettings: string[] = [];
+  private baseSystemPrompt = "";
 
   constructor(public readonly inner: AgentSessionLike, roleId?: string | null) {
     this.roleId = roleId ?? null;
+    this.baseSystemPrompt = inner.agent.state?.systemPrompt ?? "";
     this.applyRolePrompt();
   }
 
   private applyRolePrompt(): void {
     if (!this.inner.agent.state) return;
-    const basePrompt = this.inner.agent.state.systemPrompt ?? "";
-    const nextPrompt = isGlobalSystemPromptSectionEnabled("role_profile")
-      ? applyRolePromptToSystemPrompt(basePrompt, this.roleId, this.temporaryRoleSettings)
-      : basePrompt;
+    const basePrompt = this.baseSystemPrompt;
+    const configuredPrompt = applyRolePromptConfigToPrompt(basePrompt, this.roleId);
+    const nextPrompt = isRoleSystemPromptSectionEnabled(this.roleId, "role_profile")
+      ? applyRolePromptToSystemPrompt(configuredPrompt, this.roleId, this.temporaryRoleSettings)
+      : configuredPrompt;
     setEffectiveSystemPrompt(this.inner, nextPrompt);
   }
 
@@ -197,6 +200,7 @@ export class AgentSessionWrapper {
       case "set_system_prompt": {
         const rawPrompt = typeof command.prompt === "string" ? command.prompt : "";
         if (this.inner.agent.state) {
+          this.baseSystemPrompt = rawPrompt;
           setEffectiveSystemPrompt(this.inner, rawPrompt);
         }
         this.applyRolePrompt();
@@ -345,7 +349,7 @@ export class AgentSessionWrapper {
 
       case "set_tools": {
         this.inner.setActiveToolsByName(command.toolNames as string[]);
-        if (this.inner.agent.state) setEffectiveSystemPrompt(this.inner, applyGlobalConfigToPrompt(this.inner.agent.state.systemPrompt ?? ""));
+        if (this.inner.agent.state) this.baseSystemPrompt = this.inner.agent.state.systemPrompt ?? "";
         this.applyRolePrompt();
         return null;
       }
@@ -468,8 +472,6 @@ export async function startRpcSession(
     // the only way to truly clear it is to call agent.setSystemPrompt directly.
     if (toolNames?.length === 0) {
       setEffectiveSystemPrompt(inner, "");
-    } else {
-      setEffectiveSystemPrompt(inner, applyGlobalConfigToPrompt(inner.agent.state.systemPrompt ?? ""));
     }
 
     const wrapper = new AgentSessionWrapper(inner, roleId);

@@ -10,7 +10,6 @@ import { ModelsConfig } from "./ModelsConfig";
 import { SkillsConfig } from "./SkillsConfig";
 import { SchedulerPanel } from "./SchedulerPanel";
 import { RoleConfig } from "./RoleConfig";
-import { SystemPromptConfig } from "./SystemPromptConfig";
 import { useTheme } from "@/hooks/useTheme";
 import type { SessionInfo } from "@/lib/types";
 import type { ChatInputHandle } from "./ChatInput";
@@ -69,7 +68,7 @@ export function AppShell() {
   const [modelsConfigOpen, setModelsConfigOpen] = useState(false);
   const [modelsRefreshKey, setModelsRefreshKey] = useState(0);
   const [skillsConfigOpen, setSkillsConfigOpen] = useState(false);
-  const [quickConfigOpen, setQuickConfigOpen] = useState<"memory" | "skill" | "role" | "systemPrompt" | null>(null);
+  const [quickConfigOpen, setQuickConfigOpen] = useState<"memory" | "skill" | "role" | null>(null);
   const [schedulerPanelOpen, setSchedulerPanelOpen] = useState(false);
   const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(new Set());
   const pendingSessionIdRef = useRef<string | null>(null);
@@ -773,18 +772,6 @@ export function AppShell() {
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <circle cx="12" cy="12" r="10" />
                   <polyline points="12 6 12 12 16 14" />
-                </svg>
-              ),
-            },
-            {
-              label: "System Prompt",
-              onClick: () => { setSettingsMenuOpen(false); setQuickConfigOpen("systemPrompt"); },
-              icon: (
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M4 5h16" />
-                  <path d="M4 12h10" />
-                  <path d="M4 19h16" />
-                  <path d="M18 9l3 3-3 3" />
                 </svg>
               ),
             },
@@ -1558,13 +1545,7 @@ export function AppShell() {
       <SchedulerPanel onClose={() => setSchedulerPanelOpen(false)} cwd={activeCwd ?? selectedSession?.cwd ?? newSessionCwd ?? undefined} />
     )}
     {quickConfigOpen === "role" && <RoleConfig onClose={() => setQuickConfigOpen(null)} />}
-    {quickConfigOpen === "systemPrompt" && (
-      <SystemPromptConfig
-        onClose={() => setQuickConfigOpen(null)}
-        sessionId={selectedSession?.id ?? null}
-      />
-    )}
-    {quickConfigOpen && quickConfigOpen !== "role" && quickConfigOpen !== "systemPrompt" && (() => {
+    {quickConfigOpen && quickConfigOpen !== "role" && (() => {
       const title = quickConfigOpen === "memory" ? "记忆" : "技能";
       const desc = quickConfigOpen === "memory"
         ? "用于管理 Agent 的长期记忆与偏好。"

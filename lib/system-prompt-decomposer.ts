@@ -29,6 +29,7 @@ export interface SystemPromptSection {
 
 export interface SystemPromptVersion {
   id: string;
+  roleId?: string;
   name: string;
   description: string;
   /** Per-section overrides: only sections with non-default content or disabled state are stored */
@@ -312,9 +313,15 @@ export function composeSystemPrompt(sections: SystemPromptSection[]): string {
 
 // ── Version management ─────────────────────────────────────────────────────
 
-interface VersionsFile {
+interface RoleConfigsFile {
   version: 1;
-  versions: SystemPromptVersion[];
+  configs: Record<string, SystemPromptGlobalConfig>;
+}
+
+const DEFAULT_ROLE_ID = "default";
+
+function normalizeRoleId(roleId?: string | null): string {
+  return roleId?.trim() || DEFAULT_ROLE_ID;
 }
 
 function nowIso(): string {
@@ -329,12 +336,15 @@ export function versionsFilePath(): string {
   return path.join(getAgentDir(), "system-prompt-versions.json");
 }
 
-export function readVersions(): SystemPromptVersion[] {
+export function readVersions(roleId?: string | null): SystemPromptVersion[] {
   const file = versionsFilePath();
   if (!existsSync(file)) return [];
   try {
-    const parsed = JSON.parse(readFileSync(file, "utf8")) as VersionsFile;
-    return parsed.versions ?? [];
+    const parsed = JSON.parse(readFileSync(file, "utf8")) as { version: 1; versions?: SystemPromptVersion[] };
+    const versions = parsed.versions ?? [];
+    if (roleId === undefined) return versions;
+    const normalized = normalizeRoleId(roleId);
+    return versions.filter((v) => normalizeRoleId(v.roleId) === normalized);
   } catch {
     return [];
   }
@@ -347,6 +357,7 @@ function writeVersions(versions: SystemPromptVersion[]): void {
 }
 
 export function createVersion(input: {
+  roleId?: string | null;
   name: string;
   description?: string;
   sections: Pick<SystemPromptSection, "id" | "enabled" | "content">[];
@@ -354,6 +365,7 @@ export function createVersion(input: {
   const versions = readVersions();
   const version: SystemPromptVersion = {
     id: uid(),
+    roleId: normalizeRoleId(input.roleId),
     name: input.name.trim(),
     description: input.description?.trim() ?? "",
     sections: input.sections,
@@ -419,6 +431,57 @@ export function applySectionOverrides(
   });
 }
 
+export function roleConfigsFilePath(): string {
+  return path.join(getAgentDir(), "system-prompt-configs.json");
+}
+
+export function readRoleSystemPromptConfig(roleId?: string | null): SystemPromptGlobalConfig {
+  const normalized = normalizeRoleId(roleId);
+  const file = roleConfigsFilePath();
+  if (existsSync(file)) {
+    try {
+      const parsed = JSON.parse(readFileSync(file, "utf8")) as Partial<RoleConfigsFile>;
+      const config = parsed.configs?.[normalized];
+      if (config) {
+        return {
+          version: 1,
+          sections: Array.isArray(config.sections) ? config.sections : [],
+          activeVersionId: config.activeVersionId ?? null,
+          updatedAt: config.updatedAt ?? nowIso(),
+        };
+      }
+    } catch { /* fall back */ }
+  }
+  // Backward compatibility: the old global config becomes the default role config.
+  if (normalized === DEFAULT_ROLE_ID) return readGlobalSystemPromptConfig();
+  return { version: 1, sections: [], activeVersionId: null, updatedAt: nowIso() };
+}
+
+export function writeRoleSystemPromptConfig(roleId: string | null | undefined, input: {
+  sections: Pick<SystemPromptSection, "id" | "enabled" | "content">[];
+  activeVersionId?: string | null;
+}): SystemPromptGlobalConfig {
+  const normalized = normalizeRoleId(roleId);
+  const file = roleConfigsFilePath();
+  let configs: Record<string, SystemPromptGlobalConfig> = {};
+  if (existsSync(file)) {
+    try {
+      const parsed = JSON.parse(readFileSync(file, "utf8")) as Partial<RoleConfigsFile>;
+      configs = parsed.configs ?? {};
+    } catch { configs = {}; }
+  }
+  const config: SystemPromptGlobalConfig = {
+    version: 1,
+    sections: input.sections,
+    activeVersionId: input.activeVersionId ?? null,
+    updatedAt: nowIso(),
+  };
+  configs[normalized] = config;
+  mkdirSync(path.dirname(file), { recursive: true });
+  writeFileSync(file, JSON.stringify({ version: 1, configs }, null, 2));
+  return config;
+}
+
 export function configFilePath(): string {
   return path.join(getAgentDir(), "system-prompt-config.json");
 }
@@ -455,16 +518,24 @@ export function writeGlobalSystemPromptConfig(input: {
   return config;
 }
 
-export function isGlobalSystemPromptSectionEnabled(sectionId: string): boolean {
-  const config = readGlobalSystemPromptConfig();
+export function isRoleSystemPromptSectionEnabled(roleId: string | null | undefined, sectionId: string): boolean {
+  const config = readRoleSystemPromptConfig(roleId);
   const override = config.sections.find((s) => s.id === sectionId);
   return override?.enabled ?? true;
 }
 
-export function applyGlobalConfigToPrompt(prompt: string): string {
-  const config = readGlobalSystemPromptConfig();
+export function applyRolePromptConfigToPrompt(prompt: string, roleId?: string | null): string {
+  const config = readRoleSystemPromptConfig(roleId);
   if (config.sections.length === 0) return prompt;
   const live = decomposeSystemPrompt(prompt);
   const merged = applySectionOverrides(live, config.sections);
   return composeSystemPrompt(merged);
+}
+
+export function isGlobalSystemPromptSectionEnabled(sectionId: string): boolean {
+  return isRoleSystemPromptSectionEnabled(DEFAULT_ROLE_ID, sectionId);
+}
+
+export function applyGlobalConfigToPrompt(prompt: string): string {
+  return applyRolePromptConfigToPrompt(prompt, DEFAULT_ROLE_ID);
 }

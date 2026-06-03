@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
+import { SystemPromptConfig } from "./SystemPromptConfig";
 
 interface RoleSetting { id: string; text: string; createdAt: string }
 interface AgentRole {
@@ -39,6 +40,7 @@ export function RoleConfig({ onClose }: { onClose: () => void }) {
   const [saving, setSaving] = useState(false);
   const [draft, setDraft] = useState<AgentRole | null>(null);
   const [newRoleOpen, setNewRoleOpen] = useState(false);
+  const [systemPromptRole, setSystemPromptRole] = useState<AgentRole | null>(null);
   const [newName, setNewName] = useState("");
   const [newDescription, setNewDescription] = useState("");
   const [newBasePrompt, setNewBasePrompt] = useState("");
@@ -182,6 +184,7 @@ export function RoleConfig({ onClose }: { onClose: () => void }) {
               <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 3 }}>按分块管理会跨 session 复用的角色设定</div>
             </div>
             {selectedRole && !selectedRole.builtIn && selectedRole.id !== "default" && <button onClick={deleteSelectedRole} disabled={saving} style={dangerBtnStyle}>删除角色</button>}
+            {selectedRole && <button onClick={() => setSystemPromptRole(selectedRole)} style={secondaryBtnStyle}>System Prompt 管理</button>}
             <button onClick={saveDraft} disabled={!draft || saving} style={{ ...primaryBtnStyle, opacity: !draft || saving ? 0.5 : 1 }}>{saving ? "保存中..." : "保存"}</button>
             <button onClick={onClose} style={closeBtnStyle}>×</button>
           </div>
@@ -218,6 +221,15 @@ export function RoleConfig({ onClose }: { onClose: () => void }) {
           )}
         </main>
       </div>
+      {systemPromptRole && (
+        <div onClick={(e) => e.stopPropagation()}>
+          <SystemPromptConfig
+            roleId={systemPromptRole.id}
+            roleName={systemPromptRole.name}
+            onClose={() => setSystemPromptRole(null)}
+          />
+        </div>
+      )}
     </div>
   );
 }

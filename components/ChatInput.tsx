@@ -17,7 +17,12 @@ interface ModelOption {
 interface SkillOption {
   name: string;
   description: string;
-  source: "global" | "project";
+  source?: "global" | "project" | "path";
+  sourceInfo?: {
+    source?: string;
+    scope?: string;
+  };
+  disableModelInvocation?: boolean;
 }
 
 interface RoleSetting { id: string; text: string; createdAt: string }
@@ -79,6 +84,14 @@ const THINKING_LEVEL_DESC: Record<typeof THINKING_LEVELS[number], string> = {
   high: "高强度推理",
   xhigh: "最高强度推理",
 };
+
+function skillScope(skill: SkillOption): "global" | "project" | "path" {
+  if (skill.source) return skill.source;
+  const scope = skill.sourceInfo?.scope;
+  if (scope === "user") return "global";
+  if (scope === "project") return "project";
+  return "path";
+}
 
 export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   onSend, onAbort, onSteer, onFollowUp, isStreaming, model, modelNames, modelList, onModelChange,
@@ -260,7 +273,14 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       if (!res.ok) return;
       const data = await res.json();
       if (!data.skills) return;
-      setSkills(data.skills.filter((s: SkillOption) => !s.name?.startsWith("find-skills")));
+      setSkills(
+        data.skills
+          .filter((s: SkillOption) => !s.name?.startsWith("find-skills"))
+          .map((s: SkillOption) => ({
+            ...s,
+            source: skillScope(s),
+          }))
+      );
     } catch {
       // ignore abort or fetch errors
     }
@@ -372,8 +392,22 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     );
   })();
 
-  const globalSkills = filteredSkills.filter((s) => s.source === "global");
-  const projectSkills = filteredSkills.filter((s) => s.source === "project");
+  const globalSkills = filteredSkills.filter((s) => skillScope(s) === "global");
+  const projectSkills = filteredSkills.filter((s) => skillScope(s) === "project");
+  const commonProjectSkills = skills
+    .filter((s) => skillScope(s) === "project" && !s.disableModelInvocation)
+    .slice(0, 8);
+
+  useEffect(() => {
+    if (!cwd) {
+      setSkills([]);
+      return;
+    }
+    fetchSkills(cwd);
+    return () => {
+      skillsFetchRef.current?.abort();
+    };
+  }, [cwd, fetchSkills]);
 
   // Reset skill picker index when filter changes
   useEffect(() => {
@@ -752,6 +786,70 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
             </div>
           );
         })()}
+
+        {/* Common project skill shortcuts */}
+        {commonProjectSkills.length > 0 && !selectedSkill && (
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              marginBottom: 6,
+              overflowX: "auto",
+              padding: "0 1px 2px",
+              scrollbarWidth: "none",
+            }}
+          >
+            <span
+              style={{
+                flexShrink: 0,
+                fontSize: 11,
+                color: "var(--text-dim)",
+                marginRight: 2,
+              }}
+            >
+              项目技能
+            </span>
+            {commonProjectSkills.map((skill) => (
+              <button
+                key={skill.name}
+                type="button"
+                onClick={() => selectSkill(skill)}
+                title={skill.description ? `${skill.name} — ${skill.description}` : skill.name}
+                style={{
+                  flexShrink: 0,
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 5,
+                  maxWidth: 180,
+                  height: 26,
+                  padding: "0 9px",
+                  borderRadius: 999,
+                  border: "1px solid color-mix(in srgb, var(--accent) 16%, var(--border))",
+                  background: "color-mix(in srgb, var(--accent) 5%, var(--bg))",
+                  color: "color-mix(in srgb, var(--accent) 60%, var(--text-muted))",
+                  cursor: "pointer",
+                  fontSize: 12,
+                  fontWeight: 500,
+                  letterSpacing: "-0.01em",
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.background = "color-mix(in srgb, var(--accent) 10%, var(--bg-hover))";
+                  e.currentTarget.style.borderColor = "color-mix(in srgb, var(--accent) 28%, var(--border))";
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = "color-mix(in srgb, var(--accent) 5%, var(--bg))";
+                  e.currentTarget.style.borderColor = "color-mix(in srgb, var(--accent) 16%, var(--border))";
+                }}
+              >
+                <span aria-hidden="true" style={{ opacity: 0.72 }}>✦</span>
+                <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {skill.name}
+                </span>
+              </button>
+            ))}
+          </div>
+        )}
 
         {/* Main input */}
         <div

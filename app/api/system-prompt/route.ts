@@ -3,40 +3,48 @@ import {
   applySectionOverrides,
   createVersion,
   getDefaultSystemPromptSections,
-  readGlobalSystemPromptConfig,
+  readRoleSystemPromptConfig,
   readVersions,
-  writeGlobalSystemPromptConfig,
+  writeRoleSystemPromptConfig,
 } from "@/lib/system-prompt-decomposer";
 
-export async function GET() {
-  const config = readGlobalSystemPromptConfig();
+function roleIdFromUrl(req: Request): string {
+  return new URL(req.url).searchParams.get("roleId") || "default";
+}
+
+export async function GET(req: Request) {
+  const roleId = roleIdFromUrl(req);
+  const config = readRoleSystemPromptConfig(roleId);
   const sections = applySectionOverrides(getDefaultSystemPromptSections(), config.sections);
   return NextResponse.json({
+    roleId,
     sections,
     config,
-    versions: readVersions(),
+    versions: readVersions(roleId),
   });
 }
 
 export async function PATCH(req: Request) {
+  const roleId = roleIdFromUrl(req);
   try {
     const body = await req.json() as {
       sections?: { id: string; enabled: boolean; content: string }[];
       activeVersionId?: string | null;
     };
 
-    const config = writeGlobalSystemPromptConfig({
+    const config = writeRoleSystemPromptConfig(roleId, {
       sections: body.sections ?? [],
       activeVersionId: body.activeVersionId ?? null,
     });
 
-    return NextResponse.json({ config });
+    return NextResponse.json({ roleId, config });
   } catch (error) {
     return NextResponse.json({ error: String(error) }, { status: 500 });
   }
 }
 
 export async function POST(req: Request) {
+  const roleId = roleIdFromUrl(req);
   try {
     const body = await req.json() as {
       name?: string;
@@ -50,17 +58,18 @@ export async function POST(req: Request) {
     }
 
     const version = createVersion({
+      roleId,
       name: body.name,
       description: body.description,
       sections: body.sections ?? [],
     });
 
-    let config = readGlobalSystemPromptConfig();
+    let config = readRoleSystemPromptConfig(roleId);
     if (body.makeActive) {
-      config = writeGlobalSystemPromptConfig({ sections: version.sections, activeVersionId: version.id });
+      config = writeRoleSystemPromptConfig(roleId, { sections: version.sections, activeVersionId: version.id });
     }
 
-    return NextResponse.json({ version, config });
+    return NextResponse.json({ roleId, version, config });
   } catch (error) {
     return NextResponse.json({ error: String(error) }, { status: 500 });
   }

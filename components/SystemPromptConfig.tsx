@@ -26,6 +26,8 @@ interface SystemPromptVersion {
 
 interface Props {
   onClose: () => void;
+  roleId: string;
+  roleName?: string;
   sessionId?: string | null;
 }
 
@@ -42,7 +44,7 @@ function composePrompt(sections: SystemPromptSection[]): string {
 
 // ── Component ──────────────────────────────────────────────────────────────
 
-export function SystemPromptConfig({ onClose }: Props) {
+export function SystemPromptConfig({ onClose, roleId, roleName }: Props) {
   const [sections, setSections] = useState<SystemPromptSection[]>([]);
   const [versions, setVersions] = useState<SystemPromptVersion[]>([]);
   const [loading, setLoading] = useState(true);
@@ -71,7 +73,7 @@ export function SystemPromptConfig({ onClose }: Props) {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch("/api/system-prompt", { cache: "no-store" });
+      const res = await fetch(`/api/system-prompt?roleId=${encodeURIComponent(roleId)}`, { cache: "no-store" });
       if (!res.ok) return;
       const data = await res.json() as {
         sections: SystemPromptSection[] | null;
@@ -82,7 +84,7 @@ export function SystemPromptConfig({ onClose }: Props) {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [roleId]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -102,32 +104,35 @@ export function SystemPromptConfig({ onClose }: Props) {
     setSaved(false);
   }, []);
 
-  // ── Save global default ───────────────────────────────────────────────
+  // ── Save role default ───────────────────────────────────────────────
 
   const composed = useMemo(() => composePrompt(sections), [sections]);
 
   const handleSaveGlobal = useCallback(async () => {
     setSavingGlobal(true);
     try {
-      const res = await fetch("/api/system-prompt", {
+      const res = await fetch(`/api/system-prompt?roleId=${encodeURIComponent(roleId)}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           sections: sections.map((s) => ({ id: s.id, enabled: s.enabled, content: s.content })),
         }),
       });
-      if (res.ok) setSaved(true);
+      if (res.ok) {
+        setSaved(true);
+        window.dispatchEvent(new Event("pi-agent.roles-updated"));
+      }
     } finally {
       setSavingGlobal(false);
     }
-  }, [sections]);
+  }, [sections, roleId]);
 
   // ── Version CRUD ──────────────────────────────────────────────────────
 
   const handleSaveVersion = useCallback(async () => {
     if (!saveName.trim()) return;
     try {
-      const res = await fetch("/api/system-prompt", {
+      const res = await fetch(`/api/system-prompt?roleId=${encodeURIComponent(roleId)}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -143,8 +148,9 @@ export function SystemPromptConfig({ onClose }: Props) {
       if (!res.ok) return;
       setSaveName(""); setSaveDesc(""); setSaveOpen(false);
       await load();
+      window.dispatchEvent(new Event("pi-agent.roles-updated"));
     } catch { /* ignore */ }
-  }, [saveName, saveDesc, sections, load]);
+  }, [saveName, saveDesc, sections, load, roleId]);
 
   const handleApplyVersion = useCallback(
     (version: SystemPromptVersion) => {
@@ -193,10 +199,10 @@ export function SystemPromptConfig({ onClose }: Props) {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = "system-prompt-config.json";
+    a.download = `system-prompt-${roleId}.json`;
     a.click();
     URL.revokeObjectURL(url);
-  }, [sections]);
+  }, [sections, roleId]);
 
   // ── Render ────────────────────────────────────────────────────────────
 
@@ -259,7 +265,7 @@ export function SystemPromptConfig({ onClose }: Props) {
                 System Prompt
               </div>
               <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>
-                结构化组件管理
+                {roleName ?? roleId}
               </div>
             </div>
           </div>
@@ -458,10 +464,10 @@ export function SystemPromptConfig({ onClose }: Props) {
           >
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontSize: 15, fontWeight: 800, color: "var(--text)" }}>
-                全局默认 System Prompt 组件配置
+                {roleName ?? roleId} 的 System Prompt 组件配置
               </div>
               <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 3 }}>
-                这里设置的是通用默认配置：新建/恢复 AgentSession 时会基于 pi 原始 system prompt 按这些组件重新组合
+                这里设置的是当前角色专属配置：默认角色承载原全局默认配置，其他角色彼此隔离
               </div>
             </div>
             <button
@@ -475,7 +481,7 @@ export function SystemPromptConfig({ onClose }: Props) {
                 opacity: savingGlobal ? 0.5 : 1,
               }}
             >
-              {savingGlobal ? "保存中..." : saved ? "✓ 已保存" : "保存为全局默认"}
+              {savingGlobal ? "保存中..." : saved ? "✓ 已保存" : "保存到当前角色"}
             </button>
             <button onClick={onClose} style={closeBtnStyle}>
               ×
