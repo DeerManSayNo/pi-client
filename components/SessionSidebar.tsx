@@ -21,6 +21,7 @@ interface Props {
   explorerRefreshKey?: number;
   onAtMention?: (relativePath: string) => void;
   compact?: boolean;
+  onProjectsChange?: (projects: { cwd: string; displayName: string }[]) => void;
 }
 
 function formatRelativeTime(dateStr: string): string {
@@ -261,7 +262,7 @@ function PiAgentTitle() {
   );
 }
 
-export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, onInitialRestoreDone, refreshKey, optimisticSession, runningSessionIds = new Set(), onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onAtMention, compact = false }: Props) {
+export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, onInitialRestoreDone, refreshKey, optimisticSession, runningSessionIds = new Set(), onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onAtMention, compact = false, onProjectsChange }: Props) {
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -507,6 +508,13 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       });
   }, [sessionProjects, customCwds, defaultCwd, projectMeta]);
   const activeSelectedCwd = selectedCwdProp ?? selectedCwd;
+
+  useEffect(() => {
+    onProjectsChange?.(projects.map((project) => ({
+      cwd: project.cwd,
+      displayName: project.displayName ?? getProjectName(project.cwd),
+    })));
+  }, [projects, onProjectsChange]);
 
   const updateProjectMeta = useCallback((updater: (prev: ProjectMeta) => ProjectMeta) => {
     setProjectMeta((prev) => {

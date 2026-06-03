@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useRef, useState, useCallback, useEffect, useImperativeHandle, forwardRef, KeyboardEvent } from "react";
+import React, { useRef, useState, useCallback, useEffect, useLayoutEffect, useImperativeHandle, forwardRef, KeyboardEvent } from "react";
 
 export interface AttachedImage {
   data: string;   // base64, no prefix
@@ -91,6 +91,8 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const skillsFetchRef = useRef<AbortController | null>(null);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const selectedSkillChipRef = useRef<HTMLSpanElement>(null);
+  const [selectedSkillIndent, setSelectedSkillIndent] = useState(0);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const modelDropdownPanelRef = useRef<HTMLDivElement>(null);
   const toolDropdownRef = useRef<HTMLDivElement>(null);
@@ -491,6 +493,29 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     ? (modelOptions.find((o) => o.modelId === model.modelId && o.provider === model.provider)?.name ?? model.modelId)
     : modelOptions.length > 0 ? modelOptions[0].name : null;
 
+  // Keep the textarea's first line indented by the visual skill chip.
+  // The textarea itself stays full-width, so wrapped/new lines can flow underneath the chip.
+  useLayoutEffect(() => {
+    if (!selectedSkill) {
+      setSelectedSkillIndent(0);
+      return;
+    }
+
+    const chip = selectedSkillChipRef.current;
+    const measure = () => {
+      setSelectedSkillIndent(chip ? Math.ceil(chip.getBoundingClientRect().width) + 8 : 0);
+    };
+
+    measure();
+    const resizeObserver = chip && typeof ResizeObserver !== "undefined" ? new ResizeObserver(measure) : null;
+    if (chip) resizeObserver?.observe(chip);
+    window.addEventListener("resize", measure);
+    return () => {
+      resizeObserver?.disconnect();
+      window.removeEventListener("resize", measure);
+    };
+  }, [selectedSkill]);
+
   // Close dropdowns on outside click
   useEffect(() => {
     const handler = (e: MouseEvent) => {
@@ -695,121 +720,141 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
             transition: "border-color 0.15s, background 0.15s, box-shadow 0.15s",
           } as React.CSSProperties}
         >
-          {selectedSkill && (
-            <span
-              title={`当前启用 skill: ${selectedSkill.name}`}
-              style={{
-                flexShrink: 0,
-                alignSelf: "center",
-                display: "inline-flex",
-                alignItems: "center",
-                gap: 6,
-                maxWidth: 240,
-                height: 28,
-                padding: "0 8px 0 10px",
-                borderRadius: 999,
-                background: "color-mix(in srgb, var(--accent) 6%, transparent)",
-                border: "1px solid color-mix(in srgb, var(--accent) 13%, transparent)",
-                color: "color-mix(in srgb, var(--accent) 55%, var(--text-muted))",
-                fontSize: 13,
-                fontWeight: 500,
-                letterSpacing: "-0.01em",
-                backdropFilter: "blur(8px)",
-                boxShadow: "inset 0 1px 0 rgba(255,255,255,0.10), 0 1px 2px rgba(15,23,42,0.03)",
-              }}
-            >
+          <div
+            style={{
+              position: "relative",
+              flex: 1,
+              minWidth: 0,
+              alignSelf: "center",
+              display: "flex",
+              alignItems: "center",
+            }}
+          >
+            {selectedSkill && (
               <span
-                aria-hidden="true"
+                ref={selectedSkillChipRef}
+                title={`当前启用 skill: ${selectedSkill.name}`}
                 style={{
-                  width: 5,
-                  height: 5,
-                  borderRadius: "50%",
-                  background: "currentColor",
-                  opacity: 0.45,
-                  flexShrink: 0,
-                }}
-              />
-              <span
-                style={{
-                  minWidth: 0,
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
-                }}
-              >
-                {selectedSkill.name}
-              </span>
-              <button
-                type="button"
-                onClick={() => { setSelectedSkill(null); textareaRef.current?.focus(); }}
-                aria-label={`移除 skill ${selectedSkill.name}`}
-                title="移除技能"
-                style={{
-                  flexShrink: 0,
+                  position: "absolute",
+                  left: 0,
+                  top: 0,
+                  zIndex: 1,
                   display: "inline-flex",
                   alignItems: "center",
-                  justifyContent: "center",
-                  width: 18,
-                  height: 18,
-                  marginRight: -3,
-                  border: "none",
-                  borderRadius: "50%",
-                  background: "transparent",
-                  color: "inherit",
-                  cursor: "pointer",
-                  padding: 0,
-                  opacity: 0.42,
-                  outline: "none",
-                  transition: "background 120ms ease, opacity 120ms ease, color 120ms ease",
+                  gap: 4,
+                  maxWidth: 200,
+                  height: 22,
+                  padding: "0 5px 0 7px",
+                  borderRadius: 999,
+                  background: "color-mix(in srgb, var(--accent) 6%, var(--bg))",
+                  border: "1px solid color-mix(in srgb, var(--accent) 13%, transparent)",
+                  color: "color-mix(in srgb, var(--accent) 55%, var(--text-muted))",
+                  fontSize: 12,
+                  fontWeight: 500,
+                  letterSpacing: "-0.01em",
+                  backdropFilter: "blur(8px)",
+                  boxShadow: "inset 0 1px 0 rgba(255,255,255,0.10), 0 1px 2px rgba(15,23,42,0.03)",
                 }}
-                onMouseEnter={(e) => { e.currentTarget.style.background = "color-mix(in srgb, currentColor 9%, transparent)"; e.currentTarget.style.opacity = "0.85"; }}
-                onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.opacity = "0.42"; }}
-                onFocus={(e) => { e.currentTarget.style.background = "color-mix(in srgb, currentColor 9%, transparent)"; e.currentTarget.style.opacity = "0.9"; }}
-                onBlur={(e) => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.opacity = "0.42"; }}
               >
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round">
-                  <path d="M18 6 6 18" />
-                  <path d="m6 6 12 12" />
-                </svg>
-              </button>
-            </span>
-          )}
-          <textarea
-            ref={textareaRef}
-            value={value}
-            onChange={handleTextChange}
-            onKeyDown={handleKeyDown}
-            onInput={handleInput}
-            onPaste={handlePaste}
-            onCompositionStart={handleCompositionStart}
-            onCompositionUpdate={handleCompositionUpdate}
-            onCompositionEnd={handleCompositionEnd}
-            onBlur={() => {
-              // Delay close so click on skill picker item can fire first
-              setTimeout(() => setSkillPickerOpen(false), 150);
-            }}
-            placeholder={
-              isStreaming && (onSteer || onFollowUp)
-                ? "Steer 立即注入 / Follow-up 排队…"
-                : isStreaming ? "智能体正在运行…"
-                : "输入消息…"
-            }
-            rows={1}
-            style={{
-              flex: 1,
-              background: "none",
-              border: "none",
-              outline: "none",
-              resize: "none",
-              color: "var(--text)",
-              fontSize: 14,
-              lineHeight: 1.6,
-              fontFamily: "inherit",
-              minHeight: 24,
-              maxHeight: 200,
-              overflow: "auto",
-            }}
-          />
+                <span
+                  aria-hidden="true"
+                  style={{
+                    width: 4,
+                    height: 4,
+                    borderRadius: "50%",
+                    background: "currentColor",
+                    opacity: 0.45,
+                    flexShrink: 0,
+                  }}
+                />
+                <span
+                  style={{
+                    minWidth: 0,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {selectedSkill.name}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => { setSelectedSkill(null); textareaRef.current?.focus(); }}
+                  aria-label={`移除 skill ${selectedSkill.name}`}
+                  title="移除技能"
+                  style={{
+                    flexShrink: 0,
+                    display: "inline-flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    width: 14,
+                    height: 14,
+                    marginRight: -2,
+                    border: "none",
+                    borderRadius: "50%",
+                    background: "transparent",
+                    color: "inherit",
+                    cursor: "pointer",
+                    padding: 0,
+                    opacity: 0.42,
+                    outline: "none",
+                    transition: "background 120ms ease, opacity 120ms ease, color 120ms ease",
+                  }}
+                  onMouseEnter={(e) => { e.currentTarget.style.background = "color-mix(in srgb, currentColor 9%, transparent)"; e.currentTarget.style.opacity = "0.85"; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.opacity = "0.42"; }}
+                  onFocus={(e) => { e.currentTarget.style.background = "color-mix(in srgb, currentColor 9%, transparent)"; e.currentTarget.style.opacity = "0.9"; }}
+                  onBlur={(e) => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.opacity = "0.42"; }}
+                >
+                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round">
+                    <path d="M18 6 6 18" />
+                    <path d="m6 6 12 12" />
+                  </svg>
+                </button>
+              </span>
+            )}
+            <textarea
+              ref={textareaRef}
+              value={value}
+              onChange={handleTextChange}
+              onKeyDown={handleKeyDown}
+              onInput={handleInput}
+              onPaste={handlePaste}
+              onCompositionStart={handleCompositionStart}
+              onCompositionUpdate={handleCompositionUpdate}
+              onCompositionEnd={handleCompositionEnd}
+              onBlur={() => {
+                // Delay close so click on skill picker item can fire first
+                setTimeout(() => setSkillPickerOpen(false), 150);
+              }}
+              placeholder={
+                isStreaming && (onSteer || onFollowUp)
+                  ? "Steer 立即注入 / Follow-up 排队…"
+                  : isStreaming ? "智能体正在运行…"
+                  : "输入消息…"
+              }
+              rows={2}
+              style={{
+                width: "100%",
+                background: "none",
+                border: "none",
+                outline: "none",
+                resize: "none",
+                color: "var(--text)",
+                fontSize: 14,
+                lineHeight: "22px",
+                fontFamily: "inherit",
+                padding: 0,
+                paddingLeft: selectedSkillIndent,
+                margin: 0,
+                display: "block",
+                boxSizing: "border-box",
+                minHeight: 44,
+                maxHeight: 200,
+                overflow: "auto",
+                textIndent: 0,
+              }}
+            />
+          </div>
 
           {isStreaming ? (
             <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0, alignSelf: "flex-end" }}>
@@ -871,11 +916,13 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
               style={{
                 flexShrink: 0,
                 alignSelf: "flex-end",
-                display: "flex", alignItems: "center", gap: 6,
-                padding: "7px 14px",
+                display: "flex", alignItems: "center", justifyContent: "center",
+                width: 28,
+                height: 28,
+                padding: 0,
                 background: (value.trim() || attachedImages.length || selectedSkill) ? "var(--accent)" : "var(--bg-panel)",
                 border: "none",
-                borderRadius: 8,
+                borderRadius: "50%",
                 color: (value.trim() || attachedImages.length || selectedSkill) ? "#fff" : "var(--text-dim)",
                 cursor: (value.trim() || attachedImages.length || selectedSkill) ? "pointer" : "not-allowed",
                 fontSize: 13,
@@ -885,11 +932,10 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 transition: "background 0.15s, box-shadow 0.15s",
               }}
             >
-              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <line x1="2" y1="7" x2="11" y2="7" />
-                <polyline points="7.5 3 12 7 7.5 11" />
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round">
+                <line x1="12" y1="19" x2="12" y2="5" />
+                <polyline points="5 12 12 5 19 12" />
               </svg>
-              发送
             </button>
           )}
         </div>

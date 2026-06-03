@@ -8,6 +8,7 @@ import { FileViewer } from "./FileViewer";
 import { TabBar, type Tab } from "./TabBar";
 import { ModelsConfig } from "./ModelsConfig";
 import { SkillsConfig } from "./SkillsConfig";
+import { SchedulerPanel } from "./SchedulerPanel";
 import { useTheme } from "@/hooks/useTheme";
 import type { SessionInfo } from "@/lib/types";
 import type { ChatInputHandle } from "./ChatInput";
@@ -66,6 +67,8 @@ export function AppShell() {
   const [modelsConfigOpen, setModelsConfigOpen] = useState(false);
   const [modelsRefreshKey, setModelsRefreshKey] = useState(0);
   const [skillsConfigOpen, setSkillsConfigOpen] = useState(false);
+  const [quickConfigOpen, setQuickConfigOpen] = useState<"memory" | "skill" | "role" | null>(null);
+  const [schedulerPanelOpen, setSchedulerPanelOpen] = useState(false);
   const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(new Set());
   const pendingSessionIdRef = useRef<string | null>(null);
   const pendingTempTabIdRef = useRef<string | null>(null);
@@ -130,10 +133,16 @@ export function AppShell() {
     chatInputRef.current?.insertText("`" + relativePath + "`");
   }, []);
 
+  const handleProjectsChange = useCallback((projects: { cwd: string; displayName: string }[]) => {
+    setProjectOptions(projects);
+  }, []);
+
   const [initialSessionId] = useState<string | null>(() => searchParams.get("session"));
   const [activeCwd, setActiveCwd] = useState<string | null>(null);
   const [defaultCwd, setDefaultCwd] = useState<string | null>(null);
   const [customCwds, setCustomCwds] = useState<string[]>([]);
+  const [projectOptions, setProjectOptions] = useState<{ cwd: string; displayName: string }[]>([]);
+  const [projectPickerOpen, setProjectPickerOpen] = useState(false);
   const effectiveProjectCwd = selectedSession?.cwd ?? newSessionCwd ?? activeCwd ?? defaultCwd;
   const projectLocked = selectedSession !== null || pendingSession !== null;
   // True once the initial ?session= URL param has been resolved (or confirmed absent)
@@ -205,6 +214,29 @@ export function AppShell() {
     setActiveTopPanel(null);
     router.replace("/", { scroll: false });
   }, [router]);
+
+  const handleHeaderProjectSelect = useCallback((cwd: string) => {
+    // Only allow changing cwd before a real session has started.
+    // This is the "nothing has been input yet" state for a new-session tab.
+    if (selectedSession !== null || pendingSession !== null) return;
+    setProjectPickerOpen(false);
+    setActiveCwd(cwd);
+    setNewSessionCwd(cwd);
+    setSessionTabs((prev) => prev.map((tab) => (
+      tab.id === activeSessionTabId && tab.path === "" ? { ...tab, cwd } : tab
+    )));
+    setSessionKey((k) => k + 1);
+    setSystemPrompt(null);
+    setActiveTopPanel(null);
+    router.replace("/", { scroll: false });
+  }, [activeSessionTabId, pendingSession, router, selectedSession]);
+
+  useEffect(() => {
+    if (!projectPickerOpen) return;
+    const close = () => setProjectPickerOpen(false);
+    window.addEventListener("click", close);
+    return () => window.removeEventListener("click", close);
+  }, [projectPickerOpen]);
 
   const handleSelectSession = useCallback((session: SessionInfo, isRestore = false) => {
     // Do not clear pendingSession here: a newly-created session is not written
@@ -460,6 +492,15 @@ export function AppShell() {
   const showPlaceholder = initialSessionRestored && !showChat && hasSessionTabs;
 
   const activeFileTab = fileTabs.find((t) => t.id === activeFileTabId) ?? null;
+  const canSwitchHeaderProject = selectedSession === null && pendingSession === null;
+  const headerProjectOptions = useMemo(() => {
+    const byCwd = new Map<string, string>();
+    for (const project of projectOptions) byCwd.set(project.cwd, project.displayName);
+    for (const cwd of customCwds) if (!byCwd.has(cwd)) byCwd.set(cwd, getProjectName(cwd));
+    if (defaultCwd && !byCwd.has(defaultCwd)) byCwd.set(defaultCwd, "默认");
+    if (effectiveProjectCwd && !byCwd.has(effectiveProjectCwd)) byCwd.set(effectiveProjectCwd, getProjectName(effectiveProjectCwd));
+    return [...byCwd.entries()].map(([cwd, displayName]) => ({ cwd, displayName }));
+  }, [customCwds, defaultCwd, effectiveProjectCwd, projectOptions]);
 
   const sidebarContent = (
     <div
@@ -489,6 +530,7 @@ export function AppShell() {
         explorerRefreshKey={explorerRefreshKey}
         onAtMention={handleAtMention}
         compact={sidebarCompact}
+        onProjectsChange={handleProjectsChange}
       />
       <div style={{ padding: sidebarCompact ? "8px 0" : "8px", flexShrink: 0, display: "flex", flexDirection: sidebarCompact ? "column" : "row", alignItems: "center", justifyContent: sidebarCompact ? "center" : "space-between", gap: 4 }}>
         {([
@@ -507,6 +549,41 @@ export function AppShell() {
             ),
           },
           {
+            label: "记忆",
+            onClick: () => setQuickConfigOpen("memory"),
+            disabled: false,
+            icon: (
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M4 6.5A2.5 2.5 0 0 1 6.5 4H20v16H6.5A2.5 2.5 0 0 1 4 17.5z" />
+                <path d="M8 8h8" />
+                <path d="M8 12h6" />
+                <path d="M8 16h7" />
+              </svg>
+            ),
+          },
+          {
+            label: "技能",
+            onClick: () => setQuickConfigOpen("skill"),
+            disabled: false,
+            icon: (
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M12 3l2.2 4.5L19 8.2l-3.5 3.4.8 4.8L12 14.1 7.7 16.4l.8-4.8L5 8.2l4.8-.7z" />
+                <path d="M19 15l1 2 2 .3-1.5 1.4.4 2.1-1.9-1-1.9 1 .4-2.1L16 17.3l2-.3z" />
+              </svg>
+            ),
+          },
+          {
+            label: "角色",
+            onClick: () => setQuickConfigOpen("role"),
+            disabled: false,
+            icon: (
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="8" r="4" />
+                <path d="M4 21a8 8 0 0 1 16 0" />
+              </svg>
+            ),
+          },
+          {
             label: "技能配置",
             onClick: () => setSkillsConfigOpen(true),
             disabled: !activeCwd && !selectedSession?.cwd && !newSessionCwd,
@@ -518,12 +595,24 @@ export function AppShell() {
               </svg>
             ),
           },
-        ] as { label: string; onClick: () => void; disabled: boolean; icon: React.ReactNode }[]).map(({ label, onClick, disabled, icon }) => (
+          {
+            label: "定时任务",
+            onClick: () => setSchedulerPanelOpen(true),
+            disabled: false,
+            icon: (
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="10" />
+                <polyline points="12 6 12 12 16 14" />
+              </svg>
+            ),
+          },
+        ] as { label: string; onClick: () => void; disabled: boolean; icon: React.ReactNode }[]).map(({ label, onClick, disabled, icon }, index) => (
           <button
-            key={label}
+            key={`${label}-${index}`}
             onClick={onClick}
             disabled={disabled}
             title={label}
+            aria-label={label}
             style={{
               flex: sidebarCompact ? "0 0 auto" : 1,
               width: sidebarCompact ? 30 : undefined,
@@ -540,7 +629,6 @@ export function AppShell() {
             onMouseLeave={(e) => { e.currentTarget.style.background = sidebarCompact ? "var(--bg-hover)" : "none"; e.currentTarget.style.color = "var(--text-muted)"; }}
           >
             {icon}
-            {!sidebarCompact && label}
           </button>
         ))}
       </div>
@@ -1025,6 +1113,104 @@ export function AppShell() {
               </div>
             </div>
           )}
+          {!showWatermark && effectiveProjectCwd && canSwitchHeaderProject && (
+            <div
+              style={{ position: "absolute", top: 18, left: 24, zIndex: 3 }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <button
+                onClick={() => {
+                  if (canSwitchHeaderProject) {
+                    setProjectPickerOpen((open) => !open);
+                    return;
+                  }
+                  if (sidebarMode === "closed") setSidebarMode("open");
+                }}
+                title={canSwitchHeaderProject ? "切换项目" : effectiveProjectCwd}
+                aria-label="当前项目"
+                aria-haspopup={canSwitchHeaderProject ? "menu" : undefined}
+                aria-expanded={canSwitchHeaderProject ? projectPickerOpen : undefined}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 6,
+                  maxWidth: "min(260px, calc(100vw - 48px))",
+                  padding: "4px 8px",
+                  border: "none",
+                  borderRadius: 8,
+                  background: projectPickerOpen ? "var(--bg-hover)" : "transparent",
+                  color: "var(--text)",
+                  cursor: "pointer",
+                  fontSize: 16,
+                  fontWeight: 700,
+                  fontFamily: "inherit",
+                  lineHeight: 1.25,
+                  transition: "background 0.12s, color 0.12s",
+                }}
+                onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
+                onMouseLeave={(e) => { e.currentTarget.style.background = projectPickerOpen ? "var(--bg-hover)" : "transparent"; }}
+              >
+                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {headerProjectOptions.find((project) => project.cwd === effectiveProjectCwd)?.displayName ?? getProjectName(effectiveProjectCwd)}
+                </span>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, color: "var(--text-muted)", transform: projectPickerOpen ? "rotate(180deg)" : "none", transition: "transform 0.12s" }}>
+                  <polyline points="6 9 12 15 18 9" />
+                </svg>
+              </button>
+              {canSwitchHeaderProject && projectPickerOpen && (
+                <div
+                  role="menu"
+                  style={{
+                    position: "absolute",
+                    top: 34,
+                    left: 0,
+                    width: 260,
+                    maxWidth: "calc(100vw - 48px)",
+                    maxHeight: 320,
+                    overflowY: "auto",
+                    padding: 6,
+                    background: "var(--bg-panel)",
+                    border: "1px solid var(--border)",
+                    borderRadius: 10,
+                    boxShadow: "0 14px 36px rgba(0,0,0,0.18)",
+                  }}
+                >
+                  {headerProjectOptions.map((project) => {
+                    const active = project.cwd === effectiveProjectCwd;
+                    return (
+                      <button
+                        key={project.cwd}
+                        role="menuitem"
+                        onClick={() => handleHeaderProjectSelect(project.cwd)}
+                        style={{
+                          width: "100%",
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 8,
+                          padding: "8px 9px",
+                          border: "none",
+                          borderRadius: 8,
+                          background: active ? "var(--bg-selected)" : "transparent",
+                          color: active ? "var(--text)" : "var(--text-muted)",
+                          cursor: active ? "default" : "pointer",
+                          textAlign: "left",
+                          fontSize: 12,
+                        }}
+                        title={project.cwd}
+                        onMouseEnter={(e) => { if (!active) e.currentTarget.style.background = "var(--bg-hover)"; }}
+                        onMouseLeave={(e) => { if (!active) e.currentTarget.style.background = "transparent"; }}
+                      >
+                        <span style={{ width: 7, height: 7, borderRadius: 999, background: active ? "var(--accent)" : "var(--border)", flexShrink: 0 }} />
+                        <span style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {project.displayName}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
           {!hasSessionTabs && initialSessionRestored && (
             <div
               aria-label="快速新建会话"
@@ -1246,7 +1432,7 @@ export function AppShell() {
                   <div style={{ fontSize: 18, fontWeight: 600, color: "var(--text)", marginBottom: 8 }}>开始使用</div>
                   <div style={{ fontSize: 12, color: "var(--text-muted)", lineHeight: 1.8 }}>
                     <span style={{ color: "var(--text-dim)", marginRight: 6 }}>1.</span>从侧边栏选择项目目录<br />
-                    <span style={{ color: "var(--text-dim)", marginRight: 6 }}>2.</span>点击底部的 “模型配置” 按钮配置模型
+                    <span style={{ color: "var(--text-dim)", marginRight: 6 }}>2.</span>点击底部的 “模型配置” 图标配置模型
                   </div>
                 </div>
               </div>
@@ -1281,6 +1467,69 @@ export function AppShell() {
     {skillsConfigOpen && (activeCwd ?? selectedSession?.cwd ?? newSessionCwd) && (
       <SkillsConfig cwd={(activeCwd ?? selectedSession?.cwd ?? newSessionCwd)!} onClose={() => setSkillsConfigOpen(false)} />
     )}
+    {schedulerPanelOpen && (
+      <SchedulerPanel onClose={() => setSchedulerPanelOpen(false)} cwd={activeCwd ?? selectedSession?.cwd ?? newSessionCwd ?? undefined} />
+    )}
+    {quickConfigOpen && (() => {
+      const title = quickConfigOpen === "memory" ? "记忆" : quickConfigOpen === "skill" ? "技能" : "角色";
+      const desc = quickConfigOpen === "memory"
+        ? "用于管理 Agent 的长期记忆与偏好。"
+        : quickConfigOpen === "skill"
+          ? "用于管理快捷技能入口。"
+          : "用于管理 Agent 角色与人格设定。";
+      return (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label={title}
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 1000,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            background: "rgba(0,0,0,0.35)",
+          }}
+          onClick={() => setQuickConfigOpen(null)}
+        >
+          <div
+            style={{
+              width: 360,
+              maxWidth: "calc(100vw - 32px)",
+              border: "1px solid var(--border)",
+              borderRadius: 14,
+              background: "var(--bg-panel)",
+              boxShadow: "0 18px 60px rgba(0,0,0,0.28)",
+              padding: 18,
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+              <div style={{ fontSize: 15, fontWeight: 700, color: "var(--text)" }}>{title}</div>
+              <button
+                onClick={() => setQuickConfigOpen(null)}
+                aria-label="关闭"
+                style={{
+                  width: 28,
+                  height: 28,
+                  borderRadius: 8,
+                  border: "1px solid var(--border)",
+                  background: "transparent",
+                  color: "var(--text-muted)",
+                  cursor: "pointer",
+                }}
+              >
+                ×
+              </button>
+            </div>
+            <p style={{ margin: "12px 0 0", fontSize: 12, lineHeight: 1.6, color: "var(--text-muted)" }}>
+              {desc}入口已添加，后续可以在这里接入具体配置页面。
+            </p>
+          </div>
+        </div>
+      );
+    })()}
     </>
   );
 }
