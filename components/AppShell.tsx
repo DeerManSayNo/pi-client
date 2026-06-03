@@ -17,7 +17,7 @@ import type { ChatInputHandle } from "./ChatInput";
 type DraggableStyle = CSSProperties & { WebkitAppRegion?: "drag" | "no-drag" };
 type SidebarMode = "open" | "compact" | "closed";
 
-const SKIP_AUTO_OPEN_SUFFIXES = [".jsonl"];
+const AUTO_OPEN_EXTENSIONS = new Set([".html", ".htm", ".md", ".mdx", ".txt", ".json", ".yaml", ".yml", ".toml", ".env", ".xml", ".ini", ".cfg", ".conf"]);
 
 function fileNameFromPath(filePath: string): string {
   return filePath.split(/[\\/]/).filter(Boolean).pop() ?? filePath;
@@ -25,7 +25,8 @@ function fileNameFromPath(filePath: string): string {
 
 function shouldAutoOpenFile(filePath: string): boolean {
   const name = fileNameFromPath(filePath).toLowerCase();
-  return Boolean(name) && !SKIP_AUTO_OPEN_SUFFIXES.some((suffix) => name.endsWith(suffix));
+  const ext = "." + (name.split(".").pop() ?? "");
+  return Boolean(name) && AUTO_OPEN_EXTENSIONS.has(ext);
 }
 
 function getProjectName(cwd: string): string {
