@@ -267,8 +267,9 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const [error, setError] = useState<string | null>(null);
   const [selectedCwd, setSelectedCwd] = useState<string | null>(null);
   const [defaultCwd, setDefaultCwd] = useState<string | null>(null);
-  const [customCwds, setCustomCwds] = useState<string[]>(() => readCustomCwds());
-  const [projectMeta, setProjectMeta] = useState<ProjectMeta>(() => readProjectMeta());
+  const [customCwds, setCustomCwds] = useState<string[]>([]);
+  const [projectMeta, setProjectMeta] = useState<ProjectMeta>({ hiddenCwds: [], pinnedCwds: [], notes: {}, defaultPinInitializedCwds: [] });
+  const [clientReady, setClientReady] = useState(false);
   const [projectMenu, setProjectMenu] = useState<{ cwd: string; x: number; y: number } | null>(null);
   const [expandedCwds, setExpandedCwds] = useState<Set<string>>(new Set());
   const [allProjectsState, setAllProjectsState] = useState<"expanded" | "compact" | "collapsed">("expanded");
@@ -276,6 +277,13 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const autoExpandedRef = useRef(false);
   const [explorerOpen, setExplorerOpen] = useState(true);
   const [explorerKey, setExplorerKey] = useState(0);
+  // Sync client-only localStorage state after mount to avoid hydration mismatch
+  useEffect(() => {
+    setCustomCwds(readCustomCwds());
+    setProjectMeta(readProjectMeta());
+    setClientReady(true);
+  }, []);
+
   const [sessionRefreshDone, setSessionRefreshDone] = useState(false);
   const [explorerRefreshDone, setExplorerRefreshDone] = useState(false);
   const sessionRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -714,11 +722,11 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         >
           <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             {allProjectsState === "expanded" ? (
-              <polyline points="18 15 12 9 6 15" />
+              <polyline points="6 9 12 15 18 9" />
             ) : allProjectsState === "compact" ? (
               <><line x1="8" y1="12" x2="16" y2="12" /></>
             ) : (
-              <polyline points="6 9 12 15 18 9" />
+              <polyline points="18 15 12 9 6 15" />
             )}
           </svg>
           {!compact && "全部项目"}

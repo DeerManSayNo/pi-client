@@ -1,6 +1,5 @@
 "use client";
 
-import { open } from "@tauri-apps/plugin-dialog";
 import { useState, useCallback, useRef, useEffect, useMemo, type CSSProperties } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { SessionSidebar } from "./SessionSidebar";
@@ -69,25 +68,19 @@ export function AppShell() {
   const [skillsConfigOpen, setSkillsConfigOpen] = useState(false);
   const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(new Set());
   const pendingSessionIdRef = useRef<string | null>(null);
+  const pendingTempTabIdRef = useRef<string | null>(null);
   const [sidebarMode, setSidebarMode] = useState<SidebarMode>("open");
   const sidebarOpen = sidebarMode !== "closed";
   const sidebarCompact = sidebarMode === "compact";
   const SIDEBAR_COMPACT = 56;
   const SIDEBAR_MIN = 180;
   const SIDEBAR_MAX = 500;
-  const [sidebarWidth, setSidebarWidth] = useState<number>(() => {
-    if (typeof window === "undefined") return 260;
-    const stored = window.localStorage.getItem("pi-agent.sidebar-width");
-    const parsed = stored ? parseInt(stored, 10) : 260;
-    return Number.isFinite(parsed) ? Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, parsed)) : 260;
-  });
+  const [sidebarWidth, setSidebarWidth] = useState<number>(260);
   const [isResizing, setIsResizing] = useState(false);
   const resizeStartX = useRef(0);
   const resizeStartWidth = useRef(260);
   const chatInputRef = useRef<ChatInputHandle | null>(null);
   const topBarRef = useRef<HTMLDivElement>(null);
-  const projectDropdownRef = useRef<HTMLDivElement>(null);
-  const [projectDropdownOpen, setProjectDropdownOpen] = useState(false);
 
   const [systemPrompt, setSystemPrompt] = useState<string | null>(null);
   const systemBtnRef = useRef<HTMLButtonElement>(null);
@@ -140,8 +133,7 @@ export function AppShell() {
   const [initialSessionId] = useState<string | null>(() => searchParams.get("session"));
   const [activeCwd, setActiveCwd] = useState<string | null>(null);
   const [defaultCwd, setDefaultCwd] = useState<string | null>(null);
-  const [projectCwds, setProjectCwds] = useState<string[]>([]);
-  const [customCwds, setCustomCwds] = useState<string[]>(() => readCustomCwds());
+  const [customCwds, setCustomCwds] = useState<string[]>([]);
   const effectiveProjectCwd = selectedSession?.cwd ?? newSessionCwd ?? activeCwd ?? defaultCwd;
   const projectLocked = selectedSession !== null || pendingSession !== null;
   // True once the initial ?session= URL param has been resolved (or confirmed absent)
@@ -149,17 +141,15 @@ export function AppShell() {
   // Suppresses sessionKey bump in handleCwdChange during the initial URL restore
   const suppressCwdBumpRef = useRef(false);
 
+  // Sync client-only localStorage state after mount to avoid hydration mismatch
   useEffect(() => {
-    const controller = new AbortController();
-    fetch("/api/sessions", { signal: controller.signal })
-      .then((res) => res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`)))
-      .then((data: { sessions?: SessionInfo[] }) => {
-        const cwds = (data.sessions ?? []).map((s) => s.cwd).filter((cwd): cwd is string => Boolean(cwd));
-        setProjectCwds([...new Set(cwds)]);
-      })
-      .catch(() => {});
-    return () => controller.abort();
-  }, [refreshKey]);
+    const storedWidth = window.localStorage.getItem("pi-agent.sidebar-width");
+    if (storedWidth) {
+      const parsed = parseInt(storedWidth, 10);
+      if (Number.isFinite(parsed)) setSidebarWidth(Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, parsed)));
+    }
+    setCustomCwds(readCustomCwds());
+  }, []);
 
   useEffect(() => {
     fetch("/api/default-cwd", { method: "POST" })
@@ -167,72 +157,6 @@ export function AppShell() {
       .then((data: { cwd?: string }) => { if (data.cwd) setDefaultCwd(data.cwd); })
       .catch(() => {});
   }, []);
-
-  const projectOptions = useMemo(() => {
-    const seen = new Set<string>();
-    const result: { cwd: string; label: string }[] = [];
-    const add = (cwd: string | null | undefined, label?: string) => {
-      if (!cwd || seen.has(cwd)) return;
-      seen.add(cwd);
-      result.push({ cwd, label: label ?? getProjectName(cwd) });
-    };
-    add(defaultCwd, "默认");
-    add(effectiveProjectCwd);
-    customCwds.forEach((cwd) => add(cwd));
-    projectCwds.forEach((cwd) => add(cwd));
-    return result;
-  }, [defaultCwd, effectiveProjectCwd, customCwds, projectCwds]);
-
-  const effectiveProjectName = effectiveProjectCwd ? getProjectName(effectiveProjectCwd) : "选择项目";
-
-  const switchProject = useCallback((cwd: string) => {
-    if (!cwd || cwd === "__add__" || projectLocked) return;
-    setSelectedSession(null);
-    setNewSessionCwd(cwd);
-    setActiveCwd(cwd);
-    setSessionKey((k) => k + 1);
-    setExplorerRefreshKey((k) => k + 1);
-    setSystemPrompt(null);
-    setActiveTopPanel(null);
-    router.replace("/", { scroll: false });
-  }, [projectLocked, router]);
-
-  const handleAddProjectFromTopBar = useCallback(async () => {
-    if (projectLocked) return;
-    let cwd: string | null = null;
-    try {
-      const selected = await open({ directory: true, multiple: false, title: "选择项目目录" });
-      if (typeof selected === "string") cwd = selected;
-    } catch {
-      // In non-Tauri/dev browser environments, fall back to manual input.
-    }
-    if (!cwd) {
-      const typed = window.prompt("输入项目路径", effectiveProjectCwd ?? defaultCwd ?? "");
-      cwd = typed?.trim() || null;
-    }
-    if (!cwd) return;
-    const finalCwd = cwd;
-    setCustomCwds((prev) => {
-      const next = [finalCwd, ...prev.filter((item) => item !== finalCwd)];
-      writeCustomCwds(next);
-      return next;
-    });
-    switchProject(finalCwd);
-  }, [defaultCwd, effectiveProjectCwd, projectLocked, switchProject]);
-
-  useEffect(() => {
-    if (!projectDropdownOpen) return;
-    if (projectLocked) {
-      setProjectDropdownOpen(false);
-      return;
-    }
-    const handlePointerDown = (event: PointerEvent) => {
-      if (projectDropdownRef.current?.contains(event.target as Node)) return;
-      setProjectDropdownOpen(false);
-    };
-    window.addEventListener("pointerdown", handlePointerDown);
-    return () => window.removeEventListener("pointerdown", handlePointerDown);
-  }, [projectDropdownOpen, projectLocked]);
 
   useEffect(() => {
     let cancelled = false;
@@ -287,6 +211,17 @@ export function AppShell() {
     // to disk by pi until the first assistant message exists. If the user
     // switches away while that first response is still running, /api/sessions
     // cannot list it yet, so the sidebar must keep showing the optimistic row.
+    // Placeholder sessions (created by top bar "+") have path === ""
+    if (session.path === "") {
+      setNewSessionCwd(session.cwd);
+      setSelectedSession(null);
+      setActiveSessionTabId(session.id);
+      setSessionKey((k) => k + 1);
+      setSystemPrompt(null);
+      setActiveTopPanel(null);
+      router.replace("/", { scroll: false });
+      return;
+    }
     setNewSessionCwd(null);
     setSelectedSession(session);
     setSessionTabs((prev) => {
@@ -311,6 +246,20 @@ export function AppShell() {
   }, [router]);
 
   const handleNewSession = useCallback((_sessionId: string, cwd: string) => {
+    // Create a placeholder tab so the chat area shows up
+    const placeholder: SessionInfo = {
+      path: "",
+      id: _sessionId,
+      cwd,
+      name: "新会话",
+      created: new Date().toISOString(),
+      modified: new Date().toISOString(),
+      messageCount: 0,
+      firstMessage: "",
+    };
+    setSessionTabs((prev) => [...prev, placeholder]);
+    setActiveSessionTabId(_sessionId);
+    pendingTempTabIdRef.current = _sessionId;
     setPendingSession(null);
     setSelectedSession(null);
     setNewSessionCwd(cwd);
@@ -319,6 +268,35 @@ export function AppShell() {
     setActiveTopPanel(null);
     router.replace("/", { scroll: false });
   }, [router]);
+
+  const handleTopNewSession = useCallback(() => {
+    const cwd = effectiveProjectCwd;
+    if (!cwd) return;
+    const tempId = typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID()
+      : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
+    // Add a placeholder tab immediately
+    const placeholder: SessionInfo = {
+      path: "",
+      id: tempId,
+      cwd,
+      name: "新会话",
+      created: new Date().toISOString(),
+      modified: new Date().toISOString(),
+      messageCount: 0,
+      firstMessage: "",
+    };
+    setSessionTabs((prev) => [...prev, placeholder]);
+    setActiveSessionTabId(tempId);
+    pendingTempTabIdRef.current = tempId;
+    setPendingSession(null);
+    setSelectedSession(null);
+    setNewSessionCwd(cwd);
+    setSessionKey((k) => k + 1);
+    setSystemPrompt(null);
+    setActiveTopPanel(null);
+    router.replace("/", { scroll: false });
+  }, [effectiveProjectCwd, router]);
 
   const handleSessionStarted = useCallback((session: SessionInfo | null) => {
     if (!session) {
@@ -345,11 +323,15 @@ export function AppShell() {
     setPendingSession(session);
     setNewSessionCwd(null);
     setSelectedSession(session);
+    // Replace placeholder tab created by "+" button with real session
+    const tempId = pendingTempTabIdRef.current;
+    pendingTempTabIdRef.current = null;
     setSessionTabs((prev) => {
-      if (prev.find((t) => t.id === session.id)) return prev;
-      return [...prev, session];
+      const filtered = tempId ? prev.filter((t) => t.id !== tempId) : prev;
+      if (filtered.find((t) => t.id === session.id)) return filtered;
+      return [...filtered, session];
     });
-    setActiveSessionTabId(session.id);
+    setActiveSessionTabId((cur) => cur === tempId ? session.id : cur);
     setRefreshKey((k) => k + 1);
     router.replace(`?session=${encodeURIComponent(session.id)}`, { scroll: false });
   }, [router, setSessionRunning]);
@@ -444,6 +426,9 @@ export function AppShell() {
   }, [fileTabs]);
 
   const handleCloseSessionTab = useCallback((sessionId: string) => {
+    if (pendingTempTabIdRef.current === sessionId) {
+      pendingTempTabIdRef.current = null;
+    }
     setSessionTabs((prev) => {
       const next = prev.filter((t) => t.id !== sessionId);
       // If closing the active tab, switch to previous or clear
@@ -465,11 +450,14 @@ export function AppShell() {
     });
   }, [selectedSession]);
 
-  // Show chat area if a session is selected, or if we have a cwd to start a new session in
+  // Show chat area only when a session tab is open and active, or when a new-session tab is active
   const effectiveNewSessionCwd = newSessionCwd ?? (selectedSession === null && activeCwd ? activeCwd : null);
-  const showChat = selectedSession !== null || effectiveNewSessionCwd !== null;
+  const hasSessionTabs = sessionTabs.length > 0;
+  const showChat = hasSessionTabs && (selectedSession !== null || effectiveNewSessionCwd !== null);
+  // Show watermark only when absolutely nothing is open (no tabs, no session, no new-session cwd)
+  const showWatermark = !showChat && !hasSessionTabs;
   // While restoring initial session from URL, don't show the placeholder
-  const showPlaceholder = initialSessionRestored && !showChat;
+  const showPlaceholder = initialSessionRestored && !showChat && hasSessionTabs;
 
   const activeFileTab = fileTabs.find((t) => t.id === activeFileTabId) ?? null;
 
@@ -753,36 +741,33 @@ export function AppShell() {
       <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minWidth: 0 }}>
         {/* Top bar with sidebar toggle */}
         <div ref={topBarRef} style={{ display: "flex", alignItems: "center", flexShrink: 0, borderBottom: "1px solid var(--border)", height: 36, background: "var(--bg-panel)" }}>
-          {showChat && (
-            <>
-              <button
-                ref={systemBtnRef}
-                onClick={() => toggleTopPanel("system")}
-                style={{
-                  display: "flex", alignItems: "center", justifyContent: "center",
-                  width: 30, height: 30, padding: 0,
-                  background: activeTopPanel === "system" ? "var(--bg-selected)" : "transparent",
-                  border: "none", borderRadius: 8,
-                  cursor: "pointer",
-                  color: activeTopPanel === "system" ? "var(--text)" : "var(--text-muted)",
-                  marginLeft: 8, flexShrink: 0,
-                  transition: "color 0.1s, background 0.1s",
-                }}
-                title="系统提示词"
-                aria-label="系统提示词"
-                onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text)"; }}
-                onMouseLeave={(e) => { e.currentTarget.style.background = activeTopPanel === "system" ? "var(--bg-selected)" : "transparent"; e.currentTarget.style.color = activeTopPanel === "system" ? "var(--text)" : "var(--text-muted)"; }}
-              >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: systemPrompt ? "var(--accent)" : "currentColor" }}>
-                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                  <polyline points="14 2 14 8 20 8" />
-                  <line x1="8" y1="13" x2="16" y2="13" />
-                  <line x1="8" y1="17" x2="13" y2="17" />
-                </svg>
-              </button>
-          </>
-          )}
-          {/* Session tabs — inside top bar, to the right of system icon */}
+          {/* System prompt icon — always visible */}
+          <button
+            ref={systemBtnRef}
+            onClick={() => toggleTopPanel("system")}
+            style={{
+              display: "flex", alignItems: "center", justifyContent: "center",
+              width: 30, height: 30, padding: 0,
+              background: activeTopPanel === "system" ? "var(--bg-selected)" : "transparent",
+              border: "none", borderRadius: 8,
+              cursor: "pointer",
+              color: activeTopPanel === "system" ? "var(--text)" : "var(--text-muted)",
+              marginLeft: 8, flexShrink: 0,
+              transition: "color 0.1s, background 0.1s",
+            }}
+            title="系统提示词"
+            aria-label="系统提示词"
+            onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text)"; }}
+            onMouseLeave={(e) => { e.currentTarget.style.background = activeTopPanel === "system" ? "var(--bg-selected)" : "transparent"; e.currentTarget.style.color = activeTopPanel === "system" ? "var(--text)" : "var(--text-muted)"; }}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: systemPrompt ? "var(--accent)" : "currentColor" }}>
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+              <polyline points="14 2 14 8 20 8" />
+              <line x1="8" y1="13" x2="16" y2="13" />
+              <line x1="8" y1="17" x2="13" y2="17" />
+            </svg>
+          </button>
+          {/* Session tabs */}
           {sessionTabs.length > 0 && (
             <div style={{ flex: 1, minWidth: 0, alignSelf: "stretch", display: "flex", alignItems: "stretch", overflowX: "auto", overflowY: "hidden", gap: 2 }}>
               {sessionTabs.map((tab) => {
@@ -848,6 +833,32 @@ export function AppShell() {
               })}
             </div>
           )}
+          {/* New session button — far right */}
+          <button
+            onClick={handleTopNewSession}
+            style={{
+              display: "flex", alignItems: "center", justifyContent: "center",
+              width: 24, height: 24, padding: 0, flexShrink: 0,
+              background: "transparent", border: "none", borderRadius: 6,
+              color: "var(--text-dim)", cursor: "pointer",
+              marginLeft: "auto",
+              marginRight: 4,
+            }}
+            title="新建会话"
+            onMouseEnter={(e) => {
+              e.currentTarget.style.background = "var(--bg-hover)";
+              e.currentTarget.style.color = "var(--text)";
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = "transparent";
+              e.currentTarget.style.color = "var(--text-dim)";
+            }}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <line x1="12" y1="5" x2="12" y2="19" />
+              <line x1="5" y1="12" x2="19" y2="12" />
+            </svg>
+          </button>
           {/* Session stats — right-aligned in top bar */}
           {showChat && (sessionStats || contextUsage) && (() => {
             const t = sessionStats?.tokens;
@@ -882,7 +893,7 @@ export function AppShell() {
               <div
                 title={tooltip}
                 style={{
-                  marginLeft: "auto",
+                  marginLeft: 0,
                   display: "flex", alignItems: "center", gap: 10,
                   paddingLeft: 12,
                   paddingRight: 12,
@@ -977,7 +988,8 @@ export function AppShell() {
 
         {/* Chat content */}
         <div style={{ flex: 1, overflow: "hidden", position: "relative" }}>
-          {showChat && effectiveProjectName !== "选择项目" && (
+          {/* Watermark when no session tabs */}
+          {!hasSessionTabs && (
             <div
               aria-hidden="true"
               style={{
@@ -1009,152 +1021,197 @@ export function AppShell() {
                   userSelect: "none",
                 }}
               >
-                {effectiveProjectName}
+                PI Agent
               </div>
             </div>
           )}
-          {/* Project selector — only shown before a conversation starts */}
-          {!projectLocked && (
+          {!hasSessionTabs && initialSessionRestored && (
             <div
-              ref={projectDropdownRef}
+              aria-label="快速新建会话"
               style={{
-              position: "absolute",
-              top: 12,
-              left: 12,
-              zIndex: 10,
-            }}
-          >
-            <button
-              type="button"
-              onClick={() => {
-                if (projectLocked) return;
-                setProjectDropdownOpen((v) => !v);
-              }}
-              title={projectLocked ? `${effectiveProjectCwd ?? "当前项目"}（对话开始后不可切换）` : (effectiveProjectCwd ?? "选择项目")}
-              style={{
+                position: "absolute",
+                left: "50%",
+                bottom: 112,
+                transform: "translateX(-50%)",
+                zIndex: 2,
+                width: "min(560px, calc(100% - 96px))",
                 display: "flex",
+                flexDirection: "column",
                 alignItems: "center",
-                gap: 6,
-                maxWidth: 240,
-                height: 28,
-                border: "none",
-                background: "transparent",
-                color: "var(--text)",
-                padding: 0,
-                fontSize: 14,
-                fontWeight: 700,
-                outline: "none",
-                cursor: projectLocked ? "default" : "pointer",
+                gap: 10,
+                textAlign: "center",
               }}
             >
-              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {effectiveProjectName}
-              </span>
-              {!projectLocked && (
-                <svg
-                  width="14"
-                  height="14"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2.2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  style={{ color: "var(--text-muted)", flexShrink: 0, transform: projectDropdownOpen ? "rotate(180deg)" : "none", transition: "transform 0.12s" }}
-                >
-                  <polyline points="6 9 12 15 18 9" />
-                </svg>
-              )}
-            </button>
-
-            {projectDropdownOpen && !projectLocked && (
-              <div
+              <button
+                onClick={handleTopNewSession}
+                disabled={!effectiveProjectCwd}
+                title={effectiveProjectCwd ? `在 ${effectiveProjectCwd} 新建会话` : "请先在左侧选择项目目录"}
                 style={{
-                  position: "absolute",
-                  top: 34,
-                  left: 0,
-                  width: 260,
-                  maxHeight: 320,
-                  overflowY: "auto",
-                  background: "var(--bg-panel)",
-                  border: "1px solid var(--border)",
-                  borderRadius: 10,
-                  boxShadow: "0 12px 28px rgba(0,0,0,0.16)",
-                  padding: 6,
+                  minHeight: 58,
+                  minWidth: 300,
+                  maxWidth: "100%",
+                  padding: "8px 12px 8px 10px",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  gap: 11,
+                  borderRadius: 18,
+                  border: effectiveProjectCwd
+                    ? "1px solid color-mix(in srgb, var(--text) 18%, var(--border))"
+                    : "1px solid var(--border)",
+                  background: effectiveProjectCwd
+                    ? isDark
+                      ? "linear-gradient(135deg, color-mix(in srgb, var(--text) 7%, var(--bg-panel)), var(--bg-panel) 62%, color-mix(in srgb, #fff 3%, var(--bg)))"
+                      : "linear-gradient(135deg, #ffffff, var(--bg-panel) 62%, color-mix(in srgb, var(--text) 3%, var(--bg)))"
+                    : "var(--bg-panel)",
+                  color: effectiveProjectCwd ? "var(--text)" : "var(--text-dim)",
+                  boxShadow: effectiveProjectCwd
+                    ? isDark
+                      ? "0 18px 42px rgba(0,0,0,0.28), inset 0 1px 0 rgba(255,255,255,0.06)"
+                      : "0 18px 42px rgba(15,23,42,0.10), inset 0 1px 0 rgba(255,255,255,0.7)"
+                    : "inset 0 1px 0 rgba(255,255,255,0.08)",
+                  cursor: effectiveProjectCwd ? "pointer" : "not-allowed",
+                  fontSize: 14,
+                  fontFamily: "inherit",
+                  textAlign: "left",
+                  userSelect: "none",
+                  transition: "transform 0.14s ease, box-shadow 0.14s ease, border-color 0.14s ease",
+                }}
+                onMouseEnter={(e) => {
+                  if (!effectiveProjectCwd) return;
+                  e.currentTarget.style.transform = "translateY(-2px)";
+                  e.currentTarget.style.borderColor = "color-mix(in srgb, var(--text) 28%, var(--border))";
+                  e.currentTarget.style.boxShadow = isDark
+                    ? "0 24px 56px rgba(0,0,0,0.34), 0 0 0 4px color-mix(in srgb, #fff 7%, transparent), inset 0 1px 0 rgba(255,255,255,0.08)"
+                    : "0 24px 56px rgba(15,23,42,0.14), 0 0 0 4px rgba(0,0,0,0.045), inset 0 1px 0 rgba(255,255,255,0.78)";
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.transform = "translateY(0)";
+                  e.currentTarget.style.borderColor = effectiveProjectCwd
+                    ? "color-mix(in srgb, var(--text) 18%, var(--border))"
+                    : "var(--border)";
+                  e.currentTarget.style.boxShadow = effectiveProjectCwd
+                    ? isDark
+                      ? "0 18px 42px rgba(0,0,0,0.28), inset 0 1px 0 rgba(255,255,255,0.06)"
+                      : "0 18px 42px rgba(15,23,42,0.10), inset 0 1px 0 rgba(255,255,255,0.7)"
+                    : "inset 0 1px 0 rgba(255,255,255,0.08)";
                 }}
               >
-                {projectOptions.map((project) => {
-                  const active = project.cwd === effectiveProjectCwd;
-                  return (
-                    <button
-                      key={project.cwd}
-                      type="button"
-                      onClick={() => {
-                        setProjectDropdownOpen(false);
-                        switchProject(project.cwd);
-                      }}
-                      title={project.cwd}
-                      style={{
-                        width: "100%",
-                        display: "flex",
-                        alignItems: "center",
-                        gap: 8,
-                        padding: "8px 9px",
-                        border: "none",
-                        borderRadius: 7,
-                        background: active ? "var(--bg-selected)" : "transparent",
-                        color: active ? "var(--text)" : "var(--text-muted)",
-                        cursor: "pointer",
-                        textAlign: "left",
-                        fontSize: 12,
-                        fontWeight: active ? 700 : 500,
-                      }}
-                      onMouseEnter={(e) => { if (!active) e.currentTarget.style.background = "var(--bg-hover)"; }}
-                      onMouseLeave={(e) => { if (!active) e.currentTarget.style.background = "transparent"; }}
-                    >
-                      <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{project.label}</span>
-                      {active && (
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" style={{ color: "var(--accent)", flexShrink: 0 }}>
-                          <polyline points="20 6 9 17 4 12" />
-                        </svg>
-                      )}
-                    </button>
-                  );
-                })}
-                <div style={{ height: 1, background: "var(--border)", margin: "6px 4px" }} />
-                <button
-                  type="button"
-                  onClick={() => {
-                    setProjectDropdownOpen(false);
-                    void handleAddProjectFromTopBar();
-                  }}
+                <span
+                  aria-hidden="true"
                   style={{
-                    width: "100%",
-                    display: "flex",
+                    width: 38,
+                    height: 38,
+                    borderRadius: 14,
+                    display: "inline-flex",
                     alignItems: "center",
-                    gap: 8,
-                    padding: "8px 9px",
-                    border: "none",
-                    borderRadius: 7,
-                    background: "transparent",
-                    color: "var(--accent)",
-                    cursor: "pointer",
-                    textAlign: "left",
-                    fontSize: 12,
-                    fontWeight: 600,
+                    justifyContent: "center",
+                    flexShrink: 0,
+                    color: effectiveProjectCwd ? (isDark ? "#111" : "#fff") : "var(--text-dim)",
+                    background: effectiveProjectCwd
+                      ? isDark
+                        ? "linear-gradient(135deg, #f3f4f6, #c7c7c7)"
+                        : "linear-gradient(135deg, #111827, #3f3f46)"
+                      : "var(--bg-hover)",
+                    boxShadow: effectiveProjectCwd
+                      ? isDark
+                        ? "0 10px 24px rgba(255,255,255,0.08), inset 0 1px 0 rgba(255,255,255,0.45)"
+                        : "0 10px 24px rgba(0,0,0,0.16), inset 0 1px 0 rgba(255,255,255,0.18)"
+                      : "none",
                   }}
-                  onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
-                  onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
                 >
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
-                    <line x1="12" y1="5" x2="12" y2="19" />
-                    <line x1="5" y1="12" x2="19" y2="12" />
+                  <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.3" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M12 5v14" />
+                    <path d="M5 12h14" />
                   </svg>
-                  添加项目…
-                </button>
+                </span>
+                <span style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: 3, flex: 1 }}>
+                  <span style={{ fontSize: 15, lineHeight: 1.15, fontWeight: 750, letterSpacing: "-0.01em" }}>新建会话</span>
+                  <span
+                    style={{
+                      maxWidth: 210,
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                      fontSize: 12,
+                      lineHeight: 1.2,
+                      color: "var(--text-muted)",
+                    }}
+                  >
+                    {effectiveProjectCwd ? `在 ${getProjectName(effectiveProjectCwd)} 中开始` : "请先选择项目目录"}
+                  </span>
+                </span>
+                <span
+                  aria-hidden="true"
+                  style={{
+                    width: 28,
+                    height: 28,
+                    borderRadius: 999,
+                    display: "inline-flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    flexShrink: 0,
+                    color: effectiveProjectCwd ? "var(--text-muted)" : "var(--text-dim)",
+                    background: "var(--bg-hover)",
+                    opacity: effectiveProjectCwd ? 1 : 0.55,
+                  }}
+                >
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M5 12h14" />
+                    <path d="m13 6 6 6-6 6" />
+                  </svg>
+                </span>
+              </button>
+              <div
+                style={{
+                  padding: "4px 10px",
+                  borderRadius: 999,
+                  color: "var(--text-dim)",
+                  background: "color-mix(in srgb, var(--bg-panel) 70%, transparent)",
+                  border: "1px solid color-mix(in srgb, var(--border) 70%, transparent)",
+                  fontSize: 12,
+                  lineHeight: 1.45,
+                }}
+              >
+                {effectiveProjectCwd ? "也可以点击顶部右侧 + 创建新页签" : "从左侧选择项目后，这里会变成快速入口"}
               </div>
-            )}
-          </div>
+            </div>
+          )}
+          {showChat && (
+            <div
+              aria-hidden="true"
+              style={{
+                position: "absolute",
+                inset: 0,
+                zIndex: 0,
+                pointerEvents: "none",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                padding: 64,
+                overflow: "hidden",
+              }}
+            >
+              <div
+                style={{
+                  maxWidth: "96%",
+                  boxSizing: "border-box",
+                  color: "var(--text)",
+                  opacity: isDark ? 0.035 : 0.045,
+                  fontSize: "clamp(48px, 10vw, 160px)",
+                  fontWeight: 900,
+                  letterSpacing: "-0.05em",
+                  lineHeight: 1.15,
+                  padding: "0.12em 0.08em",
+                  textAlign: "center",
+                  whiteSpace: "normal",
+                  overflowWrap: "anywhere",
+                  userSelect: "none",
+                }}
+              >
+                {effectiveProjectCwd ? getProjectName(effectiveProjectCwd) : ""}
+              </div>
+            </div>
           )}
           {showChat ? (
             <div style={{ position: "relative", zIndex: 1, height: "100%" }}>
