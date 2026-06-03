@@ -46,6 +46,59 @@ function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function CodeIcon({ size = 14 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="m16 18 6-6-6-6" />
+      <path d="m8 6-6 6 6 6" />
+    </svg>
+  );
+}
+
+function PreviewIcon({ size = 14 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z" />
+      <circle cx="12" cy="12" r="3" />
+    </svg>
+  );
+}
+
+function MiddleEllipsisPath({ path, title }: { path: string; title?: string }) {
+  const normalized = path.replace(/\\/g, "/");
+  const lastSlash = normalized.lastIndexOf("/");
+  const prefix = lastSlash >= 0 ? normalized.slice(0, lastSlash + 1) : "";
+  const fileName = lastSlash >= 0 ? normalized.slice(lastSlash + 1) : normalized;
+
+  return (
+    <span
+      title={title ?? path}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        minWidth: 0,
+        maxWidth: "min(560px, 45vw)",
+        whiteSpace: "nowrap",
+        fontFamily: "var(--font-mono)",
+      }}
+    >
+      {prefix && (
+        <span
+          style={{
+            minWidth: 0,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {prefix}
+        </span>
+      )}
+      <span style={{ flexShrink: 0 }}>{fileName}</span>
+    </span>
+  );
+}
+
 // Myers diff — returns line-level unified diff
 function diffLines(oldLines: string[], newLines: string[]): DiffLine[] {
   const m = oldLines.length;
@@ -337,11 +390,11 @@ function ImageViewer({ filePath, cwd }: { filePath: string; cwd?: string }) {
           {getRelativeFilePath(filePath, cwd)}
         </span>
         <span style={{ marginLeft: "auto" }}>{ext || "image"}</span>
-        {naturalSize && <span>{naturalSize.w} × {naturalSize.h}</span>}
-        {formatSizeStr && <span>{formatSizeStr}</span>}
+        {naturalSize && <span style={{ flexShrink: 0, whiteSpace: "nowrap" }}>{naturalSize.w} × {naturalSize.h}</span>}
+        {formatSizeStr && <span style={{ flexShrink: 0, whiteSpace: "nowrap" }}>{formatSizeStr}</span>}
         <span
           title={watching ? "实时同步已启用" : "未监听"}
-          style={{ display: "flex", alignItems: "center", gap: 4, color: watching ? "#4ade80" : "var(--text-dim)" }}
+          style={{ display: "flex", alignItems: "center", gap: 4, color: watching ? "#4ade80" : "var(--text-dim)", flexShrink: 0, whiteSpace: "nowrap" }}
         >
           <span
             style={{
@@ -471,11 +524,11 @@ function AudioViewer({ filePath, cwd }: { filePath: string; cwd?: string }) {
           {getRelativeFilePath(filePath, cwd)}
         </span>
         <span style={{ marginLeft: "auto" }}>{ext || "audio"}</span>
-        {duration != null && <span>{formatDuration(duration)}</span>}
-        {size != null && <span>{formatSize(size)}</span>}
+        {duration != null && <span style={{ flexShrink: 0, whiteSpace: "nowrap" }}>{formatDuration(duration)}</span>}
+        {size != null && <span style={{ flexShrink: 0, whiteSpace: "nowrap" }}>{formatSize(size)}</span>}
         <span
           title={watching ? "实时同步已启用" : "未监听"}
-          style={{ display: "flex", alignItems: "center", gap: 4, color: watching ? "#4ade80" : "var(--text-dim)" }}
+          style={{ display: "flex", alignItems: "center", gap: 4, color: watching ? "#4ade80" : "var(--text-dim)", flexShrink: 0, whiteSpace: "nowrap" }}
         >
           <span
             style={{
@@ -539,7 +592,6 @@ function TextFileViewer({ filePath, cwd }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [previewMode, setPreviewMode] = useState(false);
   const [viewMode, setViewMode] = useState<"source" | "diff">("source");
-  const [wrapLines, setWrapLines] = useState(false);
   const [watching, setWatching] = useState(false);
   const [changeCount, setChangeCount] = useState(0);
   const esRef = useRef<EventSource | null>(null);
@@ -578,7 +630,6 @@ function TextFileViewer({ filePath, cwd }: Props) {
     setPrevContent(null);
     setPreviewMode(false);
     setViewMode("source");
-    setWrapLines(false);
     setChangeCount(0);
     setWatching(false);
 
@@ -588,7 +639,7 @@ function TextFileViewer({ filePath, cwd }: Props) {
     }
 
     fetchContent(filePath).then((d) => {
-      if (d?.language === "markdown") setPreviewMode(true);
+      if (d?.language === "markdown" || d?.language === "html") setPreviewMode(true);
     }).finally(() => setLoading(false));
 
     // Set up SSE watch
@@ -655,19 +706,18 @@ function TextFileViewer({ filePath, cwd }: Props) {
           color: "var(--text-dim)",
           background: "var(--bg)",
           flexShrink: 0,
+          overflow: "hidden",
         }}
       >
-        <span style={{ fontFamily: "var(--font-mono)" }} title={filePath}>
-          {getRelativeFilePath(filePath, cwd)}
-        </span>
-        <span style={{ marginLeft: "auto" }}>{data.language}</span>
-        {viewMode === "source" && <span>{lines.length} 行</span>}
-        <span>{formatSize(data.size)}</span>
+        <MiddleEllipsisPath path={getRelativeFilePath(filePath, cwd)} title={filePath} />
+        <span style={{ marginLeft: "auto", flexShrink: 0 }}>{data.language}</span>
+        {viewMode === "source" && <span style={{ flexShrink: 0, whiteSpace: "nowrap" }}>{lines.length} 行</span>}
+        <span style={{ flexShrink: 0, whiteSpace: "nowrap" }}>{formatSize(data.size)}</span>
 
         {/* Live watch indicator */}
         <span
           title={watching ? "实时同步已启用" : "未监听"}
-          style={{ display: "flex", alignItems: "center", gap: 4, color: watching ? "#4ade80" : "var(--text-dim)" }}
+          style={{ display: "flex", alignItems: "center", gap: 4, color: watching ? "#4ade80" : "var(--text-dim)", flexShrink: 0, whiteSpace: "nowrap" }}
         >
           <span
             style={{
@@ -710,47 +760,36 @@ function TextFileViewer({ filePath, cwd }: Props) {
           </div>
         )}
 
-        {/* Word wrap toggle */}
-        {viewMode === "source" && !previewMode && (
-          <button
-            onClick={() => setWrapLines((v) => !v)}
-            title={wrapLines ? "禁用自动换行" : "启用自动换行"}
-            style={{
-              padding: "2px 8px", fontSize: 11, cursor: "pointer",
-              background: wrapLines ? "var(--bg-selected)" : "var(--bg-hover)",
-              color: wrapLines ? "var(--text)" : "var(--text-muted)",
-              border: "1px solid var(--border)", borderRadius: 5,
-              fontWeight: wrapLines ? 600 : 400,
-            }}
-          >
-            换行
-          </button>
-        )}
-
         {/* HTML source/preview toggle */}
         {isHtml && viewMode === "source" && (
           <div style={{ display: "flex", borderRadius: 5, overflow: "hidden", border: "1px solid var(--border)" }}>
             <button
               onClick={() => setPreviewMode(false)}
+              aria-label="查看 HTML 代码"
+              title="代码"
               style={{
-                padding: "2px 8px", fontSize: 11, border: "none", cursor: "pointer",
+                width: 28, height: 24, padding: 0, fontSize: 11, border: "none", cursor: "pointer",
+                display: "flex", alignItems: "center", justifyContent: "center",
                 background: !previewMode ? "var(--bg-selected)" : "var(--bg-hover)",
                 color: !previewMode ? "var(--text)" : "var(--text-muted)",
                 fontWeight: !previewMode ? 600 : 400,
               }}
             >
-              代码
+              <CodeIcon />
             </button>
             <button
               onClick={() => setPreviewMode(true)}
+              aria-label="预览 HTML"
+              title="预览"
               style={{
-                padding: "2px 8px", fontSize: 11, border: "none", borderLeft: "1px solid var(--border)", cursor: "pointer",
+                width: 28, height: 24, padding: 0, fontSize: 11, border: "none", borderLeft: "1px solid var(--border)", cursor: "pointer",
+                display: "flex", alignItems: "center", justifyContent: "center",
                 background: previewMode ? "var(--bg-selected)" : "var(--bg-hover)",
                 color: previewMode ? "var(--text)" : "var(--text-muted)",
                 fontWeight: previewMode ? 600 : 400,
               }}
             >
-              预览
+              <PreviewIcon />
             </button>
           </div>
         )}
@@ -823,7 +862,7 @@ function TextFileViewer({ filePath, cwd }: Props) {
               minHeight: "100%",
             }}
             codeTagProps={{ style: { fontFamily: "var(--font-mono)" } }}
-            wrapLongLines={wrapLines}
+            wrapLongLines={false}
           >
             {data.content}
           </SyntaxHighlighter>

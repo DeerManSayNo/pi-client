@@ -6,7 +6,6 @@ import {
   resolveSessionPath,
   invalidateSessionPathCache,
   buildSessionContext,
-  listAllSessions,
 } from "@/lib/session-reader";
 import { getRpcSession } from "@/lib/rpc-manager";
 
@@ -29,8 +28,18 @@ export async function GET(
     const header = sm.getHeader();
     let modified = header?.timestamp ?? new Date().toISOString();
     try { modified = statSync(filePath).mtime.toISOString(); } catch { /* use header timestamp */ }
-    const allSessions = await listAllSessions();
-    const parentSessionId = allSessions.find((s) => s.id === id)?.parentSessionId;
+    let parentSessionId: string | undefined;
+    try {
+      const firstLine = readFileSync(filePath, "utf8").split("\n", 1)[0];
+      const currentHeader = JSON.parse(firstLine) as { type?: string; parentSession?: string };
+      if (currentHeader.type === "session" && currentHeader.parentSession) {
+        const parentFirstLine = readFileSync(currentHeader.parentSession, "utf8").split("\n", 1)[0];
+        const parentHeader = JSON.parse(parentFirstLine) as { type?: string; id?: string };
+        if (parentHeader.type === "session" && typeof parentHeader.id === "string") {
+          parentSessionId = parentHeader.id;
+        }
+      }
+    } catch { /* parent metadata is optional */ }
     const info = header ? {
       path: filePath,
       id: header.id,

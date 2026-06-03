@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useCallback, useRef, useEffect, useMemo, type CSSProperties } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import { SessionSidebar } from "./SessionSidebar";
 import { ChatWindow } from "./ChatWindow";
 import { FileViewer } from "./FileViewer";
@@ -53,7 +53,6 @@ function writeCustomCwds(cwds: string[]) {
 }
 
 export function AppShell() {
-  const router = useRouter();
   const searchParams = useSearchParams();
   const { isDark, toggleTheme } = useTheme();
   const [selectedSession, setSelectedSession] = useState<SessionInfo | null>(null);
@@ -64,12 +63,11 @@ export function AppShell() {
   const [sessionTabs, setSessionTabs] = useState<SessionInfo[]>([]);
   const [activeSessionTabId, setActiveSessionTabId] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
-  const [sessionKey, setSessionKey] = useState(0);
   const [explorerRefreshKey, setExplorerRefreshKey] = useState(0);
   const [modelsConfigOpen, setModelsConfigOpen] = useState(false);
   const [modelsRefreshKey, setModelsRefreshKey] = useState(0);
   const [skillsConfigOpen, setSkillsConfigOpen] = useState(false);
-  const [quickConfigOpen, setQuickConfigOpen] = useState<"memory" | "skill" | "role" | null>(null);
+  const [quickConfigOpen, setQuickConfigOpen] = useState<"memory" | "mcp" | "role" | null>(null);
   const [schedulerPanelOpen, setSchedulerPanelOpen] = useState(false);
   const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(new Set());
   const pendingSessionIdRef = useRef<string | null>(null);
@@ -102,6 +100,10 @@ export function AppShell() {
     setContextUsage(usage);
   }, []);
 
+  const replaceUrl = useCallback((url: string) => {
+    window.history.replaceState(null, "", url);
+  }, []);
+
   // Right panel — file tabs only
   const [fileTabs, setFileTabs] = useState<Tab[]>([]);
   const [activeFileTabId, setActiveFileTabId] = useState<string | null>(null);
@@ -126,7 +128,7 @@ export function AppShell() {
   const projectLocked = selectedSession !== null || pendingSession !== null;
   // True once the initial ?session= URL param has been resolved (or confirmed absent)
   const [initialSessionRestored, setInitialSessionRestored] = useState<boolean>(() => !searchParams.get("session"));
-  // Suppresses sessionKey bump in handleCwdChange during the initial URL restore
+  // Suppresses extra cwd handling during the initial URL restore
   const suppressCwdBumpRef = useRef(false);
 
   // Sync client-only localStorage state after mount to avoid hydration mismatch
@@ -188,9 +190,8 @@ export function AppShell() {
       if (prev && prev !== cwd) return null;
       return prev;
     });
-    setSessionKey((k) => k + 1);
-    router.replace("/", { scroll: false });
-  }, [router]);
+    replaceUrl("/");
+  }, [replaceUrl]);
 
   const handleHeaderProjectSelect = useCallback((cwd: string) => {
     // Only allow changing cwd before a real session has started.
@@ -202,9 +203,8 @@ export function AppShell() {
     setSessionTabs((prev) => prev.map((tab) => (
       tab.id === activeSessionTabId && tab.path === "" ? { ...tab, cwd } : tab
     )));
-    setSessionKey((k) => k + 1);
-    router.replace("/", { scroll: false });
-  }, [activeSessionTabId, pendingSession, router, selectedSession]);
+    replaceUrl("/");
+  }, [activeSessionTabId, pendingSession, replaceUrl, selectedSession]);
 
   useEffect(() => {
     if (!projectPickerOpen) return;
@@ -230,8 +230,7 @@ export function AppShell() {
       setNewSessionCwd(session.cwd);
       setSelectedSession(null);
       setActiveSessionTabId(session.id);
-      setSessionKey((k) => k + 1);
-      router.replace("/", { scroll: false });
+      replaceUrl("/");
       return;
     }
     setNewSessionCwd(null);
@@ -248,20 +247,19 @@ export function AppShell() {
     });
     setSelectedSession(session);
     setActiveSessionTabId(session.id);
-    setSessionKey((k) => k + 1);
     setInitialSessionRestored(true);
     if (isRestore) {
-      // Suppress the redundant sessionKey bump that would come from the
+      // Suppress redundant cwd handling that would come from the
       // onCwdChange effect firing after setSelectedCwd in the sidebar
       suppressCwdBumpRef.current = true;
       setTimeout(() => { suppressCwdBumpRef.current = false; }, 0);
     }
-    // Skip router.replace when restoring from URL — the param is already correct
-    // and calling replace in production Next.js triggers a Suspense remount loop
+    // Skip URL replacement when restoring from URL — the param is already correct
+    // and touching App Router during production restore previously caused remount loops
     if (!isRestore) {
-      router.replace(`?session=${encodeURIComponent(session.id)}`, { scroll: false });
+      replaceUrl(`?session=${encodeURIComponent(session.id)}`);
     }
-  }, [router]);
+  }, [replaceUrl]);
 
   const handleNewSession = useCallback((_sessionId: string, cwd: string) => {
     // Create a placeholder tab so the chat area shows up
@@ -284,9 +282,8 @@ export function AppShell() {
     setPendingSession(null);
     setSelectedSession(null);
     setNewSessionCwd(cwd);
-    setSessionKey((k) => k + 1);
-    router.replace("/", { scroll: false });
-  }, [router]);
+    replaceUrl("/");
+  }, [replaceUrl]);
 
   const handleTopNewSession = useCallback(() => {
     const cwd = effectiveProjectCwd;
@@ -314,9 +311,8 @@ export function AppShell() {
     setPendingSession(null);
     setSelectedSession(null);
     setNewSessionCwd(cwd);
-    setSessionKey((k) => k + 1);
-    router.replace("/", { scroll: false });
-  }, [effectiveProjectCwd, router]);
+    replaceUrl("/");
+  }, [effectiveProjectCwd, replaceUrl]);
 
   const handleSessionStarted = useCallback((session: SessionInfo | null) => {
     if (!session) {
@@ -355,19 +351,18 @@ export function AppShell() {
     });
     setActiveSessionTabId((cur) => cur === tempId ? session.id : cur);
     setRefreshKey((k) => k + 1);
-    router.replace(`?session=${encodeURIComponent(session.id)}`, { scroll: false });
-  }, [router, setSessionRunning]);
+    replaceUrl(`?session=${encodeURIComponent(session.id)}`);
+  }, [replaceUrl, setSessionRunning]);
 
   const handleSessionForked = useCallback((newSessionId: string) => {
     setRefreshKey((k) => k + 1);
-    setSessionKey((k) => k + 1);
     setNewSessionCwd(null);
     setSelectedSession((prev) => ({
       ...(prev ?? { path: "", cwd: "", created: "", modified: "", messageCount: 0, firstMessage: "" }),
       id: newSessionId,
     }));
-    router.replace(`?session=${encodeURIComponent(newSessionId)}`, { scroll: false });
-  }, [router]);
+    replaceUrl(`?session=${encodeURIComponent(newSessionId)}`);
+  }, [replaceUrl]);
 
   const handleInitialRestoreDone = useCallback(() => {
     setInitialSessionRestored(true);
@@ -409,10 +404,9 @@ export function AppShell() {
       const cwd = selectedSession.cwd;
       setSelectedSession(null);
       setNewSessionCwd(cwd ?? null);
-      setSessionKey((k) => k + 1);
-      router.replace("/", { scroll: false });
+      replaceUrl("/");
     }
-  }, [selectedSession, router]);
+  }, [selectedSession, replaceUrl]);
 
   const handleOpenFile = useCallback((filePath: string, fileName: string) => {
     const tabId = `file:${filePath}`;
@@ -453,13 +447,19 @@ export function AppShell() {
     setSessionTabs((prev) => {
       const next = prev.filter((t) => t.id !== sessionId);
       // If closing the active tab, switch to previous or clear
-      if (selectedSession?.id === sessionId) {
+      const isClosingActive = selectedSession?.id === sessionId || activeSessionTabId === sessionId;
+      if (isClosingActive) {
         const remaining = next.filter((t) => t.id !== sessionId);
         if (remaining.length > 0) {
           const nextSession = remaining[remaining.length - 1];
-          setSelectedSession(nextSession);
           setActiveSessionTabId(nextSession.id);
-          setSessionKey((k) => k + 1);
+          if (placeholderTabIdsRef.current.has(nextSession.id)) {
+            setSelectedSession(null);
+            setNewSessionCwd(nextSession.cwd);
+          } else {
+            setSelectedSession(nextSession);
+            setNewSessionCwd(null);
+          }
         } else {
           setSelectedSession(null);
           setActiveSessionTabId(null);
@@ -468,7 +468,7 @@ export function AppShell() {
       }
       return next;
     });
-  }, [selectedSession]);
+  }, [activeSessionTabId, selectedSession]);
 
   // Show chat area only when a session tab is open and active, or when a new-session tab is active
   const effectiveNewSessionCwd = newSessionCwd ?? (selectedSession === null && activeCwd ? activeCwd : null);
@@ -550,13 +550,17 @@ export function AppShell() {
             ),
           },
           {
-            label: "技能",
-            onClick: () => setQuickConfigOpen("skill"),
+            label: "MCP",
+            onClick: () => setQuickConfigOpen("mcp"),
             disabled: false,
             icon: (
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M12 3l2.2 4.5L19 8.2l-3.5 3.4.8 4.8L12 14.1 7.7 16.4l.8-4.8L5 8.2l4.8-.7z" />
-                <path d="M19 15l1 2 2 .3-1.5 1.4.4 2.1-1.9-1-1.9 1 .4-2.1L16 17.3l2-.3z" />
+                <rect x="3" y="3" width="7" height="7" rx="1.5" />
+                <rect x="14" y="3" width="7" height="7" rx="1.5" />
+                <rect x="8.5" y="14" width="7" height="7" rx="1.5" />
+                <path d="M10 6.5h4" />
+                <path d="M17.5 10v2a2 2 0 0 1-2 2H12" />
+                <path d="M6.5 10v2a2 2 0 0 0 2 2H12" />
               </svg>
             ),
           },
@@ -799,12 +803,16 @@ export function AppShell() {
               ),
             },
             {
-              label: "技能",
-              onClick: () => { setSettingsMenuOpen(false); setQuickConfigOpen("skill"); },
+              label: "MCP",
+              onClick: () => { setSettingsMenuOpen(false); setQuickConfigOpen("mcp"); },
               icon: (
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M12 3l2.2 4.5L19 8.2l-3.5 3.4.8 4.8L12 14.1 7.7 16.4l.8-4.8L5 8.2l4.8-.7z" />
-                  <path d="M19 15l1 2 2 .3-1.5 1.4.4 2.1-1.9-1-1.9 1 .4-2.1L16 17.3l2-.3z" />
+                  <rect x="3" y="3" width="7" height="7" rx="1.5" />
+                  <rect x="14" y="3" width="7" height="7" rx="1.5" />
+                  <rect x="8.5" y="14" width="7" height="7" rx="1.5" />
+                  <path d="M10 6.5h4" />
+                  <path d="M17.5 10v2a2 2 0 0 1-2 2H12" />
+                  <path d="M6.5 10v2a2 2 0 0 0 2 2H12" />
                 </svg>
               ),
             },
@@ -1477,7 +1485,7 @@ export function AppShell() {
           {showChat ? (
             <div style={{ position: "relative", zIndex: 1, height: "100%" }}>
               <ChatWindow
-                key={sessionKey}
+                activeTabId={activeSessionTabId}
                 session={selectedSession}
                 newSessionCwd={effectiveNewSessionCwd}
                 onAgentEnd={handleAgentEnd}
@@ -1547,10 +1555,10 @@ export function AppShell() {
     )}
     {quickConfigOpen === "role" && <RoleConfig onClose={() => setQuickConfigOpen(null)} />}
     {quickConfigOpen && quickConfigOpen !== "role" && (() => {
-      const title = quickConfigOpen === "memory" ? "记忆" : "技能";
+      const title = quickConfigOpen === "memory" ? "记忆" : "MCP";
       const desc = quickConfigOpen === "memory"
         ? "用于管理 Agent 的长期记忆与偏好。"
-        : "用于管理快捷技能入口。";
+        : "用于管理 MCP 服务与工具入口。";
       return (
         <div
           role="dialog"

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect, useMemo } from "react";
+import { memo, useState, useRef, useEffect, useMemo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
@@ -72,7 +72,7 @@ function copyText(text: string): Promise<void> {
   }
 }
 
-export function MessageView({ message, isStreaming, toolResults, modelNames, watchdogInfo, entryId, onFork, forking, showTimestamp, prevTimestamp, onResend }: Props) {
+function MessageViewImpl({ message, isStreaming, toolResults, modelNames, watchdogInfo, entryId, onFork, forking, showTimestamp, prevTimestamp, onResend }: Props) {
   if (message.role === "user") {
     return <UserMessageView message={message as UserMessage} entryId={entryId} onFork={onFork} forking={forking} onResend={onResend} />;
   }
@@ -85,6 +85,20 @@ export function MessageView({ message, isStreaming, toolResults, modelNames, wat
   }
   return null;
 }
+
+export const MessageView = memo(MessageViewImpl, (prev, next) => (
+  prev.message === next.message &&
+  prev.isStreaming === next.isStreaming &&
+  prev.toolResults === next.toolResults &&
+  prev.modelNames === next.modelNames &&
+  prev.watchdogInfo === next.watchdogInfo &&
+  prev.entryId === next.entryId &&
+  prev.onFork === next.onFork &&
+  prev.forking === next.forking &&
+  prev.showTimestamp === next.showTimestamp &&
+  prev.prevTimestamp === next.prevTimestamp &&
+  prev.onResend === next.onResend
+));
 
 function UserMessageView({ message, entryId, onResend }: {
   message: UserMessage;

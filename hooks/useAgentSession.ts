@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useRef, useEffect, useReducer } from "react";
+import { useState, useCallback, useRef, useEffect, useReducer, useMemo } from "react";
 import type { AgentMessage, SessionInfo } from "@/lib/types";
 import { normalizeCompletedMessage, normalizeCompletedMessages, normalizeToolCalls } from "@/lib/normalize";
 import { sendAgentCommand } from "@/lib/agent-client";
@@ -93,12 +93,43 @@ interface AgentEvent {
   [key: string]: unknown;
 }
 
+interface ModelsResponse {
+  models: Record<string, string>;
+  modelList?: { id: string; name: string; provider: string }[];
+  defaultModel?: { provider: string; modelId: string } | null;
+  thinkingLevels?: Record<string, string[]>;
+  thinkingLevelMaps?: Record<string, Record<string, string | null>>;
+}
+
+let modelsCache: ModelsResponse | null = null;
+let modelsCacheKey: string | null = null;
+let modelsPromise: Promise<ModelsResponse> | null = null;
+
+function fetchModelsCached(cacheKey: string): Promise<ModelsResponse> {
+  if (modelsCache && modelsCacheKey === cacheKey) return Promise.resolve(modelsCache);
+  if (modelsPromise && modelsCacheKey === cacheKey) return modelsPromise;
+
+  const requestedKey = cacheKey;
+  modelsCacheKey = requestedKey;
+  modelsPromise = fetch("/api/models")
+    .then((r) => r.json() as Promise<ModelsResponse>)
+    .then((data) => {
+      if (modelsCacheKey === requestedKey) modelsCache = data;
+      return data;
+    })
+    .finally(() => {
+      if (modelsCacheKey === requestedKey) modelsPromise = null;
+    });
+  return modelsPromise;
+}
+
 export type AgentPhase =
   | { kind: "waiting_model" }
   | { kind: "running_tools"; tools: { id: string; name: string }[] }
   | null;
 
 export interface UseAgentSessionOptions {
+  activeTabId?: string | null;
   session: SessionInfo | null;
   newSessionCwd: string | null;
   onAgentEnd?: (changedFiles?: string[]) => void;
@@ -179,6 +210,7 @@ export type WatchdogInfo = {
 
 export function useAgentSession(opts: UseAgentSessionOptions) {
   const {
+    activeTabId,
     session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionStarted, onSessionForked,
     modelsRefreshKey, onSystemPromptChange,
   } = opts;
@@ -211,7 +243,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [watchdogInfo, setWatchdogInfo] = useState<WatchdogInfo | null>(null);
 
   const eventSourceRef = useRef<EventSource | null>(null);
-  const sessionIdRef = useRef<string | null>(session?.id ?? null);
+  const sessionIdRef = useRef<string | null>(null);
   const agentRunningRef = useRef(false);
   const handleAgentEventRef = useRef<((event: AgentEvent) => void) | null>(null);
   const initialScrollDoneRef = useRef(false);
@@ -232,7 +264,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const currentModel = currentModelOverride ?? data?.context.model ?? pendingModel ?? null;
   const displayModel = isNew ? newSessionModel : currentModel;
 
-  const sessionStats = (() => {
+  const sessionStats = useMemo(() => {
     const tokens = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
     let cost = 0;
     for (const msg of messages) {
@@ -247,7 +279,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
     const total = tokens.input + tokens.output + tokens.cacheRead + tokens.cacheWrite;
     return total > 0 ? { tokens, cost } : null;
-  })();
+  }, [messages]);
 
   const loadSession = useCallback(async (sid: string, showLoading = false, includeState = false) => {
     const controller = new AbortController();
@@ -268,6 +300,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const d = await res.json() as SessionData & { agentState?: { running: boolean; state?: { isStreaming?: boolean; isCompacting?: boolean; contextUsage?: { percent: number | null; contextWindow: number; tokens: number | null } | null; systemPrompt?: string; thinkingLevel?: string } } };
+      if (sid !== sessionIdRef.current) return null;
       setData(d);
       setMessages(normalizeCompletedMessages(d.context.messages.map(compressMessageContent)));
       setEntryIds(d.context.entryIds ?? []);
@@ -279,11 +312,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       return d.agentState ?? null;
     } catch (e) {
-      setError(e instanceof DOMException && e.name === "AbortError" ? "加载会话超时" : String(e));
+      if (sid === sessionIdRef.current) {
+        setError(e instanceof DOMException && e.name === "AbortError" ? "加载会话超时" : String(e));
+      }
       return null;
     } finally {
       clearTimeout(timeout);
-      setLoading(false);
+      if (sid === sessionIdRef.current) setLoading(false);
     }
   }, []);
 
@@ -783,33 +818,84 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     container.scrollTo({ top: elAbsTop - 16, behavior: "smooth" });
   }, []);
 
-  // Load session on mount
+  // Load or reset session when the active tab changes. Previously AppShell
+  // forced a full ChatWindow remount via key={sessionKey}; responding to prop
+  // changes here keeps the component tree alive and makes tab switches cheaper.
   useEffect(() => {
-    if (session) {
-      sessionIdRef.current = session.id;
-      loadSession(session.id, true, true).then((agentState) => {
-        if (agentState?.running) {
-          loadTools(session.id);
-          if (agentState.state?.isStreaming) {
-            setAgentRunning(true);
-            setAgentPhase({ kind: "waiting_model" });
-            connectEvents(session.id);
-          }
-        }
-        if (agentState?.state) {
-          if (agentState.state.isCompacting !== undefined) setIsCompacting(agentState.state.isCompacting);
-          if (agentState.state.contextUsage !== undefined) setContextUsage(agentState.state.contextUsage ?? null);
-          if (agentState.state.systemPrompt !== undefined) setSystemPrompt(agentState.state.systemPrompt ?? null);
-          if (agentState.state.thinkingLevel !== undefined) setThinkingLevel((agentState.state.thinkingLevel as ThinkingLevelOption) ?? "auto");
-        }
-      });
+    // If a brand-new session just received its real id, handleSend has already
+    // connected SSE and populated optimistic messages. Do not tear it down just
+    // because AppShell replaced the placeholder tab with the real session tab.
+    if (session?.id && session.id === sessionIdRef.current) return;
+
+    let cancelled = false;
+
+    eventSourceRef.current?.close();
+    eventSourceRef.current = null;
+    agentRunningRef.current = false;
+    autoContinueSentRef.current = false;
+    initialScrollDoneRef.current = false;
+    pendingScrollToUserRef.current = false;
+    changedFilesRef.current.clear();
+    lastAgentEventAtRef.current = Date.now();
+    lastContentChangedAtRef.current = Date.now();
+    lastContentLengthRef.current = 0;
+    setRetryInfo(null);
+    setContextUsage(null);
+    setSystemPrompt(null);
+    setForkingEntryId(null);
+    setIsCompacting(false);
+    setCompactError(null);
+    setAgentPhase(null);
+    setWatchdogInfo(null);
+    dispatch({ type: "reset" });
+
+    if (!session) {
+      sessionIdRef.current = null;
+      setData(null);
+      setMessages([]);
+      setEntryIds([]);
+      setCurrentModelOverride(null);
+      setPendingModel(null);
+      setAgentRunning(false);
+      setError(null);
+      setLoading(false);
+      return () => { cancelled = true; };
     }
+
+    sessionIdRef.current = session.id;
+    setData(null);
+    setMessages([]);
+    setEntryIds([]);
+    setCurrentModelOverride(null);
+    setPendingModel(null);
+    setAgentRunning(false);
+    setError(null);
+
+    loadSession(session.id, true, true).then((agentState) => {
+      if (cancelled || sessionIdRef.current !== session.id) return;
+      if (agentState?.running) {
+        loadTools(session.id);
+        if (agentState.state?.isStreaming) {
+          agentRunningRef.current = true;
+          setAgentRunning(true);
+          setAgentPhase({ kind: "waiting_model" });
+          connectEvents(session.id);
+        }
+      }
+      if (agentState?.state) {
+        if (agentState.state.isCompacting !== undefined) setIsCompacting(agentState.state.isCompacting);
+        if (agentState.state.contextUsage !== undefined) setContextUsage(agentState.state.contextUsage ?? null);
+        if (agentState.state.systemPrompt !== undefined) setSystemPrompt(agentState.state.systemPrompt ?? null);
+        if (agentState.state.thinkingLevel !== undefined) setThinkingLevel((agentState.state.thinkingLevel as ThinkingLevelOption) ?? "auto");
+      }
+    });
+
     return () => {
+      cancelled = true;
       eventSourceRef.current?.close();
       eventSourceRef.current = null;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [connectEvents, loadSession, loadTools, activeTabId, newSessionCwd, session?.id]);
 
   useEffect(() => {
     onSystemPromptChange?.(systemPrompt);
@@ -830,9 +916,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [messages.length, agentRunning, scrollToBottom, scrollUserMsgToTop]);
 
-  // Load model list
+  // Load model list (cached across ChatWindow tab switches)
   useEffect(() => {
-    fetch("/api/models").then((r) => r.json()).then((d: { models: Record<string, string>; modelList?: { id: string; name: string; provider: string }[]; defaultModel?: { provider: string; modelId: string } | null; thinkingLevels?: Record<string, string[]>; thinkingLevelMaps?: Record<string, Record<string, string | null>> }) => {
+    let cancelled = false;
+    fetchModelsCached(String(modelsRefreshKey ?? 0)).then((d) => {
+      if (cancelled) return;
       setModelNames(d.models);
       if (d.thinkingLevels) setModelThinkingLevels(d.thinkingLevels);
       if (d.thinkingLevelMaps) setModelThinkingLevelMaps(d.thinkingLevelMaps);
@@ -848,6 +936,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         }
       }
     }).catch(() => {});
+    return () => { cancelled = true; };
   }, [isNew, modelsRefreshKey, setNewSessionModel]);
 
   // Compact error auto-dismiss

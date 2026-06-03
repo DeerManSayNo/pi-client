@@ -72,6 +72,8 @@ export function ChatMinimap({ messages, streamingMessage, scrollContainer, messa
   const [minimapHovered, setMinimapHovered] = useState(false);
   const [mouseYRatio, setMouseYRatio] = useState<number | null>(null);
   const draggingRef = useRef(false);
+  const measureFrameRef = useRef<number | null>(null);
+  const measureTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
   const allMessages = useMemo(
@@ -130,7 +132,18 @@ export function ChatMinimap({ messages, streamingMessage, scrollContainer, messa
     setNodes(newNodes);
   };
 
-  const updatePositions = useCallback(() => updatePositionsRef.current(), []);
+  const updatePositions = useCallback(() => {
+    if (measureFrameRef.current !== null) return;
+    measureFrameRef.current = requestAnimationFrame(() => {
+      measureFrameRef.current = null;
+      updatePositionsRef.current();
+    });
+  }, []);
+
+  const scheduleDelayedUpdate = useCallback((delay = 80) => {
+    if (measureTimerRef.current) clearTimeout(measureTimerRef.current);
+    measureTimerRef.current = setTimeout(updatePositions, delay);
+  }, [updatePositions]);
 
   useEffect(() => {
     const el = scrollContainer.current;
@@ -140,18 +153,27 @@ export function ChatMinimap({ messages, streamingMessage, scrollContainer, messa
     ro.observe(el);
     // Also observe the scroll content for height changes
     if (el.firstElementChild) ro.observe(el.firstElementChild);
-    updatePositions();
+    // Defer the initial full DOM measurement until after the tab/session paint.
+    scheduleDelayedUpdate(120);
     return () => {
       el.removeEventListener("scroll", updatePositions);
       ro.disconnect();
+      if (measureFrameRef.current !== null) {
+        cancelAnimationFrame(measureFrameRef.current);
+        measureFrameRef.current = null;
+      }
+      if (measureTimerRef.current) {
+        clearTimeout(measureTimerRef.current);
+        measureTimerRef.current = null;
+      }
     };
-  }, [scrollContainer, updatePositions]);
+  }, [scrollContainer, scheduleDelayedUpdate, updatePositions]);
 
-  // Re-measure when message count changes (new messages arrive)
+  // Re-measure when message count changes (new messages arrive). Use a short
+  // delay so session switches can paint before we read many DOM rects.
   useEffect(() => {
-    const t = setTimeout(updatePositions, 50);
-    return () => clearTimeout(t);
-  }, [messages.length, updatePositions]);
+    scheduleDelayedUpdate(80);
+  }, [messages.length, scheduleDelayedUpdate]);
 
   const scrollToMinimapRatio = useCallback((viewportTopRatio: number) => {
     const el = scrollContainer.current;

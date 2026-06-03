@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AgentMessage, SessionInfo } from "@/lib/types";
 import { MessageView } from "./MessageView";
 import { ChatInput, type ChatInputHandle, type AttachedImage } from "./ChatInput";
@@ -20,6 +20,7 @@ interface AgentRole {
 }
 
 interface Props {
+  activeTabId?: string | null;
   session: SessionInfo | null;
   newSessionCwd: string | null;
   onAgentEnd?: (changedFiles?: string[]) => void;
@@ -104,7 +105,7 @@ function Typewriter({ phrases }: { phrases: string[] }) {
   );
 }
 
-export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionStarted, onAgentRunningChange, onSessionForked, modelsRefreshKey, chatInputRef, onSessionStatsChange, onContextUsageChange, onOpenFile, onOpenRoleConfig }: Props) {
+export function ChatWindow({ activeTabId, session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionStarted, onAgentRunningChange, onSessionForked, modelsRefreshKey, chatInputRef, onSessionStatsChange, onContextUsageChange, onOpenFile, onOpenRoleConfig }: Props) {
   // Track changed files from agent_end event
   const [changedFiles, setChangedFiles] = useState<string[]>([]);
   const [currentRoleId, setCurrentRoleId] = useState("default");
@@ -134,6 +135,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
   } = useAgentSession({
     session, newSessionCwd, onAgentEnd: wrappedOnAgentEnd, onSessionCreated, onSessionStarted, onSessionForked,
     modelsRefreshKey,
+    activeTabId,
   });
 
   const applyRoleToSession = useCallback(async (roleId: string) => {
@@ -272,7 +274,16 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
 
   const { isDragOver, handleDragEnter, handleDragOver, handleDragLeave, handleDrop } = useDragDrop(onDrop);
 
-  const visibleMessages = messages.filter((m) => m.role === "user" || m.role === "assistant");
+  const visibleMessages = useMemo(() => messages.filter((m) => m.role === "user" || m.role === "assistant"), [messages]);
+  const toolResultsMap = useMemo(() => {
+    const map = new Map<string, import("@/lib/types").ToolResultMessage>();
+    for (const msg of messages) {
+      if (msg.role === "toolResult") {
+        map.set((msg as import("@/lib/types").ToolResultMessage).toolCallId, msg as import("@/lib/types").ToolResultMessage);
+      }
+    }
+    return map;
+  }, [messages]);
   const messageRefs = useMessageRefs(visibleMessages.length);
   const liveStreamEndRef = useRef<HTMLDivElement | null>(null);
   const [shouldAutoScroll, setShouldAutoScroll] = useState(true);
@@ -395,7 +406,8 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
         </div>
       )}
       <ChatInput
-      ref={chatInputRef}
+        key={session?.id ?? `new:${newSessionCwd ?? ""}:${activeTabId ?? ""}`}
+        ref={chatInputRef}
       onSend={sendWithRole}
       onAbort={handleAbort}
       onSteer={agentRunning ? handleSteer : undefined}
@@ -610,12 +622,6 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
           <div className="mx-auto max-w-[820px] px-4">
 
             {(() => {
-              const toolResultsMap = new Map<string, import("@/lib/types").ToolResultMessage>();
-              for (const msg of messages) {
-                if (msg.role === "toolResult") {
-                  toolResultsMap.set((msg as import("@/lib/types").ToolResultMessage).toolCallId, msg as import("@/lib/types").ToolResultMessage);
-                }
-              }
               let lastUserIdx = -1;
               for (let i = messages.length - 1; i >= 0; i--) {
                 if (messages[i].role === "user") { lastUserIdx = i; break; }

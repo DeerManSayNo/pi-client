@@ -1011,22 +1011,24 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                   onClick={() => sendQueued("steer")}
                   disabled={!value.trim() && !attachedImages.length && !selectedSkill}
                   title="打断 Agent 当前运行，立即注入消息"
+                  aria-label="立即注入消息"
                   style={{
-                    display: "flex", alignItems: "center", gap: 5,
-                    padding: "7px 12px",
-                    background: (value.trim() || attachedImages.length || selectedSkill) ? "rgba(234,179,8,0.12)" : "none",
-                    border: "1px solid rgba(234,179,8,0.35)",
-                    borderRadius: 8,
-                    color: (value.trim() || attachedImages.length || selectedSkill) ? "rgba(180,130,0,1)" : "var(--text-dim)",
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    width: 28,
+                    height: 28,
+                    padding: 0,
+                    background: (value.trim() || attachedImages.length || selectedSkill) ? "var(--bg-panel)" : "var(--bg-panel)",
+                    border: "none",
+                    borderRadius: "50%",
+                    color: (value.trim() || attachedImages.length || selectedSkill) ? "var(--text-muted)" : "var(--text-dim)",
                     cursor: (value.trim() || attachedImages.length || selectedSkill) ? "pointer" : "not-allowed",
-                    fontSize: 13, fontWeight: 600, letterSpacing: "-0.01em",
-                    transition: "background 0.12s",
+                    boxShadow: "none",
+                    transition: "background 0.15s, box-shadow 0.15s",
                   }}
                 >
-                  <svg width="12" height="12" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                  <svg width="14" height="14" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                     <path d="M5 1 L9 5 L5 9" /><line x1="1" y1="5" x2="9" y2="5" />
                   </svg>
-                  立即注入 (Steer)
                 </button>
               )}
               {onFollowUp && (
@@ -1035,25 +1037,55 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                   onClick={() => sendQueued("followup")}
                   disabled={!value.trim() && !attachedImages.length && !selectedSkill}
                   title="在 Agent 完成后排队发送"
+                  aria-label="排队发送消息"
                   style={{
-                    display: "flex", alignItems: "center", gap: 5,
-                    padding: "7px 12px",
-                    background: (value.trim() || attachedImages.length || selectedSkill) ? "rgba(129,140,248,0.12)" : "none",
-                    border: "1px solid rgba(129,140,248,0.35)",
-                    borderRadius: 8,
-                    color: (value.trim() || attachedImages.length || selectedSkill) ? "rgba(99,102,241,1)" : "var(--text-dim)",
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    width: 28,
+                    height: 28,
+                    padding: 0,
+                    background: (value.trim() || attachedImages.length || selectedSkill) ? "var(--bg-panel)" : "var(--bg-panel)",
+                    border: "none",
+                    borderRadius: "50%",
+                    color: (value.trim() || attachedImages.length || selectedSkill) ? "var(--text-muted)" : "var(--text-dim)",
                     cursor: (value.trim() || attachedImages.length || selectedSkill) ? "pointer" : "not-allowed",
-                    fontSize: 13, fontWeight: 600, letterSpacing: "-0.01em",
-                    transition: "background 0.12s",
+                    boxShadow: "none",
+                    transition: "background 0.15s, box-shadow 0.15s",
                   }}
                 >
-                  <svg width="12" height="12" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                  <svg width="14" height="14" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                     <line x1="5" y1="1" x2="5" y2="6" /><polyline points="2.5 3.5 5 1 7.5 3.5" />
                     <line x1="2" y1="9" x2="8" y2="9" />
                   </svg>
-                  排队发送 (Follow-up)
                 </button>
               )}
+              <button
+                type="button"
+                onClick={onAbort}
+                title="停止 Agent"
+                aria-label="停止 Agent"
+                style={{
+                  flexShrink: 0,
+                  alignSelf: "flex-end",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  width: 28,
+                  height: 28,
+                  padding: 0,
+                  background: "#ef4444",
+                  border: "none",
+                  borderRadius: "50%",
+                  color: "#fff",
+                  cursor: "pointer",
+                  fontSize: 13,
+                  fontWeight: 600,
+                  letterSpacing: "-0.01em",
+                  boxShadow: "0 1px 3px rgba(239,68,68,0.25)",
+                  transition: "background 0.15s, box-shadow 0.15s",
+                }}
+              >
+                <svg width="10" height="10" viewBox="0 0 10 10" fill="none" aria-hidden="true">
+                  <rect x="1.5" y="1.5" width="7" height="7" rx="1.5" fill="currentColor" />
+                </svg>
+              </button>
             </div>
           ) : (
             <button
@@ -1308,7 +1340,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
           {/* spacer */}
           <div style={{ flex: 1 }} />
 
-          {/* RIGHT: thinking + tools preset + compact + sound (idle) | Stop + sound (streaming) */}
+          {/* RIGHT: thinking + tools preset + compact + sound */}
           <div style={{ flex: "0 0 auto", display: "flex", alignItems: "center", gap: 2, marginLeft: "auto" }}>
             {!isStreaming && onThinkingLevelChange && (
               <div ref={thinkingDropdownRef} style={{ position: "relative" }}>
@@ -1524,33 +1556,6 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                   )}
                 </button>
               </div>
-            )}
-
-            {isStreaming && (
-              <button
-                onClick={onAbort}
-                title="停止 Agent"
-                style={{
-                  display: "flex", alignItems: "center", gap: 6,
-                  padding: "8px 14px",
-                  height: 32,
-                  background: "rgba(239,68,68,0.08)",
-                  border: "1px solid rgba(239,68,68,0.3)",
-                  borderRadius: 9,
-                  color: "#ef4444",
-                  cursor: "pointer",
-                  fontSize: 12, fontWeight: 600,
-                  whiteSpace: "nowrap", letterSpacing: "-0.01em",
-                  transition: "background 0.12s",
-                }}
-                onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(239,68,68,0.16)"; }}
-                onMouseLeave={(e) => { e.currentTarget.style.background = "rgba(239,68,68,0.08)"; }}
-              >
-                <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
-                  <rect x="1.5" y="1.5" width="7" height="7" rx="1.5" fill="currentColor" />
-                </svg>
-                停止
-              </button>
             )}
 
             {onSoundToggle !== undefined && (
