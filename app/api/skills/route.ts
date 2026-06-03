@@ -1,40 +1,22 @@
 import { NextResponse } from "next/server";
-import { existsSync, readFileSync, writeFileSync } from "fs";
-import { homedir } from "os";
+import { existsSync, readFileSync, writeFileSync, rmdirSync, unlinkSync } from "fs";
 import { DefaultResourceLoader, getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import path from "path";
+import { readdirSync } from "fs";
 
 export const dynamic = "force-dynamic";
 
-function getGlobalSkillDirs(): string[] {
-  const home = homedir();
-  return [
-    path.join(home, ".pi", "agent", "skills"),
-    path.join(home, ".agents", "skills"),
-  ];
-}
-
-function isGlobalSkill(filePath: string): boolean {
-  const globalDirs = getGlobalSkillDirs();
-  for (const dir of globalDirs) {
-    if (filePath.startsWith(dir + path.sep) || filePath.startsWith(dir + "/")) {
-      return true;
-    }
-  }
-  return false;
-}
-
-function isProjectSkill(filePath: string, cwd: string): boolean {
-  const resolved = path.resolve(filePath);
-  const resolvedCwd = path.resolve(cwd);
-  return resolved.startsWith(resolvedCwd + path.sep) || resolved.startsWith(resolvedCwd + "/");
-}
-
-interface SkillWithSource {
+interface SkillWithMeta {
   name: string;
   description: string;
   filePath: string;
-  source: "global" | "project";
+  baseDir: string;
+  disableModelInvocation: boolean;
+  sourceInfo: {
+    source?: string;
+    scope?: string;
+  };
+  canDelete: boolean;
 }
 
 // GET /api/skills?cwd=<path>
@@ -50,24 +32,61 @@ export async function GET(req: Request) {
     await loader.reload();
     const { skills, diagnostics } = loader.getSkills();
 
-    // Categorize skills as global or project
-    const skillsWithSource: SkillWithSource[] = skills.map((skill) => {
-      let source: "global" | "project" = "project";
-      if (isGlobalSkill(skill.filePath)) {
-        source = "global";
-      } else if (isProjectSkill(skill.filePath, cwd)) {
-        source = "project";
-      }
-      // Skills from packages or settings paths default to "project"
+    // Pass through full skill data including sourceInfo so the frontend can
+    // properly categorize and display skill metadata.
+    const skillsWithMeta: SkillWithMeta[] = skills.map((skill) => {
       return {
         name: skill.name,
         description: skill.description,
         filePath: skill.filePath,
-        source,
+        baseDir: skill.baseDir,
+        disableModelInvocation: skill.disableModelInvocation,
+        sourceInfo: {
+          source: skill.sourceInfo?.source,
+          scope: skill.sourceInfo?.scope,
+        },
+        canDelete: true,
       };
     });
 
-    return NextResponse.json({ skills: skillsWithSource, diagnostics });
+    return NextResponse.json({ skills: skillsWithMeta, diagnostics });
+  } catch (e) {
+    return NextResponse.json({ error: String(e) }, { status: 500 });
+  }
+}
+
+// DELETE /api/skills — delete a skill file
+export async function DELETE(req: Request) {
+  try {
+    const { searchParams } = new URL(req.url);
+    const filePath = searchParams.get("filePath");
+    if (!filePath) {
+      return NextResponse.json({ error: "filePath required" }, { status: 400 });
+    }
+    if (!existsSync(filePath)) {
+      return NextResponse.json({ error: "file not found" }, { status: 404 });
+    }
+
+    // Safety: ensure it's a SKILL.md file
+    if (!filePath.endsWith("SKILL.md")) {
+      return NextResponse.json({ error: "only SKILL.md files can be deleted" }, { status: 400 });
+    }
+
+    // Delete the SKILL.md file
+    unlinkSync(filePath);
+
+    // Try to remove the parent directory if it's empty
+    const parentDir = path.dirname(filePath);
+    try {
+      const entries = readdirSync(parentDir);
+      if (entries.length === 0) {
+        rmdirSync(parentDir);
+      }
+    } catch {
+      // Directory not empty or can't be removed — that's fine
+    }
+
+    return NextResponse.json({ success: true });
   } catch (e) {
     return NextResponse.json({ error: String(e) }, { status: 500 });
   }

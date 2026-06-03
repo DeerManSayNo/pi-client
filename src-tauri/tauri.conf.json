@@ -24,7 +24,8 @@
       "resources/pi-agent-server.js": "pi-agent-server.js",
       "../.next/standalone": "app/standalone",
       "../.next/static": "app/standalone/.next/static",
-      "../public": "app/standalone/public"
+      "../public": "app/standalone/public",
+      "../skills": "app/standalone/skills"
     },
     "icon": [
       "icons/32x32.png",

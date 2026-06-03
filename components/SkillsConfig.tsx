@@ -13,6 +13,7 @@ interface Skill {
     source?: string;
     scope?: string;
   };
+  canDelete: boolean;
 }
 
 function shortenPath(p: string): string {
@@ -21,10 +22,9 @@ function shortenPath(p: string): string {
 }
 
 function sourceLabel(skill: Skill): string {
-  const src = skill.sourceInfo?.source;
   const scope = skill.sourceInfo?.scope;
-  if (scope === "user" || src === "user") return "global";
-  if (scope === "project" || src === "project") return "project";
+  if (scope === "user") return "global";
+  if (scope === "project") return "project";
   return "path";
 }
 
@@ -87,17 +87,23 @@ function SkillDetail({
   skill,
   cwd,
   onToggle,
+  onDelete,
   toggling,
+  deleting,
   saveError,
 }: {
   skill: Skill;
   cwd: string;
   onToggle: (skill: Skill) => void;
+  onDelete: (skill: Skill) => void;
   toggling: boolean;
+  deleting: boolean;
   saveError: string | null;
 }) {
   const label = sourceLabel(skill);
   const enabled = !skill.disableModelInvocation;
+
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   function displayPath(p: string): string {
     if (label === "project" && p.startsWith(cwd)) {
@@ -109,7 +115,7 @@ function SkillDetail({
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-      {/* Path + tag + toggle */}
+      {/* Path + tag + toggle + delete */}
       <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
         <span
           style={{
@@ -145,12 +151,118 @@ function SkillDetail({
           loading={toggling}
           onToggle={() => onToggle(skill)}
         />
+        {skill.canDelete && !confirmDelete && (
+          <button
+            onClick={() => setConfirmDelete(true)}
+            disabled={deleting}
+            title="删除技能"
+            style={{
+              flexShrink: 0,
+              padding: "3px 8px",
+              fontSize: 11,
+              borderRadius: 4,
+              border: "1px solid var(--border)",
+              background: "none",
+              color: "var(--text-dim)",
+              cursor: deleting ? "not-allowed" : "pointer",
+              opacity: deleting ? 0.5 : 1,
+            }}
+          >
+            <svg
+              width="12"
+              height="12"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <polyline points="3 6 5 6 21 6" />
+              <path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6" />
+              <path d="M10 11v6" />
+              <path d="M14 11v6" />
+              <path d="M9 6V4a1 1 0 011-1h4a1 1 0 011 1v2" />
+            </svg>
+          </button>
+        )}
         {saveError && (
           <span style={{ fontSize: 12, color: "#f87171", flexShrink: 0 }}>
             {saveError}
           </span>
         )}
       </div>
+
+      {/* Delete confirmation bar */}
+      {confirmDelete && (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
+            padding: "10px 14px",
+            borderRadius: 6,
+            background: "rgba(239,68,68,0.08)",
+            border: "1px solid rgba(239,68,68,0.2)",
+          }}
+        >
+          <svg
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="#ef4444"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            style={{ flexShrink: 0 }}
+          >
+            <circle cx="12" cy="12" r="10" />
+            <line x1="12" y1="8" x2="12" y2="12" />
+            <line x1="12" y1="16" x2="12.01" y2="16" />
+          </svg>
+          <span
+            style={{ fontSize: 13, color: "#ef4444", flex: 1 }}
+          >
+            确定要删除技能 <strong>{skill.name}</strong> 吗？此操作不可撤销。
+          </span>
+          <button
+            onClick={() => setConfirmDelete(false)}
+            disabled={deleting}
+            style={{
+              padding: "4px 12px",
+              fontSize: 12,
+              borderRadius: 4,
+              border: "1px solid var(--border)",
+              background: "none",
+              color: "var(--text-muted)",
+              cursor: deleting ? "not-allowed" : "pointer",
+            }}
+          >
+            取消
+          </button>
+          <button
+            onClick={() => {
+              onDelete(skill);
+              setConfirmDelete(false);
+            }}
+            disabled={deleting}
+            style={{
+              padding: "4px 12px",
+              fontSize: 12,
+              fontWeight: 600,
+              borderRadius: 4,
+              border: "none",
+              background: "#ef4444",
+              color: "#fff",
+              cursor: deleting ? "not-allowed" : "pointer",
+              opacity: deleting ? 0.5 : 1,
+            }}
+          >
+            {deleting ? "删除中…" : "确认删除"}
+          </button>
+        </div>
+      )}
 
       <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
         <span
@@ -529,6 +641,7 @@ export function SkillsConfig({
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [toggling, setToggling] = useState<Set<string>>(new Set());
+  const [deleting, setDeleting] = useState<Set<string>>(new Set());
   const [saveError, setSaveError] = useState<string | null>(null);
   const [addMode, setAddMode] = useState(false);
 
@@ -589,6 +702,38 @@ export function SkillsConfig({
       });
     }
   }, []);
+
+  const deleteSkill = useCallback(async (skill: Skill) => {
+    setDeleting((s) => new Set(s).add(skill.filePath));
+    setSaveError(null);
+    try {
+      const res = await fetch(
+        `/api/skills?filePath=${encodeURIComponent(skill.filePath)}`,
+        { method: "DELETE" },
+      );
+      const d = (await res.json()) as { success?: boolean; error?: string };
+      if (!res.ok || d.error) {
+        setSaveError(d.error ?? `HTTP ${res.status}`);
+        return;
+      }
+      // Remove from list and select next available
+      setSkills((prev) => {
+        const next = prev.filter((s) => s.filePath !== skill.filePath);
+        if (selected === skill.filePath) {
+          setSelected(next.length > 0 ? next[0].filePath : null);
+        }
+        return next;
+      });
+    } catch (e) {
+      setSaveError(String(e));
+    } finally {
+      setDeleting((s) => {
+        const n = new Set(s);
+        n.delete(skill.filePath);
+        return n;
+      });
+    }
+  }, [selected]);
 
   const selectedSkill = skills.find((s) => s.filePath === selected) ?? null;
 
@@ -871,7 +1016,9 @@ export function SkillsConfig({
                 skill={selectedSkill}
                 cwd={cwd}
                 onToggle={toggle}
+                onDelete={deleteSkill}
                 toggling={toggling.has(selectedSkill.filePath)}
+                deleting={deleting.has(selectedSkill.filePath)}
                 saveError={saveError}
               />
             ) : (

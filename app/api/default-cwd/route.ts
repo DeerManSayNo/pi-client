@@ -4,11 +4,11 @@ import { homedir } from "os";
 import { join } from "path";
 
 // POST /api/default-cwd
-// Creates ~/pi-cwd-<YYYYMMDD> if it doesn't exist and returns the path.
+// Returns ~/pi-cwd (a fixed directory — NOT date-stamped, so all default-project
+// sessions stay grouped under one session directory instead of being split by day).
 export async function POST() {
   try {
-    const date = new Date().toISOString().slice(0, 10).replace(/-/g, "");
-    const dir = join(homedir(), `pi-cwd-${date}`);
+    const dir = join(homedir(), "pi-cwd");
     mkdirSync(dir, { recursive: true });
     return NextResponse.json({ cwd: dir });
   } catch (error) {

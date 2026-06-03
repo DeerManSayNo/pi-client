@@ -207,6 +207,7 @@ export function SchedulerPanel({ onClose, cwd }: Props) {
         style={{
           width: 680,
           maxWidth: "calc(100vw - 32px)",
+          minHeight: 500,
           maxHeight: "calc(100vh - 64px)",
           border: "1px solid var(--border)",
           borderRadius: 14,
