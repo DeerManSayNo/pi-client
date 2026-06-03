@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import path from "path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { composeGlobalMemoryPrompt } from "./memory";
 
 /**
  * Decompose pi's built-in system prompt into structured, configurable sections.
@@ -96,6 +97,12 @@ const SECTION_SPECS: Omit<SystemPromptSection, "content" | "enabled">[] = [
     description: "当前角色的设定库内容",
     editable: false,
   },
+  {
+    id: "global_memory",
+    label: "全局记忆",
+    description: "记忆窗口中管理的全局长期记忆，对所有角色生效",
+    editable: false,
+  },
 ];
 
 const DEFAULT_SECTION_CONTENT: Record<string, string> = {
@@ -110,10 +117,11 @@ const DEFAULT_SECTION_CONTENT: Record<string, string> = {
 };
 
 export function getDefaultSystemPromptSections(): SystemPromptSection[] {
+  const globalMemoryContent = composeGlobalMemoryPrompt();
   return SECTION_SPECS.map((spec) => ({
     ...spec,
-    content: DEFAULT_SECTION_CONTENT[spec.id] ?? "",
-    enabled: true,
+    content: spec.id === "global_memory" ? globalMemoryContent : (DEFAULT_SECTION_CONTENT[spec.id] ?? ""),
+    enabled: spec.id === "global_memory" ? globalMemoryContent.length > 0 : true,
   }));
 }
 
@@ -278,6 +286,16 @@ export function decomposeSystemPrompt(fullPrompt: string): SystemPromptSection[]
             }
             found = true;
           }
+        }
+        break;
+      }
+
+      case "global_memory": {
+        const gmMatch = remaining.match(/(# Global Memory \/ 全局记忆[\s\S]*?)(?=\n# |\n<!-- PI_ROLE|\n<project_context>|\n<available_skills>|$)/);
+        if (gmMatch) {
+          content = gmMatch[1].trimEnd();
+          remaining = remaining.slice(gmMatch[0].length);
+          found = content.length > 0;
         }
         break;
       }

@@ -114,6 +114,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const [roles, setRoles] = useState<AgentRole[]>([]);
   const [thinkingDropdownOpen, setThinkingDropdownOpen] = useState(false);
   const [attachedImages, setAttachedImages] = useState<AttachedImage[]>([]);
+  const [isFocused, setIsFocused] = useState(false);
 
   // Skill picker state
   const [skillPickerOpen, setSkillPickerOpen] = useState(false);
@@ -788,7 +789,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         })()}
 
         {/* Common project skill shortcuts */}
-        {commonProjectSkills.length > 0 && !selectedSkill && (
+        {isFocused && commonProjectSkills.length > 0 && !selectedSkill && (
           <div
             style={{
               display: "flex",
@@ -969,7 +970,9 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
               onCompositionStart={handleCompositionStart}
               onCompositionUpdate={handleCompositionUpdate}
               onCompositionEnd={handleCompositionEnd}
+              onFocus={() => setIsFocused(true)}
               onBlur={() => {
+                setIsFocused(false);
                 // Delay close so click on skill picker item can fire first
                 setTimeout(() => setSkillPickerOpen(false), 150);
               }}

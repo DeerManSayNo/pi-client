@@ -61,6 +61,12 @@ export function RoleConfig({ onClose }: { onClose: () => void }) {
 
   useEffect(() => { loadRoles(); }, [loadRoles]);
 
+  useEffect(() => {
+    const handler = () => { loadRoles(); };
+    window.addEventListener("pi-agent.roles-updated", handler);
+    return () => window.removeEventListener("pi-agent.roles-updated", handler);
+  }, [loadRoles]);
+
   const selectedRole = useMemo(() => roles.find((r) => r.id === selectedRoleId) ?? roles[0] ?? null, [roles, selectedRoleId]);
 
   useEffect(() => {

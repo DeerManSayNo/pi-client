@@ -10,6 +10,8 @@ import { ModelsConfig } from "./ModelsConfig";
 import { SkillsConfig } from "./SkillsConfig";
 import { SchedulerPanel } from "./SchedulerPanel";
 import { RoleConfig } from "./RoleConfig";
+import { MemoryConfig } from "./MemoryConfig";
+import { McpConfig } from "./McpConfig";
 import { useTheme } from "@/hooks/useTheme";
 import type { SessionInfo } from "@/lib/types";
 import type { ChatInputHandle } from "./ChatInput";
@@ -1554,64 +1556,8 @@ export function AppShell() {
       <SchedulerPanel onClose={() => setSchedulerPanelOpen(false)} cwd={activeCwd ?? selectedSession?.cwd ?? newSessionCwd ?? undefined} />
     )}
     {quickConfigOpen === "role" && <RoleConfig onClose={() => setQuickConfigOpen(null)} />}
-    {quickConfigOpen && quickConfigOpen !== "role" && (() => {
-      const title = quickConfigOpen === "memory" ? "记忆" : "MCP";
-      const desc = quickConfigOpen === "memory"
-        ? "用于管理 Agent 的长期记忆与偏好。"
-        : "用于管理 MCP 服务与工具入口。";
-      return (
-        <div
-          role="dialog"
-          aria-modal="true"
-          aria-label={title}
-          style={{
-            position: "fixed",
-            inset: 0,
-            zIndex: 1000,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            background: "rgba(0,0,0,0.35)",
-          }}
-          onClick={() => setQuickConfigOpen(null)}
-        >
-          <div
-            style={{
-              width: 360,
-              maxWidth: "calc(100vw - 32px)",
-              border: "1px solid var(--border)",
-              borderRadius: 14,
-              background: "var(--bg-panel)",
-              boxShadow: "0 18px 60px rgba(0,0,0,0.28)",
-              padding: 18,
-            }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
-              <div style={{ fontSize: 15, fontWeight: 700, color: "var(--text)" }}>{title}</div>
-              <button
-                onClick={() => setQuickConfigOpen(null)}
-                aria-label="关闭"
-                style={{
-                  width: 28,
-                  height: 28,
-                  borderRadius: 8,
-                  border: "1px solid var(--border)",
-                  background: "transparent",
-                  color: "var(--text-muted)",
-                  cursor: "pointer",
-                }}
-              >
-                ×
-              </button>
-            </div>
-            <p style={{ margin: "12px 0 0", fontSize: 12, lineHeight: 1.6, color: "var(--text-muted)" }}>
-              {desc}入口已添加，后续可以在这里接入具体配置页面。
-            </p>
-          </div>
-        </div>
-      );
-    })()}
+    {quickConfigOpen === "memory" && <MemoryConfig onClose={() => setQuickConfigOpen(null)} />}
+    {quickConfigOpen === "mcp" && <McpConfig onClose={() => setQuickConfigOpen(null)} />}
     </>
   );
 }
