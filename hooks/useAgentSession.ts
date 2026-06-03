@@ -59,6 +59,7 @@ export interface SessionData {
     entryIds: string[];
     thinkingLevel: string;
     model: { provider: string; modelId: string } | null;
+    roleId?: string | null;
   };
 }
 
@@ -445,7 +446,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [loadSession, onAgentEnd]);
   handleAgentEventRef.current = handleAgentEvent;
 
-  const handleSend = useCallback(async (message: string, images?: AttachedImage[]) => {
+  const handleSend = useCallback(async (message: string, images?: AttachedImage[], roleId?: string) => {
     if (!message.trim() && !images?.length) return;
     if (agentRunningRef.current) return;
     // Set the ref immediately to prevent duplicate sends before React re-renders
@@ -503,6 +504,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             ...(piImages?.length ? { images: piImages } : {}),
             ...(selectedModel ? { provider: selectedModel.provider, modelId: selectedModel.modelId } : {}),
             ...(thinkingLevel !== "auto" ? { thinkingLevel } : {}),
+            ...(roleId ? { roleId } : {}),
           }),
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -526,6 +528,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           type: "prompt",
           message,
           ...(piImages?.length ? { images: piImages } : {}),
+          ...(roleId ? { roleId } : {}),
         });
       }
     } catch (e) {

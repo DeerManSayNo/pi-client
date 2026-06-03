@@ -9,6 +9,7 @@ import { TabBar, type Tab } from "./TabBar";
 import { ModelsConfig } from "./ModelsConfig";
 import { SkillsConfig } from "./SkillsConfig";
 import { SchedulerPanel } from "./SchedulerPanel";
+import { RoleConfig } from "./RoleConfig";
 import { useTheme } from "@/hooks/useTheme";
 import type { SessionInfo } from "@/lib/types";
 import type { ChatInputHandle } from "./ChatInput";
@@ -72,6 +73,9 @@ export function AppShell() {
   const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(new Set());
   const pendingSessionIdRef = useRef<string | null>(null);
   const pendingTempTabIdRef = useRef<string | null>(null);
+  // Track which tab ids are genuine placeholders (not real sessions),
+  // so handleSelectSession knows when to show a new-session UI vs load from API.
+  const placeholderTabIdsRef = useRef<Set<string>>(new Set());
   const [sidebarMode, setSidebarMode] = useState<SidebarMode>("open");
   const sidebarOpen = sidebarMode !== "closed";
   const sidebarCompact = sidebarMode === "compact";
@@ -243,8 +247,8 @@ export function AppShell() {
     // to disk by pi until the first assistant message exists. If the user
     // switches away while that first response is still running, /api/sessions
     // cannot list it yet, so the sidebar must keep showing the optimistic row.
-    // Placeholder sessions (created by top bar "+") have path === ""
-    if (session.path === "") {
+    // Only placeholder tabs (created by top bar "+") show the new-session UI.
+    if (placeholderTabIdsRef.current.has(session.id)) {
       setNewSessionCwd(session.cwd);
       setSelectedSession(null);
       setActiveSessionTabId(session.id);
@@ -255,11 +259,18 @@ export function AppShell() {
       return;
     }
     setNewSessionCwd(null);
-    setSelectedSession(session);
+    // If the session came from the sidebar it may have updated fields (e.g. path,
+    // name). Update the tab in place so subsequent tab clicks have the real data.
     setSessionTabs((prev) => {
-      if (prev.find((t) => t.id === session.id)) return prev;
+      const existingIdx = prev.findIndex((t) => t.id === session.id);
+      if (existingIdx >= 0) {
+        const updated = [...prev];
+        updated[existingIdx] = { ...updated[existingIdx], ...session };
+        return updated;
+      }
       return [...prev, session];
     });
+    setSelectedSession(session);
     setActiveSessionTabId(session.id);
     setSessionKey((k) => k + 1);
     setSystemPrompt(null);
@@ -292,6 +303,9 @@ export function AppShell() {
     setSessionTabs((prev) => [...prev, placeholder]);
     setActiveSessionTabId(_sessionId);
     pendingTempTabIdRef.current = _sessionId;
+    // Track this as a genuine placeholder so handleSelectSession shows
+    // the new-session UI, not a real session load.
+    placeholderTabIdsRef.current.add(_sessionId);
     setPendingSession(null);
     setSelectedSession(null);
     setNewSessionCwd(cwd);
@@ -321,6 +335,9 @@ export function AppShell() {
     setSessionTabs((prev) => [...prev, placeholder]);
     setActiveSessionTabId(tempId);
     pendingTempTabIdRef.current = tempId;
+    // Track this as a genuine placeholder so handleSelectSession shows
+    // the new-session UI, not a real session load.
+    placeholderTabIdsRef.current.add(tempId);
     setPendingSession(null);
     setSelectedSession(null);
     setNewSessionCwd(cwd);
@@ -358,6 +375,8 @@ export function AppShell() {
     // Replace placeholder tab created by "+" button with real session
     const tempId = pendingTempTabIdRef.current;
     pendingTempTabIdRef.current = null;
+    // The placeholder is now a real session — remove from placeholder set
+    if (tempId) placeholderTabIdsRef.current.delete(tempId);
     setSessionTabs((prev) => {
       const filtered = tempId ? prev.filter((t) => t.id !== tempId) : prev;
       if (filtered.find((t) => t.id === session.id)) return filtered;
@@ -461,6 +480,7 @@ export function AppShell() {
     if (pendingTempTabIdRef.current === sessionId) {
       pendingTempTabIdRef.current = null;
     }
+    placeholderTabIdsRef.current.delete(sessionId);
     setSessionTabs((prev) => {
       const next = prev.filter((t) => t.id !== sessionId);
       // If closing the active tab, switch to previous or clear
@@ -1416,6 +1436,7 @@ export function AppShell() {
                 onSessionStatsChange={handleSessionStatsChange}
                 onContextUsageChange={handleContextUsageChange}
                 onOpenFile={handleOpenFile}
+                onOpenRoleConfig={() => setQuickConfigOpen("role")}
               />
             </div>
           ) : showPlaceholder ? (
@@ -1470,7 +1491,8 @@ export function AppShell() {
     {schedulerPanelOpen && (
       <SchedulerPanel onClose={() => setSchedulerPanelOpen(false)} cwd={activeCwd ?? selectedSession?.cwd ?? newSessionCwd ?? undefined} />
     )}
-    {quickConfigOpen && (() => {
+    {quickConfigOpen === "role" && <RoleConfig onClose={() => setQuickConfigOpen(null)} />}
+    {quickConfigOpen && quickConfigOpen !== "role" && (() => {
       const title = quickConfigOpen === "memory" ? "记忆" : quickConfigOpen === "skill" ? "技能" : "角色";
       const desc = quickConfigOpen === "memory"
         ? "用于管理 Agent 的长期记忆与偏好。"

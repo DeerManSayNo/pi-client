@@ -3,6 +3,7 @@ import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-ag
 import { cacheSessionPath } from "./session-reader";
 import type { AgentSessionLike, ToolInfo } from "./pi-types";
 import { getLiveIslandClient } from "./live-island-client";
+import { applyRolePromptToSystemPrompt } from "./roles";
 
 // ============================================================================
 // Types
@@ -66,8 +67,34 @@ export class AgentSessionWrapper {
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private onDestroyCallback: (() => void) | null = null;
   private _alive = true;
+  private roleId: string | null = null;
+  private temporaryRoleSettings: string[] = [];
 
-  constructor(public readonly inner: AgentSessionLike) {}
+  constructor(public readonly inner: AgentSessionLike, roleId?: string | null) {
+    this.roleId = roleId ?? null;
+    this.applyRolePrompt();
+  }
+
+  private applyRolePrompt(): void {
+    if (!this.inner.agent.state) return;
+    this.inner.agent.state.systemPrompt = applyRolePromptToSystemPrompt(
+      this.inner.agent.state.systemPrompt ?? "",
+      this.roleId,
+      this.temporaryRoleSettings
+    );
+  }
+
+  private setRole(roleId: string | null, persist = true): void {
+    const normalized = roleId?.trim() || null;
+    const changed = this.roleId !== normalized;
+    this.roleId = normalized;
+    this.applyRolePrompt();
+    if (persist && changed && this.inner.sessionManager.isPersisted()) {
+      try {
+        this.inner.sessionManager.appendCustomEntry("role_profile", { roleId: this.roleId });
+      } catch { /* best effort */ }
+    }
+  }
 
   get sessionId(): string {
     return this.inner.sessionId;
@@ -138,6 +165,9 @@ export class AgentSessionWrapper {
 
     switch (type) {
       case "prompt": {
+        if (typeof command.roleId === "string") {
+          this.setRole(command.roleId);
+        }
         // Record prompt text for Live Island display
         if (command.message) {
           getLiveIslandClient().recordPrompt(this.inner.sessionId, command.message as string);
@@ -146,6 +176,18 @@ export class AgentSessionWrapper {
         const promptImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
         this.inner.prompt(command.message as string, promptImages?.length ? { images: promptImages } : undefined).catch(() => {});
         return null;
+      }
+
+      case "set_role": {
+        this.setRole(typeof command.roleId === "string" ? command.roleId : null);
+        return { roleId: this.roleId };
+      }
+
+      case "add_temporary_role_setting": {
+        const text = typeof command.text === "string" ? command.text.trim() : "";
+        if (text) this.temporaryRoleSettings.push(text);
+        this.applyRolePrompt();
+        return { ok: true };
       }
 
       case "abort":
@@ -356,7 +398,8 @@ export async function startRpcSession(
   sessionId: string,
   sessionFile: string,
   cwd: string,
-  toolNames?: string[]
+  toolNames?: string[],
+  roleId?: string | null
 ): Promise<{ session: AgentSessionWrapper; realSessionId: string }> {
   const registry = getRegistry();
   const locks = getLocks();
@@ -403,7 +446,7 @@ export async function startRpcSession(
       inner.agent.state.systemPrompt = "";
     }
 
-    const wrapper = new AgentSessionWrapper(inner);
+    const wrapper = new AgentSessionWrapper(inner, roleId);
     wrapper.start();
 
     const realSessionId = inner.sessionId as string;

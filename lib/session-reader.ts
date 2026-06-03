@@ -78,12 +78,12 @@ export function buildSessionContext(entries: SessionEntry[], leafId?: string | n
   // Needed for fork and navigate_tree calls from the UI.
   let targetLeaf: SessionEntry | undefined;
   if (leafId === null) {
-    return { messages: [], entryIds: [], thinkingLevel: piCtx.thinkingLevel, model: piCtx.model };
+    return { messages: [], entryIds: [], thinkingLevel: piCtx.thinkingLevel, model: piCtx.model, roleId: null };
   }
   if (leafId) targetLeaf = byId.get(leafId);
   if (!targetLeaf) targetLeaf = entries[entries.length - 1];
   if (!targetLeaf) {
-    return { messages: [], entryIds: [], thinkingLevel: piCtx.thinkingLevel, model: piCtx.model };
+    return { messages: [], entryIds: [], thinkingLevel: piCtx.thinkingLevel, model: piCtx.model, roleId: null };
   }
 
   // Walk path from target leaf to root
@@ -92,6 +92,14 @@ export function buildSessionContext(entries: SessionEntry[], leafId?: string | n
   while (cur) {
     path.unshift(cur);
     cur = cur.parentId ? byId.get(cur.parentId) : undefined;
+  }
+
+  let roleId: string | null = null;
+  for (const e of path) {
+    if (e.type === "custom" && (e as { customType?: string }).customType === "role_profile") {
+      const data = (e as { data?: { roleId?: unknown } }).data;
+      roleId = typeof data?.roleId === "string" && data.roleId.trim() ? data.roleId.trim() : null;
+    }
   }
 
   // Find the last compaction on path (mirrors pi's buildSessionContext logic)
@@ -144,6 +152,7 @@ export function buildSessionContext(entries: SessionEntry[], leafId?: string | n
     entryIds,
     thinkingLevel: piCtx.thinkingLevel,
     model: piCtx.model,
+    roleId,
   };
 }
 

@@ -40,6 +40,7 @@ export interface AgentSessionLike {
   abort(): Promise<void>;
   setModel(model: ModelLike): Promise<void>;
   navigateTree(targetId: string, options?: { summarize?: boolean }): Promise<NavigateTreeResult>;
+  appendCustomEntry?(customType: string, data?: unknown): string;
   setThinkingLevel(level: string): void;
   compact(customInstructions?: string): Promise<unknown>;
   setAutoCompactionEnabled(enabled: boolean): void;

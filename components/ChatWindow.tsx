@@ -3,12 +3,21 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { AgentMessage, SessionInfo } from "@/lib/types";
 import { MessageView } from "./MessageView";
-import { ChatInput, type ChatInputHandle } from "./ChatInput";
+import { ChatInput, type ChatInputHandle, type AttachedImage } from "./ChatInput";
 import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
 import { ChangedFilesList } from "./ChangedFilesList";
 import { useAgentSession, type AgentPhase } from "@/hooks/useAgentSession";
 import { useAudio } from "@/hooks/useAudio";
 import { useDragDrop } from "@/hooks/useDragDrop";
+
+interface AgentRole {
+  id: string;
+  name: string;
+  description: string;
+  basePrompt: string;
+  blocks: Record<string, { id: string; text: string; createdAt: string }[]>;
+  builtIn?: boolean;
+}
 
 interface Props {
   session: SessionInfo | null;
@@ -24,6 +33,7 @@ interface Props {
   onSessionStatsChange?: (stats: { tokens: { input: number; output: number; cacheRead: number; cacheWrite: number }; cost?: number } | null) => void;
   onContextUsageChange?: (usage: { percent: number | null; contextWindow: number; tokens: number | null } | null) => void;
   onOpenFile?: (filePath: string, fileName: string) => void;
+  onOpenRoleConfig?: () => void;
 }
 
 function phaseLabel(phase: AgentPhase): string {
@@ -95,9 +105,12 @@ function Typewriter({ phrases }: { phrases: string[] }) {
   );
 }
 
-export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionStarted, onAgentRunningChange, onSessionForked, modelsRefreshKey, chatInputRef, onSystemPromptChange, onSessionStatsChange, onContextUsageChange, onOpenFile }: Props) {
+export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionStarted, onAgentRunningChange, onSessionForked, modelsRefreshKey, chatInputRef, onSystemPromptChange, onSessionStatsChange, onContextUsageChange, onOpenFile, onOpenRoleConfig }: Props) {
   // Track changed files from agent_end event
   const [changedFiles, setChangedFiles] = useState<string[]>([]);
+  const [currentRoleId, setCurrentRoleId] = useState("default");
+  const [roles, setRoles] = useState<AgentRole[]>([]);
+  const [pendingRoleSetting, setPendingRoleSetting] = useState<{ roleId: string; roleName: string; block: string; setting: string } | null>(null);
   const wrappedOnAgentEnd = useCallback((cf?: string[]) => {
     if (cf && cf.length > 0) {
       setChangedFiles(cf);
@@ -106,7 +119,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
   }, [onAgentEnd]);
 
   const {
-    loading, error, messages, entryIds, streamState,
+    loading, error, data, messages, entryIds, streamState,
     agentRunning, modelNames, modelList, modelThinkingLevels, modelThinkingLevelMaps, toolPreset, thinkingLevel,
     retryInfo, contextUsage, forkingEntryId, watchdogInfo,
     isCompacting, compactError, displayModel: displayModelValue, sessionStats,
@@ -122,13 +135,80 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
     modelsRefreshKey, onSystemPromptChange,
   });
 
+  useEffect(() => {
+    if (!data) return;
+    const loadedRoleId = data.context.roleId || "default";
+    setCurrentRoleId(loadedRoleId);
+    localStorage.setItem("pi-agent.current-role", loadedRoleId);
+  }, [data]);
+
+  useEffect(() => {
+    const handler = () => {
+      if (!session?.id) return;
+      fetch(`/api/agent/${encodeURIComponent(session.id)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: "set_role", roleId: currentRoleId }),
+      }).catch(() => {});
+    };
+    window.addEventListener("pi-agent.roles-updated", handler);
+    return () => window.removeEventListener("pi-agent.roles-updated", handler);
+  }, [session?.id, currentRoleId]);
+
+  const handleRoleChange = useCallback((roleId: string) => {
+    setCurrentRoleId(roleId);
+    localStorage.setItem("pi-agent.current-role", roleId);
+    if (session?.id) {
+      fetch(`/api/agent/${encodeURIComponent(session.id)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: "set_role", roleId }),
+      }).catch(() => {});
+    }
+  }, [session?.id]);
+
+  const detectSetting = useCallback((message: string) => {
+    const hasIntent = /(给.*角色.*(加|新增|保存|存入|设定)|以后.*角色|角色.*以后|存到.*角色|记住.*角色设定|把.*存到.*角色|当前角色.*设定)/.test(message);
+    if (!hasIntent) return null;
+    const mentioned = roles.find((r) => r.name !== "默认角色" && message.includes(r.name));
+    const role = mentioned ?? roles.find((r) => r.id === currentRoleId) ?? roles.find((r) => r.id === "default");
+    if (!role) return null;
+    const block = /工具|修改代码前|执行|命令/.test(message) ? "Tools" : /语气|风格|简洁|详细|先给结论|表达/.test(message) ? "Soul" : /身份|扮演|像一个|专家|经理|审查员/.test(message) ? "Identity" : /用户|偏好|协作/.test(message) ? "User" : /记住|长期|背景信息/.test(message) ? "Memory" : "Rules";
+    const setting = (message.match(/[：:](.+)$/)?.[1] ?? message).replace(/^(给)?(当前)?角色(加|新增|保存|存入)?(一个|一条)?设定[：:]?/, "").trim();
+    return { roleId: role.id, roleName: role.name, block, setting: setting.length > 160 ? setting.slice(0, 160) + "…" : setting };
+  }, [roles, currentRoleId]);
+
+  const sendWithRole = useCallback((message: string, images?: AttachedImage[]) => {
+    const detected = detectSetting(message);
+    if (detected) setPendingRoleSetting(detected);
+    handleSend(message, images, currentRoleId);
+  }, [detectSetting, handleSend, currentRoleId]);
+
+  const confirmRoleSetting = useCallback(async (mode: "save" | "temporary" | "cancel") => {
+    const pending = pendingRoleSetting;
+    if (!pending) return;
+    setPendingRoleSetting(null);
+    if (mode === "save") {
+      await fetch(`/api/roles/${encodeURIComponent(pending.roleId)}/settings`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ block: pending.block, text: pending.setting }),
+      });
+      const data = await fetch("/api/roles").then((r) => r.json()).catch(() => null) as { roles?: AgentRole[] } | null;
+      if (data?.roles) setRoles(data.roles);
+      if (session?.id) await fetch(`/api/agent/${encodeURIComponent(session.id)}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ type: "set_role", roleId: pending.roleId }) }).catch(() => {});
+    } else if (mode === "temporary" && session?.id) {
+      await fetch(`/api/agent/${encodeURIComponent(session.id)}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ type: "add_temporary_role_setting", text: pending.setting }) }).catch(() => {});
+    }
+  }, [pendingRoleSetting, session?.id]);
+
   const handleResend = useCallback((message: string) => {
     if (agentRunning && handleSteer) {
       handleSteer(message);
     } else if (!agentRunning) {
-      handleSend(message);
+      handleSend(message, undefined, currentRoleId);
     }
-  }, [agentRunning, handleSteer, handleSend]);
+  }, [agentRunning, handleSteer, handleSend, currentRoleId]);
 
   useEffect(() => {
     onAgentRunningChange?.(session?.id, agentRunning);
@@ -287,9 +367,27 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
     : null;
 
   const chatInputElement = (
-    <ChatInput
+    <>
+      {pendingRoleSetting && (
+        <div style={{ maxWidth: 820, margin: "0 auto 8px", padding: "0 16px", paddingRight: 52 }}>
+          <div style={{ border: "1px solid var(--border)", borderRadius: 12, background: "var(--bg-panel)", padding: 12, boxShadow: "0 4px 14px rgba(0,0,0,0.08)" }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "var(--text)", marginBottom: 6 }}>识别到角色设定</div>
+            <div style={{ fontSize: 12, color: "var(--text-muted)", lineHeight: 1.6 }}>
+              当前目标角色：<b style={{ color: "var(--text)" }}>{pendingRoleSetting.roleName}</b><br />
+              建议分块：<b style={{ color: "var(--text)" }}>{pendingRoleSetting.block}</b><br />
+              建议存入的设定：<span style={{ color: "var(--text)" }}>「{pendingRoleSetting.setting}」</span>
+            </div>
+            <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
+              <button onClick={() => confirmRoleSetting("save")} style={{ padding: "7px 11px", border: "none", borderRadius: 8, background: "var(--accent)", color: "#fff", cursor: "pointer", fontSize: 12 }}>确认存入</button>
+              <button onClick={() => confirmRoleSetting("temporary")} style={{ padding: "7px 11px", border: "1px solid var(--border)", borderRadius: 8, background: "var(--bg)", color: "var(--text-muted)", cursor: "pointer", fontSize: 12 }}>仅本次对话使用</button>
+              <button onClick={() => confirmRoleSetting("cancel")} style={{ padding: "7px 11px", border: "1px solid var(--border)", borderRadius: 8, background: "var(--bg)", color: "var(--text-muted)", cursor: "pointer", fontSize: 12 }}>取消</button>
+            </div>
+          </div>
+        </div>
+      )}
+      <ChatInput
       ref={chatInputRef}
-      onSend={handleSend}
+      onSend={sendWithRole}
       onAbort={handleAbort}
       onSteer={agentRunning ? handleSteer : undefined}
       onFollowUp={agentRunning ? handleFollowUp : undefined}
@@ -312,7 +410,12 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
       soundEnabled={soundEnabled}
       onSoundToggle={onSoundToggle}
       cwd={session?.cwd ?? newSessionCwd}
+      currentRoleId={currentRoleId}
+      onRoleChange={handleRoleChange}
+      onRolesLoaded={setRoles}
+      onOpenRoleConfig={onOpenRoleConfig}
     />
+    </>
   );
 
   if (loading) {

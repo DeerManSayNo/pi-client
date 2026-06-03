@@ -20,6 +20,16 @@ interface SkillOption {
   source: "global" | "project";
 }
 
+interface RoleSetting { id: string; text: string; createdAt: string }
+interface AgentRole {
+  id: string;
+  name: string;
+  description: string;
+  basePrompt: string;
+  blocks: Record<string, RoleSetting[]>;
+  builtIn?: boolean;
+}
+
 interface Props {
   onSend: (message: string, images?: AttachedImage[]) => void;
   onAbort: () => void;
@@ -44,6 +54,10 @@ interface Props {
   soundEnabled?: boolean;
   onSoundToggle?: () => void;
   cwd?: string | null;
+  currentRoleId?: string;
+  onRoleChange?: (roleId: string) => void;
+  onRolesLoaded?: (roles: AgentRole[]) => void;
+  onOpenRoleConfig?: () => void;
 }
 
 export interface ChatInputHandle {
@@ -73,11 +87,18 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   retryInfo,
   soundEnabled, onSoundToggle,
   cwd,
+  currentRoleId = "default",
+  onRoleChange,
+  onRolesLoaded,
+  onOpenRoleConfig,
 }: Props, ref) {
   const [value, setValue] = useState("");
   const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
   const [modelDropdownRect, setModelDropdownRect] = useState<{ top: number; left: number; width: number } | null>(null);
   const [toolDropdownOpen, setToolDropdownOpen] = useState(false);
+  const [roleDropdownOpen, setRoleDropdownOpen] = useState(false);
+  const [roleDropdownRect, setRoleDropdownRect] = useState<{ top: number; left: number; width: number } | null>(null);
+  const [roles, setRoles] = useState<AgentRole[]>([]);
   const [thinkingDropdownOpen, setThinkingDropdownOpen] = useState(false);
   const [attachedImages, setAttachedImages] = useState<AttachedImage[]>([]);
 
@@ -96,6 +117,8 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const dropdownRef = useRef<HTMLDivElement>(null);
   const modelDropdownPanelRef = useRef<HTMLDivElement>(null);
   const toolDropdownRef = useRef<HTMLDivElement>(null);
+  const roleDropdownRef = useRef<HTMLDivElement>(null);
+  const roleDropdownPanelRef = useRef<HTMLDivElement>(null);
   const thinkingDropdownRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -525,6 +548,12 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       ) {
         setModelDropdownOpen(false);
       }
+      if (
+        roleDropdownRef.current && !roleDropdownRef.current.contains(e.target as Node) &&
+        roleDropdownPanelRef.current && !roleDropdownPanelRef.current.contains(e.target as Node)
+      ) {
+        setRoleDropdownOpen(false);
+      }
       if (toolDropdownRef.current && !toolDropdownRef.current.contains(e.target as Node)) {
         setToolDropdownOpen(false);
       }
@@ -538,6 +567,26 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
   }, []);
+
+  const loadRoles = useCallback(async () => {
+    try {
+      const res = await fetch("/api/roles");
+      if (!res.ok) return;
+      const data = await res.json() as { roles: AgentRole[] };
+      setRoles(data.roles ?? []);
+      onRolesLoaded?.(data.roles ?? []);
+    } catch { /* ignore */ }
+  }, [onRolesLoaded]);
+
+  useEffect(() => {
+    loadRoles();
+    const handler = () => loadRoles();
+    window.addEventListener("pi-agent.roles-updated", handler);
+    return () => window.removeEventListener("pi-agent.roles-updated", handler);
+  }, [loadRoles]);
+
+  const selectedRole = roles.find((r) => r.id === currentRoleId) ?? roles.find((r) => r.id === "default");
+  const roleSettingCount = selectedRole ? Object.values(selectedRole.blocks ?? {}).reduce((n, arr) => n + (arr?.length ?? 0), 0) : 0;
 
 
 
@@ -975,6 +1024,86 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 <polyline points="21 15 16 10 5 21" />
               </svg>
             </button>
+            {/* Role selector */}
+            {selectedRole && onRoleChange && (
+              <div ref={roleDropdownRef} style={{ position: "relative" }}>
+                <button
+                  onClick={(e) => {
+                    if (isStreaming) return;
+                    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                    setRoleDropdownRect({ top: rect.top, left: rect.left, width: rect.width });
+                    setRoleDropdownOpen((v) => !v);
+                  }}
+                  disabled={isStreaming}
+                  title={roleSettingCount ? `当前角色有 ${roleSettingCount} 条设定` : "选择角色"}
+                  style={{
+                    display: "flex", alignItems: "center", gap: 6,
+                    padding: "8px 12px", height: 32, maxWidth: 180,
+                    background: roleDropdownOpen ? "var(--bg-hover)" : "none",
+                    border: "none", borderRadius: 9,
+                    color: roleSettingCount ? "var(--accent)" : "var(--text-muted)",
+                    cursor: isStreaming ? "not-allowed" : "pointer",
+                    fontSize: 12, opacity: isStreaming ? 0.5 : 1,
+                    transition: "background 0.12s, color 0.12s",
+                  }}
+                  onMouseEnter={(e) => { if (!isStreaming) { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text)"; } }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = roleDropdownOpen ? "var(--bg-hover)" : "none"; e.currentTarget.style.color = roleSettingCount ? "var(--accent)" : "var(--text-muted)"; }}
+                >
+                  <span style={{ fontWeight: 600 }}>@</span>
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{selectedRole.name}</span>
+                </button>
+                {roleDropdownOpen && roleDropdownRect && (() => {
+                  const viewportHeight = window.visualViewport?.height ?? window.innerHeight;
+                  const bottom = viewportHeight - roleDropdownRect.top + 6;
+                  const maxH = Math.max(120, Math.min(roleDropdownRect.top - 8, viewportHeight * 0.6));
+                  return (
+                  <div ref={roleDropdownPanelRef} style={{
+                    position: "fixed", bottom, left: roleDropdownRect.left,
+                    zIndex: 500, background: "var(--bg)", border: "1px solid var(--border)",
+                    borderRadius: 8, boxShadow: "0 -4px 16px rgba(0,0,0,0.10)",
+                    overflow: "hidden", width: "max-content", minWidth: Math.max(roleDropdownRect.width, 260), maxHeight: maxH, overflowY: "auto",
+                  }}>
+                    <div style={{ padding: "6px 12px 4px", fontSize: 10, fontWeight: 600, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.07em" }}>角色</div>
+                    {roles.map((role) => {
+                      const active = role.id === selectedRole.id;
+                      const count = Object.values(role.blocks ?? {}).reduce((n, arr) => n + (arr?.length ?? 0), 0);
+                      return <button
+                        key={role.id}
+                        onClick={() => { onRoleChange(role.id); setRoleDropdownOpen(false); }}
+                        style={{
+                          display: "flex", alignItems: "center", gap: 8,
+                          width: "100%", padding: "7px 12px",
+                          background: active ? "var(--bg-selected)" : "none",
+                          border: "none",
+                          color: active ? "var(--text)" : "var(--text-muted)",
+                          cursor: "pointer", fontSize: 12, textAlign: "left",
+                          fontWeight: active ? 600 : 400,
+                          whiteSpace: "nowrap",
+                        }}
+                        onMouseEnter={(e) => { if (!active) e.currentTarget.style.background = "var(--bg-hover)"; }}
+                        onMouseLeave={(e) => { if (!active) e.currentTarget.style.background = "none"; }}
+                      >
+                        {active ? <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="1.5 5 4 7.5 8.5 2.5" /></svg> : <span style={{ width: 10 }} />}
+                        <span style={{ flex: 1 }}>{role.name}</span>
+                        {count > 0 && <span style={{ fontSize: 10, color: "var(--text-dim)" }}>{count} 条</span>}
+                      </button>;
+                    })}
+                    <div style={{ borderTop: "1px solid var(--border)", padding: 0 }}>
+                      <button
+                        onClick={() => { setRoleDropdownOpen(false); onOpenRoleConfig?.(); }}
+                        style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "7px 12px", background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", fontSize: 12, textAlign: "left", whiteSpace: "nowrap" }}
+                        onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text)"; }}
+                        onMouseLeave={(e) => { e.currentTarget.style.background = "none"; e.currentTarget.style.color = "var(--text-muted)"; }}
+                      >
+                        <span style={{ width: 10, textAlign: "center" }}>＋</span>
+                        <span style={{ flex: 1 }}>创建 / 管理角色</span>
+                      </button>
+                    </div>
+                  </div>
+                  );
+                })()}
+              </div>
+            )}
             {/* Model selector — visible always, disabled during streaming */}
             {modelOptions.length > 0 && currentName && onModelChange && (
                 <div ref={dropdownRef} style={{ position: "relative" }}>
