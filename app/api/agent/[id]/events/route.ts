@@ -1,3 +1,4 @@
+import path from "path";
 import { addAllowedRoot } from "@/lib/file-access";
 import { resolveSessionPath } from "@/lib/session-reader";
 import { getRpcSession, startRpcSession } from "@/lib/rpc-manager";
@@ -39,6 +40,12 @@ export async function GET(
       encode({ type: "connected", sessionId: id });
 
       const unsubscribe = session.onEvent((event) => {
+        if (event && typeof event === "object" && "type" in event && event.type === "agent_file_changed") {
+          const filePath = (event as { filePath?: unknown }).filePath;
+          if (typeof filePath === "string" && filePath.trim()) {
+            addAllowedRoot(path.dirname(filePath));
+          }
+        }
         encode(event);
       });
 
