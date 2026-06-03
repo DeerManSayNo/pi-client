@@ -4,6 +4,7 @@ import { cacheSessionPath } from "./session-reader";
 import type { AgentSessionLike, ToolInfo } from "./pi-types";
 import { getLiveIslandClient } from "./live-island-client";
 import { applyRolePromptToSystemPrompt } from "./roles";
+import { applyGlobalConfigToPrompt, isGlobalSystemPromptSectionEnabled } from "./system-prompt-decomposer";
 
 // ============================================================================
 // Types
@@ -55,6 +56,16 @@ function resolveChangedFilePath(filePath: string, cwd: string): string | null {
   return path.isAbsolute(trimmed) ? path.resolve(trimmed) : path.resolve(cwd, trimmed);
 }
 
+function setEffectiveSystemPrompt(session: AgentSessionLike, prompt: string): void {
+  if (session.agent.state) session.agent.state.systemPrompt = prompt;
+
+  // pi's AgentSession.prompt() resets agent.state.systemPrompt back to its
+  // private _baseSystemPrompt before every turn. If we only mutate state here,
+  // the UI preview looks correct but the next new prompt silently uses the old
+  // built-in prompt again. Keep the base prompt in sync as well.
+  (session as unknown as { _baseSystemPrompt?: string })._baseSystemPrompt = prompt;
+}
+
 // ============================================================================
 // AgentSessionWrapper
 // Wraps AgentSession with the same interface the rest of the app expects
@@ -77,11 +88,11 @@ export class AgentSessionWrapper {
 
   private applyRolePrompt(): void {
     if (!this.inner.agent.state) return;
-    this.inner.agent.state.systemPrompt = applyRolePromptToSystemPrompt(
-      this.inner.agent.state.systemPrompt ?? "",
-      this.roleId,
-      this.temporaryRoleSettings
-    );
+    const basePrompt = this.inner.agent.state.systemPrompt ?? "";
+    const nextPrompt = isGlobalSystemPromptSectionEnabled("role_profile")
+      ? applyRolePromptToSystemPrompt(basePrompt, this.roleId, this.temporaryRoleSettings)
+      : basePrompt;
+    setEffectiveSystemPrompt(this.inner, nextPrompt);
   }
 
   private setRole(roleId: string | null, persist = true): void {
@@ -180,14 +191,25 @@ export class AgentSessionWrapper {
 
       case "set_role": {
         this.setRole(typeof command.roleId === "string" ? command.roleId : null);
-        return { roleId: this.roleId };
+        return { roleId: this.roleId, systemPrompt: this.inner.agent.state?.systemPrompt ?? "" };
+      }
+
+      case "set_system_prompt": {
+        const rawPrompt = typeof command.prompt === "string" ? command.prompt : "";
+        if (this.inner.agent.state) {
+          setEffectiveSystemPrompt(this.inner, rawPrompt);
+        }
+        this.applyRolePrompt();
+        return {
+          systemPrompt: this.inner.agent.state?.systemPrompt ?? "",
+        };
       }
 
       case "add_temporary_role_setting": {
         const text = typeof command.text === "string" ? command.text.trim() : "";
         if (text) this.temporaryRoleSettings.push(text);
         this.applyRolePrompt();
-        return { ok: true };
+        return { ok: true, systemPrompt: this.inner.agent.state?.systemPrompt ?? "" };
       }
 
       case "abort":
@@ -323,6 +345,8 @@ export class AgentSessionWrapper {
 
       case "set_tools": {
         this.inner.setActiveToolsByName(command.toolNames as string[]);
+        if (this.inner.agent.state) setEffectiveSystemPrompt(this.inner, applyGlobalConfigToPrompt(this.inner.agent.state.systemPrompt ?? ""));
+        this.applyRolePrompt();
         return null;
       }
 
@@ -443,7 +467,9 @@ export async function startRpcSession(
     // pi's buildSystemPrompt always produces a non-empty prompt even with no tools;
     // the only way to truly clear it is to call agent.setSystemPrompt directly.
     if (toolNames?.length === 0) {
-      inner.agent.state.systemPrompt = "";
+      setEffectiveSystemPrompt(inner, "");
+    } else {
+      setEffectiveSystemPrompt(inner, applyGlobalConfigToPrompt(inner.agent.state.systemPrompt ?? ""));
     }
 
     const wrapper = new AgentSessionWrapper(inner, roleId);

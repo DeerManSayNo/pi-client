@@ -29,7 +29,6 @@ interface Props {
   onSessionForked?: (newSessionId: string) => void;
   modelsRefreshKey?: number;
   chatInputRef?: React.RefObject<ChatInputHandle | null>;
-  onSystemPromptChange?: (prompt: string | null) => void;
   onSessionStatsChange?: (stats: { tokens: { input: number; output: number; cacheRead: number; cacheWrite: number }; cost?: number } | null) => void;
   onContextUsageChange?: (usage: { percent: number | null; contextWindow: number; tokens: number | null } | null) => void;
   onOpenFile?: (filePath: string, fileName: string) => void;
@@ -105,12 +104,13 @@ function Typewriter({ phrases }: { phrases: string[] }) {
   );
 }
 
-export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionStarted, onAgentRunningChange, onSessionForked, modelsRefreshKey, chatInputRef, onSystemPromptChange, onSessionStatsChange, onContextUsageChange, onOpenFile, onOpenRoleConfig }: Props) {
+export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionStarted, onAgentRunningChange, onSessionForked, modelsRefreshKey, chatInputRef, onSessionStatsChange, onContextUsageChange, onOpenFile, onOpenRoleConfig }: Props) {
   // Track changed files from agent_end event
   const [changedFiles, setChangedFiles] = useState<string[]>([]);
   const [currentRoleId, setCurrentRoleId] = useState("default");
   const [roles, setRoles] = useState<AgentRole[]>([]);
   const [pendingRoleSetting, setPendingRoleSetting] = useState<{ roleId: string; roleName: string; block: string; setting: string } | null>(null);
+  const [systemPromptExpanded, setSystemPromptExpanded] = useState(false);
   const wrappedOnAgentEnd = useCallback((cf?: string[]) => {
     if (cf && cf.length > 0) {
       setChangedFiles(cf);
@@ -130,42 +130,47 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
     handleSend, handleAbort, handleFork, handleModelChange,
     handleCompact, handleSteer, handleFollowUp, handleAbortCompaction,
     handleToolPresetChange, handleThinkingLevelChange, handleAgentEventRef,
+    systemPrompt, setSystemPrompt,
   } = useAgentSession({
     session, newSessionCwd, onAgentEnd: wrappedOnAgentEnd, onSessionCreated, onSessionStarted, onSessionForked,
-    modelsRefreshKey, onSystemPromptChange,
+    modelsRefreshKey,
   });
+
+  const applyRoleToSession = useCallback(async (roleId: string) => {
+    if (!session?.id) return;
+    const res = await fetch(`/api/agent/${encodeURIComponent(session.id)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "set_role", roleId }),
+    }).catch(() => null);
+    if (!res?.ok) return;
+    const json = await res.json().catch(() => null) as { data?: { systemPrompt?: string | null } } | null;
+    if (json?.data && json.data.systemPrompt !== undefined) {
+      setSystemPrompt(json.data.systemPrompt ?? null);
+    }
+  }, [session?.id, setSystemPrompt]);
 
   useEffect(() => {
     if (!data) return;
     const loadedRoleId = data.context.roleId || "default";
     setCurrentRoleId(loadedRoleId);
     localStorage.setItem("pi-agent.current-role", loadedRoleId);
-  }, [data]);
+    if (data.context.roleId) void applyRoleToSession(loadedRoleId);
+  }, [data, applyRoleToSession]);
 
   useEffect(() => {
     const handler = () => {
-      if (!session?.id) return;
-      fetch(`/api/agent/${encodeURIComponent(session.id)}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ type: "set_role", roleId: currentRoleId }),
-      }).catch(() => {});
+      void applyRoleToSession(currentRoleId);
     };
     window.addEventListener("pi-agent.roles-updated", handler);
     return () => window.removeEventListener("pi-agent.roles-updated", handler);
-  }, [session?.id, currentRoleId]);
+  }, [applyRoleToSession, currentRoleId]);
 
   const handleRoleChange = useCallback((roleId: string) => {
     setCurrentRoleId(roleId);
     localStorage.setItem("pi-agent.current-role", roleId);
-    if (session?.id) {
-      fetch(`/api/agent/${encodeURIComponent(session.id)}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ type: "set_role", roleId }),
-      }).catch(() => {});
-    }
-  }, [session?.id]);
+    void applyRoleToSession(roleId);
+  }, [applyRoleToSession]);
 
   const detectSetting = useCallback((message: string) => {
     const hasIntent = /(给.*角色.*(加|新增|保存|存入|设定)|以后.*角色|角色.*以后|存到.*角色|记住.*角色设定|把.*存到.*角色|当前角色.*设定)/.test(message);
@@ -196,11 +201,15 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
       });
       const data = await fetch("/api/roles").then((r) => r.json()).catch(() => null) as { roles?: AgentRole[] } | null;
       if (data?.roles) setRoles(data.roles);
-      if (session?.id) await fetch(`/api/agent/${encodeURIComponent(session.id)}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ type: "set_role", roleId: pending.roleId }) }).catch(() => {});
+      if (session?.id) await applyRoleToSession(pending.roleId);
     } else if (mode === "temporary" && session?.id) {
-      await fetch(`/api/agent/${encodeURIComponent(session.id)}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ type: "add_temporary_role_setting", text: pending.setting }) }).catch(() => {});
+      const res = await fetch(`/api/agent/${encodeURIComponent(session.id)}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ type: "add_temporary_role_setting", text: pending.setting }) }).catch(() => null);
+      if (res?.ok) {
+        const json = await res.json().catch(() => null) as { data?: { systemPrompt?: string | null } } | null;
+        if (json?.data && json.data.systemPrompt !== undefined) setSystemPrompt(json.data.systemPrompt ?? null);
+      }
     }
-  }, [pendingRoleSetting, session?.id]);
+  }, [pendingRoleSetting, session?.id, applyRoleToSession, setSystemPrompt]);
 
   const handleResend = useCallback((message: string) => {
     if (agentRunning && handleSteer) {
@@ -510,6 +519,86 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
         </div>
       ) : (
       <>
+      {systemPrompt !== null && (
+        <div
+          style={{
+            flexShrink: 0,
+            width: "100%",
+            boxSizing: "border-box",
+            paddingLeft: 16,
+            paddingRight: 52, // 16px base + 36px for ChatMinimap alignment
+          }}
+        >
+          <div style={{
+            maxWidth: 820,
+            margin: "8px auto 0",
+            border: "1px solid var(--border)",
+            borderRadius: 8,
+            background: "var(--bg-panel)",
+            overflow: "hidden",
+          }}>
+            <button
+              onClick={() => setSystemPromptExpanded(!systemPromptExpanded)}
+              style={{
+                width: "100%",
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+                padding: "5px 10px",
+                border: "none",
+                background: "transparent",
+                cursor: "pointer",
+                fontSize: 11,
+                color: "var(--text-muted)",
+                fontFamily: "inherit",
+              }}
+              onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
+              onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: systemPrompt ? "var(--accent)" : "currentColor", flexShrink: 0 }}>
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                <polyline points="14 2 14 8 20 8" />
+                <line x1="8" y1="13" x2="16" y2="13" />
+                <line x1="8" y1="17" x2="13" y2="17" />
+              </svg>
+              <span style={{ fontWeight: 500 }}>系统提示词</span>
+              {systemPrompt && (
+                <span style={{
+                  maxWidth: 280,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                  opacity: 0.6,
+                  fontSize: 10,
+                }}>
+                  {systemPrompt.slice(0, 60).replace(/\n/g, " ")}{systemPrompt.length > 60 ? "…" : ""}
+                </span>
+              )}
+              {systemPrompt === "" && (
+                <span style={{ opacity: 0.5, fontStyle: "italic", fontSize: 10 }}>为空（已禁用工具）</span>
+              )}
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ marginLeft: "auto", flexShrink: 0, transform: systemPromptExpanded ? "rotate(180deg)" : "none", transition: "transform 0.15s" }}>
+                <polyline points="6 9 12 15 18 9" />
+              </svg>
+            </button>
+            {systemPromptExpanded && (
+              <div style={{
+                padding: "8px 10px 10px",
+                borderTop: "1px solid var(--border)",
+                fontSize: 11,
+                lineHeight: 1.65,
+                color: "var(--text-muted)",
+                whiteSpace: "pre-wrap",
+                fontFamily: "var(--font-mono)",
+                maxHeight: 240,
+                overflowY: "auto",
+              }}>
+                {systemPrompt || "（空）"}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
       <div className="relative flex flex-1 overflow-hidden">
         <div
           ref={scrollContainerRef}

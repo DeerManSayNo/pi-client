@@ -10,6 +10,7 @@ import { ModelsConfig } from "./ModelsConfig";
 import { SkillsConfig } from "./SkillsConfig";
 import { SchedulerPanel } from "./SchedulerPanel";
 import { RoleConfig } from "./RoleConfig";
+import { SystemPromptConfig } from "./SystemPromptConfig";
 import { useTheme } from "@/hooks/useTheme";
 import type { SessionInfo } from "@/lib/types";
 import type { ChatInputHandle } from "./ChatInput";
@@ -68,7 +69,7 @@ export function AppShell() {
   const [modelsConfigOpen, setModelsConfigOpen] = useState(false);
   const [modelsRefreshKey, setModelsRefreshKey] = useState(0);
   const [skillsConfigOpen, setSkillsConfigOpen] = useState(false);
-  const [quickConfigOpen, setQuickConfigOpen] = useState<"memory" | "skill" | "role" | null>(null);
+  const [quickConfigOpen, setQuickConfigOpen] = useState<"memory" | "skill" | "role" | "systemPrompt" | null>(null);
   const [schedulerPanelOpen, setSchedulerPanelOpen] = useState(false);
   const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(new Set());
   const pendingSessionIdRef = useRef<string | null>(null);
@@ -89,13 +90,6 @@ export function AppShell() {
   const chatInputRef = useRef<ChatInputHandle | null>(null);
   const topBarRef = useRef<HTMLDivElement>(null);
 
-  const [systemPrompt, setSystemPrompt] = useState<string | null>(null);
-  const systemBtnRef = useRef<HTMLButtonElement>(null);
-
-  const handleSystemPromptChange = useCallback((prompt: string | null) => {
-    setSystemPrompt(prompt);
-  }, []);
-
   // Session stats (tokens + cost) — populated by ChatWindow, displayed in top bar
   const [sessionStats, setSessionStats] = useState<{ tokens: { input: number; output: number; cacheRead: number; cacheWrite: number }; cost?: number } | null>(null);
   const handleSessionStatsChange = useCallback((stats: { tokens: { input: number; output: number; cacheRead: number; cacheWrite: number }; cost?: number } | null) => {
@@ -107,26 +101,6 @@ export function AppShell() {
   const handleContextUsageChange = useCallback((usage: { percent: number | null; contextWindow: number; tokens: number | null } | null) => {
     setContextUsage(usage);
   }, []);
-
-  // Single active panel — only one dropdown open at a time
-  const [activeTopPanel, setActiveTopPanel] = useState<"system" | null>(null);
-  const [topPanelPos, setTopPanelPos] = useState<{ top: number; left: number; width: number } | null>(null);
-
-  const toggleTopPanel = useCallback((panel: "system") => {
-    setActiveTopPanel((cur) => cur === panel ? null : panel);
-  }, []);
-
-  useEffect(() => {
-    if (!activeTopPanel || !topBarRef.current) return;
-    const update = () => {
-      const rect = topBarRef.current!.getBoundingClientRect();
-      setTopPanelPos({ top: rect.bottom, left: rect.left, width: rect.width });
-    };
-    update();
-    const ro = new ResizeObserver(update);
-    ro.observe(topBarRef.current);
-    return () => ro.disconnect();
-  }, [activeTopPanel]);
 
   // Right panel — file tabs only
   const [fileTabs, setFileTabs] = useState<Tab[]>([]);
@@ -147,6 +121,7 @@ export function AppShell() {
   const [customCwds, setCustomCwds] = useState<string[]>([]);
   const [projectOptions, setProjectOptions] = useState<{ cwd: string; displayName: string }[]>([]);
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
+  const [settingsMenuOpen, setSettingsMenuOpen] = useState(false);
   const effectiveProjectCwd = selectedSession?.cwd ?? newSessionCwd ?? activeCwd ?? defaultCwd;
   const projectLocked = selectedSession !== null || pendingSession !== null;
   // True once the initial ?session= URL param has been resolved (or confirmed absent)
@@ -214,8 +189,6 @@ export function AppShell() {
       return prev;
     });
     setSessionKey((k) => k + 1);
-    setSystemPrompt(null);
-    setActiveTopPanel(null);
     router.replace("/", { scroll: false });
   }, [router]);
 
@@ -230,8 +203,6 @@ export function AppShell() {
       tab.id === activeSessionTabId && tab.path === "" ? { ...tab, cwd } : tab
     )));
     setSessionKey((k) => k + 1);
-    setSystemPrompt(null);
-    setActiveTopPanel(null);
     router.replace("/", { scroll: false });
   }, [activeSessionTabId, pendingSession, router, selectedSession]);
 
@@ -241,6 +212,13 @@ export function AppShell() {
     window.addEventListener("click", close);
     return () => window.removeEventListener("click", close);
   }, [projectPickerOpen]);
+
+  useEffect(() => {
+    if (!settingsMenuOpen) return;
+    const close = () => setSettingsMenuOpen(false);
+    window.addEventListener("click", close);
+    return () => window.removeEventListener("click", close);
+  }, [settingsMenuOpen]);
 
   const handleSelectSession = useCallback((session: SessionInfo, isRestore = false) => {
     // Do not clear pendingSession here: a newly-created session is not written
@@ -253,8 +231,6 @@ export function AppShell() {
       setSelectedSession(null);
       setActiveSessionTabId(session.id);
       setSessionKey((k) => k + 1);
-      setSystemPrompt(null);
-      setActiveTopPanel(null);
       router.replace("/", { scroll: false });
       return;
     }
@@ -273,7 +249,6 @@ export function AppShell() {
     setSelectedSession(session);
     setActiveSessionTabId(session.id);
     setSessionKey((k) => k + 1);
-    setSystemPrompt(null);
     setInitialSessionRestored(true);
     if (isRestore) {
       // Suppress the redundant sessionKey bump that would come from the
@@ -310,8 +285,6 @@ export function AppShell() {
     setSelectedSession(null);
     setNewSessionCwd(cwd);
     setSessionKey((k) => k + 1);
-    setSystemPrompt(null);
-    setActiveTopPanel(null);
     router.replace("/", { scroll: false });
   }, [router]);
 
@@ -342,8 +315,6 @@ export function AppShell() {
     setSelectedSession(null);
     setNewSessionCwd(cwd);
     setSessionKey((k) => k + 1);
-    setSystemPrompt(null);
-    setActiveTopPanel(null);
     router.replace("/", { scroll: false });
   }, [effectiveProjectCwd, router]);
 
@@ -439,8 +410,6 @@ export function AppShell() {
       setSelectedSession(null);
       setNewSessionCwd(cwd ?? null);
       setSessionKey((k) => k + 1);
-      setSystemPrompt(null);
-      setActiveTopPanel(null);
       router.replace("/", { scroll: false });
     }
   }, [selectedSession, router]);
@@ -491,7 +460,6 @@ export function AppShell() {
           setSelectedSession(nextSession);
           setActiveSessionTabId(nextSession.id);
           setSessionKey((k) => k + 1);
-          setSystemPrompt(null);
         } else {
           setSelectedSession(null);
           setActiveSessionTabId(null);
@@ -717,6 +685,171 @@ export function AppShell() {
           </svg>
         )}
       </button>
+      {/* Settings button */}
+      <button
+        data-tauri-drag-region="false"
+        onClick={(e) => { e.stopPropagation(); setSettingsMenuOpen((v) => !v); }}
+        title="设置"
+        aria-label="设置"
+        aria-haspopup="menu"
+        aria-expanded={settingsMenuOpen}
+        style={{
+          position: "absolute",
+          right: 68,
+          top: 2,
+          width: 24,
+          height: 24,
+          padding: 0,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          background: settingsMenuOpen ? "var(--bg-hover)" : "transparent",
+          border: "1px solid transparent",
+          borderRadius: 7,
+          color: settingsMenuOpen ? "var(--text)" : "var(--text-muted)",
+          cursor: "pointer",
+          transition: "color 0.12s, background 0.12s, border-color 0.12s",
+          WebkitAppRegion: "no-drag",
+        } as DraggableStyle}
+        onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; e.currentTarget.style.background = "var(--bg-hover)"; }}
+        onMouseLeave={(e) => { e.currentTarget.style.color = settingsMenuOpen ? "var(--text)" : "var(--text-muted)"; e.currentTarget.style.background = settingsMenuOpen ? "var(--bg-hover)" : "transparent"; }}
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <circle cx="12" cy="12" r="3" />
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+        </svg>
+      </button>
+      {/* Settings dropdown */}
+      {settingsMenuOpen && (
+        <div
+          role="menu"
+          style={{
+            position: "absolute",
+            top: 30,
+            right: 64,
+            width: 180,
+            maxHeight: 360,
+            overflowY: "auto",
+            padding: 6,
+            background: "var(--bg-panel)",
+            border: "1px solid var(--border)",
+            borderRadius: 10,
+            boxShadow: "0 14px 36px rgba(0,0,0,0.18)",
+            zIndex: 910,
+            WebkitAppRegion: "no-drag",
+          } as DraggableStyle}
+          onClick={(e) => e.stopPropagation()}
+        >
+          {([
+            {
+              label: "模型配置",
+              onClick: () => { setSettingsMenuOpen(false); setModelsConfigOpen(true); },
+              icon: (
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="4" y="4" width="16" height="16" rx="2" /><rect x="9" y="9" width="6" height="6" />
+                  <line x1="9" y1="1" x2="9" y2="4" /><line x1="15" y1="1" x2="15" y2="4" />
+                  <line x1="9" y1="20" x2="9" y2="23" /><line x1="15" y1="20" x2="15" y2="23" />
+                  <line x1="20" y1="9" x2="23" y2="9" /><line x1="20" y1="14" x2="23" y2="14" />
+                  <line x1="1" y1="9" x2="4" y2="9" /><line x1="1" y1="14" x2="4" y2="14" />
+                </svg>
+              ),
+            },
+            {
+              label: "技能配置",
+              disabled: !activeCwd && !selectedSession?.cwd && !newSessionCwd,
+              onClick: () => { setSettingsMenuOpen(false); setSkillsConfigOpen(true); },
+              icon: (
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M12 2L2 7l10 5 10-5-10-5z" />
+                  <path d="M2 17l10 5 10-5" />
+                  <path d="M2 12l10 5 10-5" />
+                </svg>
+              ),
+            },
+            {
+              label: "定时任务",
+              onClick: () => { setSettingsMenuOpen(false); setSchedulerPanelOpen(true); },
+              icon: (
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="12" cy="12" r="10" />
+                  <polyline points="12 6 12 12 16 14" />
+                </svg>
+              ),
+            },
+            {
+              label: "System Prompt",
+              onClick: () => { setSettingsMenuOpen(false); setQuickConfigOpen("systemPrompt"); },
+              icon: (
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M4 5h16" />
+                  <path d="M4 12h10" />
+                  <path d="M4 19h16" />
+                  <path d="M18 9l3 3-3 3" />
+                </svg>
+              ),
+            },
+            {
+              label: "角色",
+              onClick: () => { setSettingsMenuOpen(false); setQuickConfigOpen("role"); },
+              icon: (
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="12" cy="8" r="4" />
+                  <path d="M4 21a8 8 0 0 1 16 0" />
+                </svg>
+              ),
+            },
+            {
+              label: "记忆",
+              onClick: () => { setSettingsMenuOpen(false); setQuickConfigOpen("memory"); },
+              icon: (
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M4 6.5A2.5 2.5 0 0 1 6.5 4H20v16H6.5A2.5 2.5 0 0 1 4 17.5z" />
+                  <path d="M8 8h8" />
+                  <path d="M8 12h6" />
+                  <path d="M8 16h7" />
+                </svg>
+              ),
+            },
+            {
+              label: "技能",
+              onClick: () => { setSettingsMenuOpen(false); setQuickConfigOpen("skill"); },
+              icon: (
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M12 3l2.2 4.5L19 8.2l-3.5 3.4.8 4.8L12 14.1 7.7 16.4l.8-4.8L5 8.2l4.8-.7z" />
+                  <path d="M19 15l1 2 2 .3-1.5 1.4.4 2.1-1.9-1-1.9 1 .4-2.1L16 17.3l2-.3z" />
+                </svg>
+              ),
+            },
+          ] as { label: string; onClick: () => void; disabled?: boolean; icon: React.ReactNode }[]).map((item) => (
+            <button
+              key={item.label}
+              role="menuitem"
+              onClick={item.onClick}
+              disabled={item.disabled}
+              style={{
+                width: "100%",
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                padding: "8px 9px",
+                border: "none",
+                borderRadius: 8,
+                background: "transparent",
+                color: item.disabled ? "var(--text-dim)" : "var(--text-muted)",
+                cursor: item.disabled ? "default" : "pointer",
+                textAlign: "left",
+                fontSize: 12,
+                opacity: item.disabled ? 0.4 : 1,
+              }}
+              onMouseEnter={(e) => { if (!item.disabled) { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text)"; } }}
+              onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = item.disabled ? "var(--text-dim)" : "var(--text-muted)"; }}
+            >
+              {item.icon}
+              <span>{item.label}</span>
+            </button>
+          ))}
+        </div>
+      )}
       <button
         data-tauri-drag-region="false"
         onClick={(e) => {
@@ -849,32 +982,6 @@ export function AppShell() {
       <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minWidth: 0 }}>
         {/* Top bar with sidebar toggle */}
         <div ref={topBarRef} style={{ display: "flex", alignItems: "center", flexShrink: 0, borderBottom: "1px solid var(--border)", height: 36, background: "var(--bg-panel)" }}>
-          {/* System prompt icon — always visible */}
-          <button
-            ref={systemBtnRef}
-            onClick={() => toggleTopPanel("system")}
-            style={{
-              display: "flex", alignItems: "center", justifyContent: "center",
-              width: 30, height: 30, padding: 0,
-              background: activeTopPanel === "system" ? "var(--bg-selected)" : "transparent",
-              border: "none", borderRadius: 8,
-              cursor: "pointer",
-              color: activeTopPanel === "system" ? "var(--text)" : "var(--text-muted)",
-              marginLeft: 8, flexShrink: 0,
-              transition: "color 0.1s, background 0.1s",
-            }}
-            title="系统提示词"
-            aria-label="系统提示词"
-            onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text)"; }}
-            onMouseLeave={(e) => { e.currentTarget.style.background = activeTopPanel === "system" ? "var(--bg-selected)" : "transparent"; e.currentTarget.style.color = activeTopPanel === "system" ? "var(--text)" : "var(--text-muted)"; }}
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: systemPrompt ? "var(--accent)" : "currentColor" }}>
-              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-              <polyline points="14 2 14 8 20 8" />
-              <line x1="8" y1="13" x2="16" y2="13" />
-              <line x1="8" y1="17" x2="13" y2="17" />
-            </svg>
-          </button>
           {/* Session tabs */}
           {sessionTabs.length > 0 && (
             <div style={{ flex: 1, minWidth: 0, alignSelf: "stretch", display: "flex", alignItems: "stretch", overflowX: "auto", overflowY: "hidden", gap: 2 }}>
@@ -1051,46 +1158,6 @@ export function AppShell() {
               </div>
             );
           })()}
-          {/* Top panel dropdown — shared, only one active at a time */}
-          {activeTopPanel && topPanelPos && (
-            <div style={{
-              position: "fixed",
-              top: topPanelPos.top,
-              left: topPanelPos.left,
-              width: topPanelPos.width,
-              zIndex: 500,
-            }}>
-              {activeTopPanel === "system" && (
-                <div style={{
-                  background: "var(--bg-panel)",
-                  borderBottom: "1px solid var(--border)",
-                }}>
-                  {systemPrompt ? (
-                    <div style={{
-                      maxHeight: "min(600px, 75vh)",
-                      overflowY: "auto",
-                      padding: "12px 16px",
-                      color: "var(--text-muted)",
-                      fontSize: 12,
-                      lineHeight: 1.6,
-                      whiteSpace: "pre-wrap",
-                      fontFamily: "var(--font-mono)",
-                    }}>
-                      {systemPrompt}
-                    </div>
-                  ) : systemPrompt === "" ? (
-                    <div style={{ padding: "10px 16px", fontSize: 12, color: "var(--text-muted)", fontStyle: "italic" }}>
-                      系统提示词为空（已禁用工具）
-                    </div>
-                  ) : (
-                    <div style={{ padding: "10px 16px", fontSize: 12, color: "var(--text-muted)", fontStyle: "italic" }}>
-                      发送一条消息以加载系统提示词
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-          )}
 
         </div>
 
@@ -1432,7 +1499,6 @@ export function AppShell() {
                 onSessionForked={handleSessionForked}
                 modelsRefreshKey={modelsRefreshKey}
                 chatInputRef={chatInputRef}
-                onSystemPromptChange={handleSystemPromptChange}
                 onSessionStatsChange={handleSessionStatsChange}
                 onContextUsageChange={handleContextUsageChange}
                 onOpenFile={handleOpenFile}
@@ -1492,13 +1558,17 @@ export function AppShell() {
       <SchedulerPanel onClose={() => setSchedulerPanelOpen(false)} cwd={activeCwd ?? selectedSession?.cwd ?? newSessionCwd ?? undefined} />
     )}
     {quickConfigOpen === "role" && <RoleConfig onClose={() => setQuickConfigOpen(null)} />}
-    {quickConfigOpen && quickConfigOpen !== "role" && (() => {
-      const title = quickConfigOpen === "memory" ? "记忆" : quickConfigOpen === "skill" ? "技能" : "角色";
+    {quickConfigOpen === "systemPrompt" && (
+      <SystemPromptConfig
+        onClose={() => setQuickConfigOpen(null)}
+        sessionId={selectedSession?.id ?? null}
+      />
+    )}
+    {quickConfigOpen && quickConfigOpen !== "role" && quickConfigOpen !== "systemPrompt" && (() => {
+      const title = quickConfigOpen === "memory" ? "记忆" : "技能";
       const desc = quickConfigOpen === "memory"
         ? "用于管理 Agent 的长期记忆与偏好。"
-        : quickConfigOpen === "skill"
-          ? "用于管理快捷技能入口。"
-          : "用于管理 Agent 角色与人格设定。";
+        : "用于管理快捷技能入口。";
       return (
         <div
           role="dialog"

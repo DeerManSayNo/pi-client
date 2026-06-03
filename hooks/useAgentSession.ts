@@ -872,6 +872,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     handleSend, handleAbort, handleFork, handleModelChange,
     handleCompact, handleSteer, handleFollowUp, handleAbortCompaction,
     handleToolPresetChange, handleThinkingLevelChange, loadTools, setData, setMessages,
+    setSystemPrompt,
     dispatch, setAgentRunning, setForkingEntryId,
     // Subscriptions
     handleAgentEventRef,

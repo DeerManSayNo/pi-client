@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { addAllowedRoot } from "@/lib/file-access";
-import { resolveSessionPath } from "@/lib/session-reader";
+import { resolveSessionPath, buildSessionContext } from "@/lib/session-reader";
 import { startRpcSession, getRpcSession } from "@/lib/rpc-manager";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 
@@ -26,9 +26,11 @@ export async function POST(
       return NextResponse.json({ error: "Session not found" }, { status: 404 });
     }
 
-    const cwd = SessionManager.open(filePath).getHeader()?.cwd ?? process.cwd();
+    const sm = SessionManager.open(filePath);
+    const cwd = sm.getHeader()?.cwd ?? process.cwd();
+    const context = buildSessionContext(sm.getEntries() as never, sm.getLeafId());
 
-    const { session } = await startRpcSession(id, filePath, cwd);
+    const { session } = await startRpcSession(id, filePath, cwd, undefined, context.roleId ?? null);
     addAllowedRoot(cwd);
     const result = await session.send(body);
 
