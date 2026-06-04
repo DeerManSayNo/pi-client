@@ -823,7 +823,10 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
               <button
                 key={skill.name}
                 type="button"
-                onClick={() => selectSkill(skill)}
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  selectSkill(skill);
+                }}
                 title={skill.description ? `${skill.name} — ${skill.description}` : skill.name}
                 style={{
                   flexShrink: 0,

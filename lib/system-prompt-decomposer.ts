@@ -42,6 +42,8 @@ export interface SystemPromptVersion {
 export interface SystemPromptGlobalConfig {
   version: 1;
   sections: Pick<SystemPromptSection, "id" | "enabled" | "content">[];
+  /** Skill names allowed for this role. null/undefined = all globally-enabled skills. [] = none. */
+  skillNames?: string[] | null;
   activeVersionId?: string | null;
   updatedAt: string;
 }
@@ -423,6 +425,48 @@ export function deleteVersion(versionId: string): boolean {
 }
 
 /**
+ * Filter the skills section in a system prompt to only include allowed skill names.
+ * If allowedSkillNames is null/undefined, all skills pass through.
+ * If allowedSkillNames is [], the entire <available_skills> block is removed.
+ * Works on the full prompt text by parsing the <available_skills> block.
+ */
+export function filterSkillsInPrompt(prompt: string, allowedSkillNames: string[] | null | undefined): string {
+  if (allowedSkillNames === null || allowedSkillNames === undefined) return prompt;
+
+  const skillsTag = "<available_skills>";
+  const skillsCloseTag = "</available_skills>";
+  const startIdx = prompt.indexOf(skillsTag);
+  if (startIdx === -1) return prompt;
+  const endIdx = prompt.indexOf(skillsCloseTag, startIdx);
+  if (endIdx === -1) return prompt;
+
+  const before = prompt.slice(0, startIdx);
+  const skillsBlock = prompt.slice(startIdx + skillsTag.length, endIdx);
+  const after = prompt.slice(endIdx + skillsCloseTag.length);
+
+  // Parse individual <skill>...</skill> entries
+  const allowed = new Set(allowedSkillNames);
+  const keptSkills: string[] = [];
+  const skillRegex = /( *)<skill>\n([\s\S]*?) *<\/skill>/g;
+  let match: RegExpExecArray | null;
+  while ((match = skillRegex.exec(skillsBlock)) !== null) {
+    const indent = match[1] ?? "";
+    const inner = match[2];
+    const nameMatch = inner.match(/<name>([^<]+)<\/name>/);
+    if (nameMatch && allowed.has(nameMatch[1].trim())) {
+      keptSkills.push(`${indent}<skill>\n${inner.trimEnd()}\n${indent}</skill>`);
+    }
+  }
+
+  if (keptSkills.length === 0) {
+    // Remove the entire skills section, trim trailing newlines
+    return (before.trimEnd() + "\n\n" + after.trimStart()).trim();
+  }
+
+  return before + skillsTag + "\n" + keptSkills.join("\n") + "\n" + skillsCloseTag + after;
+}
+
+/**
  * Apply a version's section config to a set of live sections.
  * Returns the merged sections: live content from the current prompt,
  * but with enabled/disabled toggles and editable content from the version.
@@ -464,6 +508,7 @@ export function readRoleSystemPromptConfig(roleId?: string | null): SystemPrompt
         return {
           version: 1,
           sections: Array.isArray(config.sections) ? config.sections : [],
+          skillNames: config.skillNames ?? null,
           activeVersionId: config.activeVersionId ?? null,
           updatedAt: config.updatedAt ?? nowIso(),
         };
@@ -472,11 +517,12 @@ export function readRoleSystemPromptConfig(roleId?: string | null): SystemPrompt
   }
   // Backward compatibility: the old global config becomes the default role config.
   if (normalized === DEFAULT_ROLE_ID) return readGlobalSystemPromptConfig();
-  return { version: 1, sections: [], activeVersionId: null, updatedAt: nowIso() };
+  return { version: 1, sections: [], skillNames: null, activeVersionId: null, updatedAt: nowIso() };
 }
 
 export function writeRoleSystemPromptConfig(roleId: string | null | undefined, input: {
   sections: Pick<SystemPromptSection, "id" | "enabled" | "content">[];
+  skillNames?: string[] | null;
   activeVersionId?: string | null;
 }): SystemPromptGlobalConfig {
   const normalized = normalizeRoleId(roleId);
@@ -491,6 +537,7 @@ export function writeRoleSystemPromptConfig(roleId: string | null | undefined, i
   const config: SystemPromptGlobalConfig = {
     version: 1,
     sections: input.sections,
+    skillNames: input.skillNames ?? null,
     activeVersionId: input.activeVersionId ?? null,
     updatedAt: nowIso(),
   };
@@ -544,10 +591,15 @@ export function isRoleSystemPromptSectionEnabled(roleId: string | null | undefin
 
 export function applyRolePromptConfigToPrompt(prompt: string, roleId?: string | null): string {
   const config = readRoleSystemPromptConfig(roleId);
-  if (config.sections.length === 0) return prompt;
-  const live = decomposeSystemPrompt(prompt);
-  const merged = applySectionOverrides(live, config.sections);
-  return composeSystemPrompt(merged);
+  let result = prompt;
+  if (config.sections.length > 0) {
+    const live = decomposeSystemPrompt(prompt);
+    const merged = applySectionOverrides(live, config.sections);
+    result = composeSystemPrompt(merged);
+  }
+  // Apply per-role skill filter (null = all, [] = none, ["a","b"] = only those)
+  result = filterSkillsInPrompt(result, config.skillNames);
+  return result;
 }
 
 export function isGlobalSystemPromptSectionEnabled(sectionId: string): boolean {

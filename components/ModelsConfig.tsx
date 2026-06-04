@@ -124,8 +124,8 @@ interface ModelsJson {
 type ModelTestState =
   | { phase: "idle" }
   | { phase: "testing" }
-  | { phase: "success"; latencyMs?: number; status?: number; responseText?: string }
-  | { phase: "error"; message: string; latencyMs?: number; status?: number };
+  | { phase: "success"; latencyMs?: number; status?: number; responseText?: string; testMode?: string }
+  | { phase: "error"; message: string; latencyMs?: number; status?: number; testMode?: string };
 
 type Selection =
   | { type: "provider"; name: string }
@@ -499,6 +499,8 @@ function ModelDetail({
   onDelete: () => void;
 }) {
   const [testState, setTestState] = useState<ModelTestState>({ phase: "idle" });
+  const [testMode, setTestMode] = useState<"text" | "image">("text");
+  const hasImageInput = model.input?.includes("image") ?? false;
   const set = <K extends keyof ModelEntry>(k: K, v: ModelEntry[K]) => onChange({ ...model, [k]: v });
   const costVal = (k: keyof NonNullable<ModelEntry["cost"]>) => model.cost?.[k] !== undefined ? String(model.cost[k]) : "";
   const setCost = (k: keyof NonNullable<ModelEntry["cost"]>, v: string) => {
@@ -512,10 +514,11 @@ function ModelDetail({
       testState.latencyMs !== undefined ? `${testState.latencyMs}ms` : null,
       testState.status !== undefined ? `HTTP ${testState.status}` : null,
     ].filter(Boolean);
+    const modeLabel = testState.testMode === "image" ? "图片测试" : "";
     if (testState.phase === "success") {
-      return ["连接成功", ...meta, testState.responseText || null].filter(Boolean).join(" · ");
+      return ["连接成功", modeLabel || null, ...meta, testState.responseText || null].filter(Boolean).join(" · ");
     }
-    return ["连接失败", ...meta, testState.message].filter(Boolean).join(" · ");
+    return ["连接失败", modeLabel || null, ...meta, testState.message].filter(Boolean).join(" · ");
   })();
 
   useEffect(() => {
@@ -529,7 +532,7 @@ function ModelDetail({
       const res = await fetch("/api/models-config/test", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ providerName, provider, model }),
+        body: JSON.stringify({ providerName, provider, model, testMode }),
       });
       const d = await res.json() as {
         ok?: boolean;
@@ -544,6 +547,7 @@ function ModelDetail({
           message: d.error ?? `HTTP ${res.status}`,
           latencyMs: d.latencyMs,
           status: d.status,
+          testMode,
         });
         return;
       }
@@ -552,11 +556,12 @@ function ModelDetail({
         latencyMs: d.latencyMs,
         status: d.status,
         responseText: d.responseText,
+        testMode,
       });
     } catch (e) {
-      setTestState({ phase: "error", message: e instanceof Error ? e.message : String(e) });
+      setTestState({ phase: "error", message: e instanceof Error ? e.message : String(e), testMode });
     }
-  }, [model, provider, providerName, testState.phase]);
+  }, [model, provider, providerName, testState.phase, testMode]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
@@ -586,13 +591,62 @@ function ModelDetail({
               {testSummary}
             </span>
           )}
+          {/* Test mode toggle: text / image */}
+          {hasImageInput && testState.phase !== "testing" && (
+            <div style={{
+              display: "flex",
+              borderRadius: 4,
+              border: "1px solid var(--border)",
+              overflow: "hidden",
+              flexShrink: 0,
+              height: 24,
+            }}>
+              {(["text", "image"] as const).map((mode) => (
+                <button
+                  key={mode}
+                  onClick={() => setTestMode(mode)}
+                  title={mode === "text" ? "纯文本测试" : "图片输入测试"}
+                  style={{
+                    padding: "0 8px",
+                    height: "100%",
+                    background: testMode === mode ? "var(--accent)" : "transparent",
+                    border: "none",
+                    color: testMode === mode ? "#fff" : "var(--text-dim)",
+                    cursor: "pointer",
+                    fontSize: 11,
+                    fontWeight: testMode === mode ? 600 : 400,
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 4,
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {mode === "image" ? (
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+                      <circle cx="8.5" cy="8.5" r="1.5" />
+                      <polyline points="21 15 16 10 5 21" />
+                    </svg>
+                  ) : (
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <polyline points="4 7 4 4 20 4 20 7" />
+                      <line x1="9" y1="20" x2="15" y2="20" />
+                      <line x1="12" y1="4" x2="12" y2="20" />
+                    </svg>
+                  )}
+                  {mode === "text" ? "文本" : "图片"}
+                </button>
+              ))}
+            </div>
+          )}
+
           <button
             onClick={handleTest}
             disabled={!model.id.trim() || testState.phase === "testing"}
-            title="测试模型连接"
+            title={testMode === "image" ? "测试图片输入能力" : "测试模型连接"}
             style={{
               height: 24,
-              padding: "0 8px",
+              padding: "0 10px",
               background: testState.phase === "success" ? "#16a34a" : "none",
               border: `1px solid ${testState.phase === "success" ? "#16a34a" : "var(--border)"}`,
               borderRadius: 4,
@@ -606,6 +660,15 @@ function ModelDetail({
               gap: 5,
             }}
           >
+            {testState.phase === "testing" && (
+              testMode === "image" ? (
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+                  <circle cx="8.5" cy="8.5" r="1.5" />
+                  <polyline points="21 15 16 10 5 21" />
+                </svg>
+              ) : null
+            )}
             {testState.phase === "success" && (
               <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
                 <polyline points="20 6 9 17 4 12" />

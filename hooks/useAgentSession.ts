@@ -716,12 +716,19 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // stale hit only reconnects SSE; if both frontend and backend remain stale on
   // the next hit, treat `isStreaming=true` as unreliable, abort the stuck run,
   // reload the session, and send one automatic "continue" follow-up.
+  //
+  // If the backend reports that the session has already stopped (isStreaming
+  // is false or the session wrapper is gone), just reload the data and stop
+  // the UI — do NOT send "continue", because the turn has already ended.
   useEffect(() => {
     if (!agentRunning) return;
     const STALE_EVENT_MS = WATCHDOG_STALE_EVENT_MS;
     const STALE_CONTENT_MS = WATCHDOG_STALE_CONTENT_MS;
     const CHECK_INTERVAL_MS = WATCHDOG_CHECK_INTERVAL_MS;
 
+    // Recovery for genuinely stuck sessions (backend still thinks it's
+    // streaming but no progress is being made). Aborts first, then
+    // reloads and sends "continue" so the model picks up where it left off.
     const recoverWithContinue = async (sid: string, abortFirst: boolean) => {
       if (abortFirst) {
         try {
@@ -759,6 +766,20 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
     };
 
+    // Recovery for sessions that the backend says have already finished.
+    // This happens when the frontend missed the `agent_end` SSE event
+    // (e.g. backgrounded tab, network hiccup) or the RPC wrapper was
+    // destroyed by idle timeout. Just reload data from disk and stop the
+    // UI — no need (and harmful) to send "continue".
+    const recoverStop = async (sid: string) => {
+      await loadSession(sid);
+      agentRunningRef.current = false;
+      setAgentRunning(false);
+      setAgentPhase(null);
+      dispatch({ type: "end" });
+      autoContinueSentRef.current = false;
+    };
+
     const id = setInterval(async () => {
       const sid = sessionIdRef.current;
       if (!sid || !agentRunningRef.current || watchdogCheckingRef.current) return;
@@ -794,11 +815,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             return;
           }
 
+          // Both frontend and backend agree the session is stuck while the
+          // backend still thinks it's streaming — abort and send "continue".
           await recoverWithContinue(sid, true);
           return;
         }
 
-        await recoverWithContinue(sid, false);
+        // Backend reports session has already finished (isStreaming is false
+        // or the RPC wrapper is gone). The turn ended — just reload and stop.
+        await recoverStop(sid);
       } catch (e) {
         console.error("Agent watchdog failed:", e);
       } finally {

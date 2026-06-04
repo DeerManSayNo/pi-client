@@ -33,7 +33,7 @@ function notifyRolesUpdated() {
   window.dispatchEvent(new Event("pi-agent.roles-updated"));
 }
 
-export function RoleConfig({ onClose }: { onClose: () => void }) {
+export function RoleConfig({ onClose, cwd }: { onClose: () => void; cwd?: string }) {
   const [roles, setRoles] = useState<AgentRole[]>([]);
   const [selectedRoleId, setSelectedRoleId] = useState("default");
   const [loading, setLoading] = useState(true);
@@ -232,6 +232,7 @@ export function RoleConfig({ onClose }: { onClose: () => void }) {
           <SystemPromptConfig
             roleId={systemPromptRole.id}
             roleName={systemPromptRole.name}
+            cwd={cwd}
             onClose={() => setSystemPromptRole(null)}
           />
         </div>

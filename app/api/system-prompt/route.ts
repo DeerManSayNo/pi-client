@@ -7,19 +7,40 @@ import {
   readVersions,
   writeRoleSystemPromptConfig,
 } from "@/lib/system-prompt-decomposer";
+import { DefaultResourceLoader, getAgentDir } from "@earendil-works/pi-coding-agent";
 
 function roleIdFromUrl(req: Request): string {
   return new URL(req.url).searchParams.get("roleId") || "default";
 }
 
 export async function GET(req: Request) {
-  const roleId = roleIdFromUrl(req);
+  const url = new URL(req.url);
+  const roleId = url.searchParams.get("roleId") || "default";
+  const cwd = url.searchParams.get("cwd");
+
   const config = readRoleSystemPromptConfig(roleId);
   const sections = applySectionOverrides(getDefaultSystemPromptSections(), config.sections);
+
+  // Load available skills for the current project
+  let availableSkills: { name: string; description: string; disabled: boolean }[] = [];
+  if (cwd) {
+    try {
+      const loader = new DefaultResourceLoader({ cwd, agentDir: getAgentDir() });
+      await loader.reload();
+      const { skills } = loader.getSkills();
+      availableSkills = skills.map((s) => ({
+        name: s.name,
+        description: s.description,
+        disabled: Boolean(s.disableModelInvocation),
+      }));
+    } catch { /* skills unavailable */ }
+  }
+
   return NextResponse.json({
     roleId,
     sections,
-    config,
+    config: { ...config, skillNames: config.skillNames ?? null },
+    availableSkills,
     versions: readVersions(roleId),
   });
 }
@@ -29,11 +50,13 @@ export async function PATCH(req: Request) {
   try {
     const body = await req.json() as {
       sections?: { id: string; enabled: boolean; content: string }[];
+      skillNames?: string[] | null;
       activeVersionId?: string | null;
     };
 
     const config = writeRoleSystemPromptConfig(roleId, {
       sections: body.sections ?? [],
+      skillNames: body.skillNames,
       activeVersionId: body.activeVersionId ?? null,
     });
 

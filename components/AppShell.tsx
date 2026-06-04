@@ -1559,6 +1559,15 @@ export function AppShell() {
           background: "var(--bg)",
         }}
       >
+        {/* File tabs */}
+        {fileTabs.length > 0 && (
+          <TabBar
+            tabs={fileTabs}
+            activeTabId={activeFileTabId ?? ""}
+            onSelectTab={(id) => setActiveFileTabId(id)}
+            onCloseTab={handleCloseFileTab}
+          />
+        )}
         {/* File content */}
         <div style={{ flex: 1, overflow: "hidden" }}>
           {activeFileTab?.filePath ? (
@@ -1578,7 +1587,7 @@ export function AppShell() {
     {schedulerPanelOpen && (
       <SchedulerPanel onClose={() => setSchedulerPanelOpen(false)} cwd={activeCwd ?? selectedSession?.cwd ?? newSessionCwd ?? undefined} />
     )}
-    {quickConfigOpen === "role" && <RoleConfig onClose={() => setQuickConfigOpen(null)} />}
+    {quickConfigOpen === "role" && <RoleConfig onClose={() => setQuickConfigOpen(null)} cwd={activeCwd ?? selectedSession?.cwd ?? newSessionCwd ?? undefined} />}
     {quickConfigOpen === "memory" && <MemoryConfig onClose={() => setQuickConfigOpen(null)} />}
     {quickConfigOpen === "mcp" && <McpConfig onClose={() => setQuickConfigOpen(null)} />}
     </>

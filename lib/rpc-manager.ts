@@ -1,10 +1,13 @@
 import path from "path";
-import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, defineTool, SessionManager } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
 import { cacheSessionPath } from "./session-reader";
 import type { AgentSessionLike, ToolInfo } from "./pi-types";
 import { getLiveIslandClient } from "./live-island-client";
 import { applyRolePromptToSystemPrompt } from "./roles";
 import { applyRolePromptConfigToPrompt, isRoleSystemPromptSectionEnabled } from "./system-prompt-decomposer";
+import { indexExists } from "./code-index/database";
+import { searchIndex } from "./code-index/search";
 
 // ============================================================================
 // Types
@@ -82,6 +85,43 @@ function setEffectiveSystemPrompt(session: AgentSessionLike, prompt: string): vo
   // the UI preview looks correct but the next new prompt silently uses the old
   // built-in prompt again. Keep the base prompt in sync as well.
   (session as unknown as { _baseSystemPrompt?: string })._baseSystemPrompt = prompt;
+}
+
+const TOOL_EXECUTION_MODES: Record<string, "parallel" | "sequential"> = {
+  read: "parallel",
+  grep: "parallel",
+  find: "parallel",
+  ls: "parallel",
+  code_search: "parallel",
+  bash: "sequential",
+  edit: "sequential",
+  write: "sequential",
+};
+
+export function configureToolExecutionModes(session: AgentSessionLike): void {
+  const forceSequential = process.env.PI_DISABLE_PARALLEL_TOOLS === "1" || process.env.PI_DISABLE_PARALLEL_TOOLS === "true";
+  if (forceSequential) {
+    (session.agent as unknown as { toolExecution?: "parallel" | "sequential" }).toolExecution = "sequential";
+  }
+
+  const resolveMode = (name: string) => forceSequential ? "sequential" : TOOL_EXECUTION_MODES[name];
+  const registry = (session as unknown as { _toolRegistry?: Map<string, { name: string; executionMode?: "parallel" | "sequential" }> })._toolRegistry;
+  for (const [name, tool] of registry ?? []) {
+    const mode = resolveMode(name);
+    if (mode) tool.executionMode = mode;
+  }
+
+  const definitions = (session as unknown as { _toolDefinitions?: Map<string, { definition?: { executionMode?: "parallel" | "sequential" } }> })._toolDefinitions;
+  for (const [name, entry] of definitions ?? []) {
+    const mode = resolveMode(name);
+    if (mode && entry.definition) entry.definition.executionMode = mode;
+  }
+
+  const activeTools = (session.agent.state as { tools?: Array<{ name: string; executionMode?: "parallel" | "sequential" }> } | undefined)?.tools;
+  for (const tool of activeTools ?? []) {
+    const mode = resolveMode(tool.name);
+    if (mode) tool.executionMode = mode;
+  }
 }
 
 // ============================================================================
@@ -505,9 +545,34 @@ export async function startRpcSession(
     // Since v0.68.0, createAgentSession expects string[] tool names instead of Tool[] instances.
     // Pass all built-in coding tool names by default; for "all off", pass empty array.
     const allCodingToolNames = ["read", "bash", "edit", "write", "grep", "find", "ls"];
+    const hasCodeIndex = indexExists(cwd);
+    const codeSearchTool = hasCodeIndex ? defineTool({
+      name: "code_search",
+      label: "Code Search",
+      description: "Search the codebase using a pre-built index. Returns file paths, line ranges, and concise code snippets.",
+      promptSnippet: "code_search: Search the indexed codebase by keywords and get file paths, line ranges, and snippets.",
+      parameters: Type.Object({
+        query: Type.String({ description: "Search query keywords" }),
+        path: Type.Optional(Type.String({ description: "Restrict to files under this relative path" })),
+        limit: Type.Optional(Type.Number({ description: "Maximum results, default 20" })),
+      }),
+      executionMode: "parallel" as const,
+      execute: async (_toolCallId, params, signal) => {
+        const results = await searchIndex(cwd, params.query, {
+          path: params.path,
+          limit: params.limit ?? 20,
+          signal,
+        });
+        const text = results.length
+          ? results.map(r => `${r.path}:${r.startLine}-${r.endLine} (score ${r.score})\n${r.snippet}`).join("\n\n")
+          : `No indexed results for: ${params.query}`;
+        return { content: [{ type: "text" as const, text }], details: undefined };
+      },
+    }) : null;
+    const availableToolNames = codeSearchTool ? [...allCodingToolNames, "code_search"] : allCodingToolNames;
     let toolsOption: string[] | undefined;
     if (toolNames !== undefined) {
-      toolsOption = toolNames.length === 0 ? [] : allCodingToolNames;
+      toolsOption = toolNames.length === 0 ? [] : availableToolNames;
     }
 
     const { session: inner } = await createAgentSession({
@@ -515,11 +580,15 @@ export async function startRpcSession(
       agentDir,
       sessionManager,
       ...(toolsOption !== undefined ? { tools: toolsOption } : {}),
+      ...(codeSearchTool ? { customTools: [codeSearchTool] } : {}),
     });
+
+    configureToolExecutionModes(inner);
 
     // If specific tool names were requested (non-empty), narrow active tools now
     if (toolNames && toolNames.length > 0) {
-      inner.setActiveToolsByName(toolNames);
+      const knownTools = new Set(inner.getAllTools().map((tool: ToolInfo) => tool.name));
+      inner.setActiveToolsByName(toolNames.filter(name => knownTools.has(name)));
     }
 
     // When all tools are disabled, clear the system prompt entirely.

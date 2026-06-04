@@ -29,6 +29,7 @@ interface Props {
   roleId: string;
   roleName?: string;
   sessionId?: string | null;
+  cwd?: string;
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -44,12 +45,15 @@ function composePrompt(sections: SystemPromptSection[]): string {
 
 // ── Component ──────────────────────────────────────────────────────────────
 
-export function SystemPromptConfig({ onClose, roleId, roleName }: Props) {
+export function SystemPromptConfig({ onClose, roleId, roleName, cwd }: Props) {
   const [sections, setSections] = useState<SystemPromptSection[]>([]);
   const [versions, setVersions] = useState<SystemPromptVersion[]>([]);
   const [loading, setLoading] = useState(true);
   const [savingGlobal, setSavingGlobal] = useState(false);
   const [saved, setSaved] = useState(false);
+  // Skills
+  const [availableSkills, setAvailableSkills] = useState<{ name: string; description: string; disabled: boolean }[]>([]);
+  const [selectedSkillNames, setSelectedSkillNames] = useState<string[] | null>(null);
 
   // Version form
   const [saveOpen, setSaveOpen] = useState(false);
@@ -73,18 +77,25 @@ export function SystemPromptConfig({ onClose, roleId, roleName }: Props) {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch(`/api/system-prompt?roleId=${encodeURIComponent(roleId)}`, { cache: "no-store" });
+      const params = new URLSearchParams();
+      params.set("roleId", roleId);
+      if (cwd) params.set("cwd", cwd);
+      const res = await fetch(`/api/system-prompt?${params.toString()}`, { cache: "no-store" });
       if (!res.ok) return;
       const data = await res.json() as {
         sections: SystemPromptSection[] | null;
         versions: SystemPromptVersion[];
+        config?: { skillNames?: string[] | null };
+        availableSkills?: { name: string; description: string; disabled: boolean }[];
       };
       if (data.sections) setSections(data.sections);
       setVersions(data.versions ?? []);
+      setAvailableSkills(data.availableSkills ?? []);
+      setSelectedSkillNames(data.config?.skillNames ?? null);
     } finally {
       setLoading(false);
     }
-  }, [roleId]);
+  }, [roleId, cwd]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -116,6 +127,7 @@ export function SystemPromptConfig({ onClose, roleId, roleName }: Props) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           sections: sections.map((s) => ({ id: s.id, enabled: s.enabled, content: s.content })),
+          skillNames: selectedSkillNames,
         }),
       });
       if (res.ok) {
@@ -125,7 +137,7 @@ export function SystemPromptConfig({ onClose, roleId, roleName }: Props) {
     } finally {
       setSavingGlobal(false);
     }
-  }, [sections, roleId]);
+  }, [sections, roleId, selectedSkillNames]);
 
   // ── Version CRUD ──────────────────────────────────────────────────────
 
@@ -681,6 +693,148 @@ export function SystemPromptConfig({ onClose, roleId, roleName }: Props) {
                   </div>
                 );
               })}
+
+              {/* Skills toggle section */}
+              {availableSkills.length > 0 && (
+                <div
+                  style={{
+                    marginTop: 18,
+                    border: "1px solid var(--border)",
+                    borderRadius: 10,
+                    overflow: "hidden",
+                  }}
+                >
+                  <div
+                    style={{
+                      padding: "10px 14px",
+                      borderBottom: "1px solid var(--border)",
+                      fontSize: 12,
+                      fontWeight: 700,
+                      color: "var(--text-muted)",
+                      background: "var(--bg-panel)",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 6,
+                    }}
+                  >
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
+                    </svg>
+                    可用技能
+                    <span style={{ fontSize: 11, fontWeight: 400, color: "var(--text-dim)", marginLeft: 4 }}>
+                      (勾选的技能将注入当前角色的 System Prompt)
+                    </span>
+                  </div>
+                  <div style={{ padding: "10px 14px" }}>
+                    {/* "全选" toggle */}
+                    <label
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 8,
+                        padding: "6px 0",
+                        marginBottom: 6,
+                        borderBottom: "1px solid var(--border)",
+                        cursor: "pointer",
+                        fontSize: 12,
+                        color: "var(--text-dim)",
+                      }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={selectedSkillNames === null}
+                        onChange={() => {
+                          if (selectedSkillNames === null) {
+                            setSelectedSkillNames([]);
+                            setSaved(false);
+                          } else {
+                            setSelectedSkillNames(null);
+                            setSaved(false);
+                          }
+                        }}
+                        style={{ accentColor: "var(--accent)" }}
+                      />
+                      <span style={{ fontWeight: selectedSkillNames === null ? 600 : 400 }}>
+                        使用所有启用的技能（默认）
+                      </span>
+                    </label>
+                    {/* Individual skill toggles */}
+                    <div style={{ display: "flex", flexDirection: "column", gap: 4, maxHeight: 240, overflowY: "auto" }}>
+                      {availableSkills.map((skill) => {
+                        const isChecked = selectedSkillNames === null || selectedSkillNames.includes(skill.name);
+                        const isGloballyDisabled = skill.disabled;
+                        return (
+                          <label
+                            key={skill.name}
+                            style={{
+                              display: "flex",
+                              alignItems: "flex-start",
+                              gap: 8,
+                              padding: "6px 4px",
+                              borderRadius: 6,
+                              cursor: isGloballyDisabled ? "not-allowed" : "pointer",
+                              opacity: isGloballyDisabled ? 0.45 : 1,
+                            }}
+                            onMouseEnter={(e) => {
+                              if (!isGloballyDisabled) e.currentTarget.style.background = "var(--bg-hover)";
+                            }}
+                            onMouseLeave={(e) => {
+                              e.currentTarget.style.background = "transparent";
+                            }}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={isChecked}
+                              disabled={isGloballyDisabled}
+                              onChange={() => {
+                                setSaved(false);
+                                setSelectedSkillNames((prev) => {
+                                  const current = prev ?? availableSkills.map((s) => s.name);
+                                  if (current.includes(skill.name)) {
+                                    return current.filter((n) => n !== skill.name);
+                                  } else {
+                                    return [...current, skill.name];
+                                  }
+                                });
+                              }}
+                              style={{ accentColor: "var(--accent)", marginTop: 2, flexShrink: 0 }}
+                            />
+                            <div style={{ minWidth: 0 }}>
+                              <div
+                                style={{
+                                  fontSize: 12,
+                                  fontWeight: 500,
+                                  color: isGloballyDisabled ? "var(--text-dim)" : "var(--text)",
+                                  fontFamily: "var(--font-mono)",
+                                }}
+                              >
+                                {skill.name}
+                              </div>
+                              <div
+                                style={{
+                                  fontSize: 11,
+                                  color: "var(--text-dim)",
+                                  marginTop: 1,
+                                  overflow: "hidden",
+                                  textOverflow: "ellipsis",
+                                  whiteSpace: "nowrap",
+                                }}
+                              >
+                                {skill.description}
+                                {isGloballyDisabled && (
+                                  <span style={{ color: "#f87171", marginLeft: 6, fontWeight: 600 }}>
+                                    (全局已禁用)
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+              )}
 
               {/* Composed preview */}
               <div
