@@ -285,9 +285,13 @@ export class AgentSessionWrapper {
         if (command.message) {
           getLiveIslandClient().recordPrompt(this.inner.sessionId, command.message as string);
         }
-        // Fire and forget — events come via subscribe
+        // Fire and forget — events come via subscribe.
+        // But if prompt() rejects immediately (e.g. session destroyed), emit error to listeners.
         const promptImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
-        this.inner.prompt(command.message as string, promptImages?.length ? { images: promptImages } : undefined).catch(() => {});
+        this.inner.prompt(command.message as string, promptImages?.length ? { images: promptImages } : undefined).catch((err: unknown) => {
+          const msg = err instanceof Error ? err.message : String(err);
+          for (const l of this.listeners) l({ type: "agent_end", messages: [], willRetry: false, error: msg });
+        });
         return null;
       }
 

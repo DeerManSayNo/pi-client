@@ -123,7 +123,7 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, onAgentEnd, on
     loading, error, data, messages, entryIds, streamState,
     agentRunning, modelNames, modelList, modelThinkingLevels, modelThinkingLevelMaps, toolPreset, thinkingLevel,
     retryInfo, contextUsage, forkingEntryId, watchdogInfo,
-    isCompacting, compactError, displayModel: displayModelValue, sessionStats,
+    isCompacting, compactError, lastModelError, displayModel: displayModelValue, sessionStats,
     agentPhase,
     isNew,
     messagesEndRef, scrollContainerRef,
@@ -131,7 +131,7 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, onAgentEnd, on
     handleSend, handleAbort, handleFork, handleModelChange,
     handleCompact, handleSteer, handleFollowUp, handleAbortCompaction,
     handleToolPresetChange, handleThinkingLevelChange, handleAgentEventRef,
-    systemPrompt, setSystemPrompt,
+    systemPrompt, setSystemPrompt, setLastModelError,
   } = useAgentSession({
     session, newSessionCwd, onAgentEnd: wrappedOnAgentEnd, onSessionCreated, onSessionStarted, onSessionForked,
     modelsRefreshKey,
@@ -417,6 +417,8 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, onAgentEnd, on
       onAbortCompaction={handleAbortCompaction}
       isCompacting={isCompacting}
       compactError={compactError}
+      lastModelError={lastModelError}
+      onClearModelError={() => setLastModelError(null)}
       toolPreset={toolPreset}
       onToolPresetChange={session || isNew ? handleToolPresetChange : undefined}
       thinkingLevel={thinkingLevel}

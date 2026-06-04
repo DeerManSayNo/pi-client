@@ -49,6 +49,8 @@ interface Props {
   onAbortCompaction?: () => void;
   isCompacting?: boolean;
   compactError?: string | null;
+  lastModelError?: string | null;
+  onClearModelError?: () => void;
   toolPreset?: "none" | "default" | "full";
   onToolPresetChange?: (preset: "none" | "default" | "full") => void;
   thinkingLevel?: "auto" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
@@ -95,7 +97,7 @@ function skillScope(skill: SkillOption): "global" | "project" | "path" {
 
 export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   onSend, onAbort, onSteer, onFollowUp, isStreaming, model, modelNames, modelList, onModelChange,
-  onCompact, onAbortCompaction, isCompacting, compactError, toolPreset, onToolPresetChange,
+  onCompact, onAbortCompaction, isCompacting, compactError, lastModelError, onClearModelError, toolPreset, onToolPresetChange,
   thinkingLevel, onThinkingLevelChange, availableThinkingLevels, thinkingLevelMap,
   retryInfo,
   soundEnabled, onSoundToggle,
@@ -669,6 +671,37 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
               <path d="M3 3v5h5" />
             </svg>
             正在重试 ({retryInfo.attempt}/{retryInfo.maxAttempts})…{retryInfo.errorMessage && <span style={{ opacity: 0.7, marginLeft: 4 }}>— {retryInfo.errorMessage}</span>}
+          </div>
+        )}
+        {/* Model error banner */}
+        {lastModelError && !retryInfo && (
+          <div style={{
+            marginBottom: 8, padding: "5px 10px",
+            background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.25)",
+            borderRadius: 6, fontSize: 12, color: "rgba(200,60,60,0.9)",
+            display: "flex", alignItems: "center", gap: 6,
+          }}>
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+              <circle cx="12" cy="12" r="10" />
+              <line x1="15" y1="9" x2="9" y2="15" />
+              <line x1="9" y1="9" x2="15" y2="15" />
+            </svg>
+            <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              模型调用失败{lastModelError ? `：${lastModelError}` : ""}
+            </span>
+            {onClearModelError && (
+              <button
+                onClick={onClearModelError}
+                style={{
+                  flexShrink: 0,
+                  background: "none", border: "none", cursor: "pointer",
+                  padding: "1px 4px", color: "inherit", opacity: 0.6,
+                  fontSize: 11, lineHeight: 1,
+                }}
+              >
+                ✕
+              </button>
+            )}
           </div>
         )}
         {/* Image previews */}

@@ -248,6 +248,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [compactError, setCompactError] = useState<string | null>(null);
   const [agentPhase, setAgentPhase] = useState<AgentPhase>(null);
   const [watchdogInfo, setWatchdogInfo] = useState<WatchdogInfo | null>(null);
+  const [lastModelError, setLastModelError] = useState<string | null>(null);
+  const lastModelErrorRef = useRef<string | null>(null);
 
   const eventSourceRef = useRef<EventSource | null>(null);
   const sessionIdRef = useRef<string | null>(null);
@@ -265,6 +267,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const watchdogCheckingRef = useRef(false);
   const watchdogStaleRecoveriesRef = useRef(0);
   const autoContinueSentRef = useRef(false);
+  const receivedAssistantMessageRef = useRef(false);
 
   const setNewSessionModel = opts.setNewSessionModel ?? setNewSessionModelState;
   const setToolPresetState = opts.setToolPreset ?? setToolPreset;
@@ -387,17 +390,37 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         lastAgentEventAtRef.current = Date.now();
         lastContentChangedAtRef.current = Date.now();
         lastContentLengthRef.current = 0;
+        lastModelErrorRef.current = null;
+        setLastModelError(null);
+        receivedAssistantMessageRef.current = false;
         setAgentRunning(true);
         setAgentPhase({ kind: "waiting_model" });
         dispatch({ type: "start" });
         break;
-      case "agent_end":
+      case "agent_end": {
         watchdogStaleRecoveriesRef.current = 0;
+        const eventData = event as { willRetry?: boolean; error?: string };
+        const willRetry = eventData.willRetry ?? true;
+        // Capture error from immediate prompt() failure (rpc-manager sends error field)
+        if (eventData.error && !lastModelErrorRef.current) {
+          lastModelErrorRef.current = eventData.error;
+          setLastModelError(eventData.error);
+        }
+        // Show error if: retries were exhausted (lastModelError is set) OR the turn ended
+        // without producing any assistant message (direct failure, auto-retry disabled)
+        const endedWithError = (
+          (lastModelErrorRef.current !== null) ||
+          (!willRetry && !receivedAssistantMessageRef.current)
+        );
+        if (!willRetry && !receivedAssistantMessageRef.current && !lastModelErrorRef.current) {
+          lastModelErrorRef.current = "模型响应失败";
+          setLastModelError("模型响应失败");
+        }
         setAgentRunning(false);
         setAgentPhase(null);
-        setRetryInfo(null);
+        if (!endedWithError) setRetryInfo(null);
         dispatch({ type: "end" });
-        if (sessionIdRef.current) {
+        if (sessionIdRef.current && !endedWithError) {
           loadSession(sessionIdRef.current);
           fetch(`/api/agent/${encodeURIComponent(sessionIdRef.current)}`)
             .then((r) => r.json())
@@ -407,10 +430,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             })
             .catch(() => {});
         }
+        // Reload session even on error to capture any partial output
+        if (sessionIdRef.current && endedWithError) {
+          loadSession(sessionIdRef.current);
+        }
         const changedFiles = [...changedFilesRef.current];
         changedFilesRef.current.clear();
         onAgentEnd?.(changedFiles);
         break;
+      }
       case "message_start":
       case "message_update": {
         const msg = event.message as Partial<AgentMessage> | undefined;
@@ -430,6 +458,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       case "message_end": {
         const completed = event.message as AgentMessage | undefined;
         if (completed) {
+          if (completed.role === "assistant") receivedAssistantMessageRef.current = true;
           const normalized = normalizeCompletedMessage(completed);
           setMessages((prev) => {
             // We optimistically append the user's prompt in handleSend/handleFollowUp.
@@ -471,9 +500,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       case "auto_retry_start":
         setRetryInfo({ attempt: event.attempt as number, maxAttempts: event.maxAttempts as number, errorMessage: event.errorMessage as string | undefined });
         break;
-      case "auto_retry_end":
+      case "auto_retry_end": {
+        const retryEndEvent = event as { success?: boolean; finalError?: string };
+        if (retryEndEvent.success === false && retryEndEvent.finalError) {
+          lastModelErrorRef.current = retryEndEvent.finalError;
+          setLastModelError(retryEndEvent.finalError);
+        }
         setRetryInfo(null);
         break;
+      }
       case "auto_compaction_start":
       case "compaction_start":
         setIsCompacting(true);
@@ -499,6 +534,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     agentRunningRef.current = true;
     autoContinueSentRef.current = false;
     watchdogStaleRecoveriesRef.current = 0;
+    lastModelErrorRef.current = null;
+    setLastModelError(null);
+    receivedAssistantMessageRef.current = false;
     lastAgentEventAtRef.current = Date.now();
     lastContentChangedAtRef.current = Date.now();
     lastContentLengthRef.current = 0;
@@ -669,6 +707,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setMessages((prev) => [...prev, { role: "user", content: message, timestamp: Date.now() } as AgentMessage]);
     autoContinueSentRef.current = false;
     watchdogStaleRecoveriesRef.current = 0;
+    lastModelErrorRef.current = null;
+    setLastModelError(null);
+    receivedAssistantMessageRef.current = false;
     lastAgentEventAtRef.current = Date.now();
     lastContentChangedAtRef.current = Date.now();
     lastContentLengthRef.current = 0;
@@ -903,6 +944,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     lastAgentEventAtRef.current = Date.now();
     lastContentChangedAtRef.current = Date.now();
     lastContentLengthRef.current = 0;
+    lastModelErrorRef.current = null;
+    setLastModelError(null);
+    receivedAssistantMessageRef.current = false;
     setRetryInfo(null);
     setContextUsage(null);
     setSystemPrompt(null);
@@ -1015,7 +1059,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     data, loading, error, messages, entryIds, streamState,
     agentRunning, modelNames, modelList, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, toolPreset, thinkingLevel,
     retryInfo, contextUsage, systemPrompt, forkingEntryId,
-    isCompacting, compactError, currentModel, displayModel, sessionStats,
+    isCompacting, compactError, lastModelError, currentModel, displayModel, sessionStats,
     agentPhase, watchdogInfo,
     isNew,
     // Refs
@@ -1025,7 +1069,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     handleSend, handleAbort, handleFork, handleModelChange,
     handleCompact, handleSteer, handleFollowUp, handleAbortCompaction,
     handleToolPresetChange, handleThinkingLevelChange, loadTools, setData, setMessages,
-    setSystemPrompt,
+    setSystemPrompt, setLastModelError,
     dispatch, setAgentRunning, setForkingEntryId,
     // Subscriptions
     handleAgentEventRef,
