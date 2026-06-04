@@ -183,7 +183,12 @@ export async function GET(
     const filePath = filePathFromSegments(segments);
     const type = request.nextUrl.searchParams.get("type") ?? "list";
 
-    const allowedRoots = await getAllowedRoots();
+    let allowedRoots: Set<string>;
+    try {
+      allowedRoots = await getAllowedRoots();
+    } catch {
+      allowedRoots = new Set();
+    }
     if (!isPathAllowed(filePath, allowedRoots)) {
       return NextResponse.json({ error: "Access denied" }, { status: 403 });
     }

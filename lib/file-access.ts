@@ -61,9 +61,15 @@ export async function getAllowedRoots(): Promise<Set<string>> {
   }
 
   try {
-    for (const name of fs.readdirSync(os.homedir())) {
-      if (/^pi-cwd-\d{8}$/.test(name)) {
-        roots.add(normalizeRoot(path.join(os.homedir(), name)));
+    const home = os.homedir();
+    // Skip scanning home on Windows to avoid EPERM on junction points
+    if (process.platform === "win32") {
+      roots.add(normalizeRoot(path.join(home, "pi-cwd")));
+    } else {
+      for (const name of fs.readdirSync(home)) {
+        if (/^pi-cwd-\d{8}$/.test(name)) {
+          roots.add(normalizeRoot(path.join(home, name)));
+        }
       }
     }
   } catch {

@@ -6,7 +6,9 @@ use std::net::TcpStream;
 use std::process::Stdio;
 #[cfg(not(debug_assertions))]
 use std::time::Duration;
-use tauri::{LogicalPosition, Manager, TitleBarStyle, WebviewUrl, WebviewWindowBuilder};
+use tauri::{WebviewUrl, WebviewWindowBuilder};
+#[cfg(target_os = "macos")]
+use tauri::{LogicalPosition, TitleBarStyle};
 
 #[cfg(not(debug_assertions))]
 fn find_available_port() -> std::io::Result<u16> {
@@ -94,18 +96,22 @@ pub fn run() {
                 unreachable!()
             };
 
-            let window = WebviewWindowBuilder::new(
+            let builder = WebviewWindowBuilder::new(
                 app,
                 "main",
                 WebviewUrl::External(webview_url.parse()?),
             )
             .title("pi-agent")
-            .title_bar_style(TitleBarStyle::Overlay)
-            .hidden_title(true)
-            .traffic_light_position(LogicalPosition::new(14.0, 11.0))
             .inner_size(1280.0, 800.0)
-            .min_inner_size(960.0, 640.0)
-            .build()?;
+            .min_inner_size(960.0, 640.0);
+
+            #[cfg(target_os = "macos")]
+            let builder = builder
+                .title_bar_style(TitleBarStyle::Overlay)
+                .hidden_title(true)
+                .traffic_light_position(LogicalPosition::new(14.0, 11.0));
+
+            let window = builder.build()?;
 
             #[cfg(debug_assertions)]
             window.open_devtools();

@@ -6,9 +6,7 @@ export async function GET() {
     const sessions = await listAllSessions();
     return NextResponse.json({ sessions });
   } catch (error) {
-    return NextResponse.json(
-      { error: String(error) },
-      { status: 500 }
-    );
+    console.error("[/api/sessions]", error);
+    return NextResponse.json({ sessions: [] }, { status: 200 });
   }
 }

@@ -11,7 +11,7 @@ try {
 
 const nextConfig: NextConfig = {
   output: "standalone",
-  serverExternalPackages: ["@earendil-works/pi-coding-agent", "@earendil-works/pi-ai"],
+  serverExternalPackages: ["@earendil-works/pi-coding-agent", "@earendil-works/pi-ai", "node-cron"],
   allowedDevOrigins: ["127.0.0.1", "192.168.*.*"],
   devIndicators: false,
   env: {
