@@ -314,7 +314,6 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, onAgentEnd, on
     const container = scrollContainerRef.current;
     if (!container) return true;
 
-    // During streaming we track the live tail, not the temporary bottom spacer.
     const liveEnd = liveStreamEndRef.current;
     if (agentRunning && liveEnd) {
       const containerRect = container.getBoundingClientRect();
@@ -331,10 +330,7 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, onAgentEnd, on
 
     const liveEnd = liveStreamEndRef.current;
     if (agentRunning && liveEnd) {
-      const containerRect = container.getBoundingClientRect();
-      const liveEndRect = liveEnd.getBoundingClientRect();
-      const nextTop = container.scrollTop + (liveEndRect.bottom - containerRect.bottom);
-      container.scrollTo({ top: nextTop, behavior });
+      liveEnd.scrollIntoView({ block: "end", behavior });
       return;
     }
 
@@ -680,10 +676,6 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, onAgentEnd, on
             )}
 
             {agentRunning && <div ref={liveStreamEndRef} />}
-
-            {agentRunning && (
-              <div style={{ height: scrollContainerRef.current ? scrollContainerRef.current.clientHeight : "80vh" }} />
-            )}
 
             {!agentRunning && changedFiles.length > 0 && (
               <ChangedFilesList
