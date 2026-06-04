@@ -54,7 +54,8 @@ export async function GET(
     }
 
     const state = await session.send({ type: "get_state" });
-    return NextResponse.json({ running: true, state });
+    const status = session.getStatus();
+    return NextResponse.json({ running: true, state, status });
   } catch (error) {
     return NextResponse.json({ error: String(error) }, { status: 500 });
   }

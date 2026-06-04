@@ -3,11 +3,9 @@ import { listRpcSessionStates } from "@/lib/rpc-manager";
 
 // GET /api/agent/running - list currently running in-process agent sessions
 export async function GET() {
-  const sessions = listRpcSessionStates();
+  const sessions = listRpcSessionStates().filter((session) => session.isStreaming || session.isCompacting);
   return NextResponse.json({
     sessions,
-    runningSessionIds: sessions
-      .filter((session) => session.isStreaming || session.isCompacting)
-      .map((session) => session.sessionId),
+    runningSessionIds: sessions.map((session) => session.sessionId),
   });
 }

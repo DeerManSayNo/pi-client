@@ -122,6 +122,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const [skillPickerRect, setSkillPickerRect] = useState<{ top: number; left: number; width: number } | null>(null);
   const [skillPickerIndex, setSkillPickerIndex] = useState(0);
   const [selectedSkill, setSelectedSkill] = useState<SkillOption | null>(null);
+  const skillPickerIndexRef = useRef(0);
   const skillPickerRef = useRef<HTMLDivElement>(null);
   const skillsFetchRef = useRef<AbortController | null>(null);
 
@@ -287,10 +288,15 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     }
   }, []);
 
+  const setActiveSkillPickerIndex = useCallback((index: number) => {
+    skillPickerIndexRef.current = index;
+    setSkillPickerIndex(index);
+  }, []);
+
   const closeSkillPicker = useCallback(() => {
     setSkillPickerOpen(false);
-    setSkillPickerIndex(0);
-  }, []);
+    setActiveSkillPickerIndex(0);
+  }, [setActiveSkillPickerIndex]);
 
   const selectSkill = useCallback((skill: SkillOption) => {
     const ta = textareaRef.current;
@@ -324,11 +330,11 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         fetchSkills(cwd);
         setSkillPickerOpen(true);
       }
-      setSkillPickerIndex(0);
+      setActiveSkillPickerIndex(0);
     } else {
       if (skillPickerOpen) closeSkillPicker();
     }
-  }, [cancelPendingEnterSend, skillPickerOpen, selectedSkill, cwd, fetchSkills, closeSkillPicker]);
+  }, [cancelPendingEnterSend, skillPickerOpen, selectedSkill, cwd, fetchSkills, closeSkillPicker, setActiveSkillPickerIndex]);
 
   const handleCompositionStart = useCallback(() => {
     cancelPendingEnterSend();
@@ -395,6 +401,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
 
   const globalSkills = filteredSkills.filter((s) => skillScope(s) === "global");
   const projectSkills = filteredSkills.filter((s) => skillScope(s) === "project");
+  const visibleSkillPickerSkills = [...globalSkills, ...projectSkills];
   const commonProjectSkills = skills
     .filter((s) => skillScope(s) === "project" && !s.disableModelInvocation)
     .slice(0, 8);
@@ -412,25 +419,26 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
 
   // Reset skill picker index when filter changes
   useEffect(() => {
-    setSkillPickerIndex(0);
-  }, [skillPickerFilter]);
+    setActiveSkillPickerIndex(0);
+  }, [skillPickerFilter, setActiveSkillPickerIndex]);
 
   const handleSkillPickerKeyDown = useCallback((e: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (filteredSkills.length === 0) return;
+    if (visibleSkillPickerSkills.length === 0) return;
     if (e.key === "ArrowDown") {
       e.preventDefault();
-      setSkillPickerIndex((i) => Math.min(i + 1, filteredSkills.length - 1));
+      setActiveSkillPickerIndex(Math.min(skillPickerIndexRef.current + 1, visibleSkillPickerSkills.length - 1));
       return;
     }
     if (e.key === "ArrowUp") {
       e.preventDefault();
-      setSkillPickerIndex((i) => Math.max(i - 1, 0));
+      setActiveSkillPickerIndex(Math.max(skillPickerIndexRef.current - 1, 0));
       return;
     }
     if ((e.key === "Enter" && !e.shiftKey) || e.key === "Tab") {
       e.preventDefault();
-      if (filteredSkills[skillPickerIndex]) {
-        selectSkill(filteredSkills[skillPickerIndex]);
+      const activeIndex = Math.min(skillPickerIndexRef.current, visibleSkillPickerSkills.length - 1);
+      if (visibleSkillPickerSkills[activeIndex]) {
+        selectSkill(visibleSkillPickerSkills[activeIndex]);
       }
       return;
     }
@@ -440,7 +448,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       return;
     }
     // Let other keys pass through for normal typing
-  }, [filteredSkills, skillPickerIndex, selectSkill, closeSkillPicker]);
+  }, [visibleSkillPickerSkills, setActiveSkillPickerIndex, selectSkill, closeSkillPicker]);
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -696,7 +704,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         {/* Skill picker dropdown */}
         {skillPickerOpen && skillPickerRect && (() => {
           const viewportHeight = window.visualViewport?.height ?? window.innerHeight;
-          const totalSkills = filteredSkills.length;
+          const totalSkills = visibleSkillPickerSkills.length;
           if (totalSkills === 0) return null;
           const bottom = viewportHeight - skillPickerRect.top + 6;
           const maxH = Math.max(120, Math.min(skillPickerRect.top - 8, viewportHeight * 0.5));

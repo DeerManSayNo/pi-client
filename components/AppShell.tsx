@@ -18,6 +18,16 @@ import type { ChatInputHandle } from "./ChatInput";
 
 type DraggableStyle = CSSProperties & { WebkitAppRegion?: "drag" | "no-drag" };
 type SidebarMode = "open" | "compact" | "closed";
+type RunningSessionStatus = {
+  sessionId: string;
+  isStreaming: boolean;
+  isCompacting: boolean;
+  lastEventType: string;
+  eventCount: number;
+  eventRate: number;
+  eventIdleMs: number | null;
+  contentIdleMs: number | null;
+};
 
 const AUTO_OPEN_EXTENSIONS = new Set([".html", ".htm", ".md", ".mdx", ".txt", ".json", ".yaml", ".yml", ".toml", ".env", ".xml", ".ini", ".cfg", ".conf"]);
 
@@ -71,7 +81,7 @@ export function AppShell() {
   const [skillsConfigOpen, setSkillsConfigOpen] = useState(false);
   const [quickConfigOpen, setQuickConfigOpen] = useState<"memory" | "mcp" | "role" | null>(null);
   const [schedulerPanelOpen, setSchedulerPanelOpen] = useState(false);
-  const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(new Set());
+  const [runningSessionStatuses, setRunningSessionStatuses] = useState<Map<string, RunningSessionStatus>>(new Map());
   const pendingSessionIdRef = useRef<string | null>(null);
   const pendingTempTabIdRef = useRef<string | null>(null);
   // Track which tab ids are genuine placeholders (not real sessions),
@@ -155,8 +165,8 @@ export function AppShell() {
     const loadRunningSessions = () => {
       fetch("/api/agent/running")
         .then((res) => res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`)))
-        .then((data: { runningSessionIds?: string[] }) => {
-          if (!cancelled) setRunningSessionIds(new Set(data.runningSessionIds ?? []));
+        .then((data: { runningSessionIds?: string[]; sessions?: RunningSessionStatus[] }) => {
+          if (!cancelled) setRunningSessionStatuses(new Map((data.sessions ?? []).map((session) => [session.sessionId, session])));
         })
         .catch(() => {});
     };
@@ -170,10 +180,23 @@ export function AppShell() {
 
   const setSessionRunning = useCallback((sessionId: string | null | undefined, running: boolean) => {
     if (!sessionId) return;
-    setRunningSessionIds((prev) => {
-      const next = new Set(prev);
-      if (running) next.add(sessionId);
-      else next.delete(sessionId);
+    setRunningSessionStatuses((prev) => {
+      const next = new Map(prev);
+      if (running) {
+        const existing = next.get(sessionId);
+        next.set(sessionId, existing ?? {
+          sessionId,
+          isStreaming: true,
+          isCompacting: false,
+          lastEventType: "agent_start",
+          eventCount: 0,
+          eventRate: 0,
+          eventIdleMs: 0,
+          contentIdleMs: 0,
+        });
+      } else {
+        next.delete(sessionId);
+      }
       return next;
     });
   }, []);
@@ -512,7 +535,7 @@ export function AppShell() {
         onInitialRestoreDone={handleInitialRestoreDone}
         refreshKey={refreshKey}
         optimisticSession={pendingSession ?? selectedSession}
-        runningSessionIds={runningSessionIds}
+        runningSessionStatuses={runningSessionStatuses}
         onSessionDeleted={handleSessionDeleted}
         selectedCwd={selectedSession?.cwd ?? newSessionCwd ?? activeCwd ?? null}
         onCwdChange={handleCwdChange}

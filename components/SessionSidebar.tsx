@@ -5,6 +5,17 @@ import { useEffect, useState, useCallback, useRef, useMemo, type CSSProperties }
 import type { SessionInfo } from "@/lib/types";
 import { FileExplorer } from "./FileExplorer";
 
+type RunningSessionStatus = {
+  sessionId: string;
+  isStreaming: boolean;
+  isCompacting: boolean;
+  lastEventType: string;
+  eventCount: number;
+  eventRate: number;
+  eventIdleMs: number | null;
+  contentIdleMs: number | null;
+};
+
 interface Props {
   selectedSessionId: string | null;
   onSelectSession: (session: SessionInfo, isRestore?: boolean) => void;
@@ -13,7 +24,7 @@ interface Props {
   onInitialRestoreDone?: () => void;
   refreshKey?: number;
   optimisticSession?: SessionInfo | null;
-  runningSessionIds?: Set<string>;
+  runningSessionStatuses?: Map<string, RunningSessionStatus>;
   onSessionDeleted?: (sessionId: string) => void;
   selectedCwd?: string | null;
   onCwdChange?: (cwd: string | null) => void;
@@ -36,6 +47,17 @@ function formatRelativeTime(dateStr: string): string {
   if (hours < 24) return `${hours}小时前`;
   if (days < 7) return `${days}天前`;
   return date.toLocaleDateString();
+}
+
+function formatSecondsFromMs(ms: number | null | undefined): string {
+  if (ms === null || ms === undefined) return "--";
+  return `${Math.max(0, Math.floor(ms / 1000))}s`;
+}
+
+function formatRunningStatus(status: RunningSessionStatus): string {
+  const eventName = status.isCompacting ? "compacting" : status.lastEventType || "running";
+  const rate = Number.isFinite(status.eventRate) ? status.eventRate : 0;
+  return `${eventName} · ${rate.toFixed(1)}/s · 事件 ${formatSecondsFromMs(status.eventIdleMs)} · 内容 ${formatSecondsFromMs(status.contentIdleMs)}`;
 }
 
 interface ProjectGroup {
@@ -262,7 +284,7 @@ function PiAgentTitle() {
   );
 }
 
-export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, onInitialRestoreDone, refreshKey, optimisticSession, runningSessionIds = new Set(), onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onAtMention, compact = false, onProjectsChange }: Props) {
+export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, onInitialRestoreDone, refreshKey, optimisticSession, runningSessionStatuses = new Map(), onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onAtMention, compact = false, onProjectsChange }: Props) {
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -767,7 +789,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             expanded={expandedCwds.has(project.cwd)}
             showAll={showAllCwds.has(project.cwd)}
             selectedSessionId={selectedSessionId}
-            runningSessionIds={runningSessionIds}
+            runningSessionStatuses={runningSessionStatuses}
             onToggle={() => toggleProject(project.cwd)}
             onToggleShowAll={() => toggleShowAll(project.cwd)}
             onSelectSession={onSelectSession}
@@ -1000,7 +1022,7 @@ function ProjectSection({
   expanded,
   showAll,
   selectedSessionId,
-  runningSessionIds,
+  runningSessionStatuses,
   onToggle,
   onToggleShowAll,
   onSelectSession,
@@ -1015,7 +1037,7 @@ function ProjectSection({
   expanded: boolean;
   showAll: boolean;
   selectedSessionId: string | null;
-  runningSessionIds: Set<string>;
+  runningSessionStatuses: Map<string, RunningSessionStatus>;
   onToggle: () => void;
   onToggleShowAll: () => void;
   onSelectSession: (s: SessionInfo) => void;
@@ -1127,9 +1149,9 @@ function ProjectSection({
       {(compact || expanded) && (
         <div>
           {showAll && !compact && maxSessions === undefined ? sessionTree.map((node) => (
-            <SessionTreeItem key={node.session.id} node={node} selectedSessionId={selectedSessionId} runningSessionIds={runningSessionIds} onSelectSession={onSelectSession} onRenamed={onRenamed} onSessionDeleted={onSessionDeleted} depth={0} compact={compact} />
+            <SessionTreeItem key={node.session.id} node={node} selectedSessionId={selectedSessionId} runningSessionStatuses={runningSessionStatuses} onSelectSession={onSelectSession} onRenamed={onRenamed} onSessionDeleted={onSessionDeleted} depth={0} compact={compact} />
           )) : visibleSessions.map((session) => (
-            <SessionItem key={session.id} session={session} isSelected={session.id === selectedSessionId} isRunning={runningSessionIds.has(session.id)} onClick={() => onSelectSession(session)} onRenamed={onRenamed} onDeleted={(id) => onSessionDeleted?.(id)} depth={0} compact={compact} />
+            <SessionItem key={session.id} session={session} isSelected={session.id === selectedSessionId} runningStatus={runningSessionStatuses.get(session.id)} onClick={() => onSelectSession(session)} onRenamed={onRenamed} onDeleted={(id) => onSessionDeleted?.(id)} depth={0} compact={compact} />
           ))}
           {project.sessions.length > 2 && !compact && maxSessions === undefined && (
             <button
@@ -1159,7 +1181,7 @@ function ProjectSection({
 function SessionTreeItem({
   node,
   selectedSessionId,
-  runningSessionIds,
+  runningSessionStatuses,
   onSelectSession,
   onRenamed,
   onSessionDeleted,
@@ -1168,7 +1190,7 @@ function SessionTreeItem({
 }: {
   node: SessionTreeNode;
   selectedSessionId: string | null;
-  runningSessionIds: Set<string>;
+  runningSessionStatuses: Map<string, RunningSessionStatus>;
   onSelectSession: (s: SessionInfo) => void;
   onRenamed?: () => void;
   onSessionDeleted?: (id: string) => void;
@@ -1194,7 +1216,7 @@ function SessionTreeItem({
         <SessionItem
           session={node.session}
           isSelected={node.session.id === selectedSessionId}
-          isRunning={runningSessionIds.has(node.session.id)}
+          runningStatus={runningSessionStatuses.get(node.session.id)}
           onClick={() => onSelectSession(node.session)}
           onRenamed={onRenamed}
           onDeleted={(id) => onSessionDeleted?.(id)}
@@ -1212,7 +1234,7 @@ function SessionTreeItem({
               key={child.session.id}
               node={child}
               selectedSessionId={selectedSessionId}
-              runningSessionIds={runningSessionIds}
+              runningSessionStatuses={runningSessionStatuses}
               onSelectSession={onSelectSession}
               onRenamed={onRenamed}
               onSessionDeleted={onSessionDeleted}
@@ -1229,7 +1251,7 @@ function SessionTreeItem({
 function SessionItem({
   session,
   isSelected,
-  isRunning,
+  runningStatus,
   onClick,
   onRenamed,
   onDeleted,
@@ -1241,7 +1263,7 @@ function SessionItem({
 }: {
   session: SessionInfo;
   isSelected: boolean;
-  isRunning?: boolean;
+  runningStatus?: RunningSessionStatus;
   onClick: () => void;
   onRenamed?: () => void;
   onDeleted?: (id: string) => void;
@@ -1260,6 +1282,8 @@ function SessionItem({
 
   const title = session.name || session.firstMessage.slice(0, 50) || session.id.slice(0, 12);
   const sessionInitial = getInitial(title);
+  const isRunning = Boolean(runningStatus?.isStreaming || runningStatus?.isCompacting);
+  const runningText = runningStatus ? formatRunningStatus(runningStatus) : null;
 
   const startRename = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
@@ -1455,9 +1479,15 @@ function SessionItem({
             >
               {title}
             </div>
-            <div style={{ marginTop: 2, display: "flex", gap: 8, color: "var(--text-dim)", fontSize: 11 }}>
-              <span title={session.modified}>{formatRelativeTime(session.modified)}</span>
-              <span>{session.messageCount} 条消息</span>
+            <div style={{ marginTop: 2, display: "flex", gap: 8, color: isRunning ? "var(--accent)" : "var(--text-dim)", fontSize: 11, minWidth: 0 }}>
+              {runningText ? (
+                <span title={runningText} style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{runningText}</span>
+              ) : (
+                <>
+                  <span title={session.modified}>{formatRelativeTime(session.modified)}</span>
+                  <span>{session.messageCount} 条消息</span>
+                </>
+              )}
             </div>
           </div>
 

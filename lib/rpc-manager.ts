@@ -30,6 +30,24 @@ function getNestedString(value: unknown, keys: string[]): string | null {
   return typeof current === "string" && current.trim() ? current.trim() : null;
 }
 
+function getEventContentLength(event: AgentEvent): number | null {
+  if (event.type !== "message_start" && event.type !== "message_update") return null;
+  const message = isRecord(event.message) ? event.message : null;
+  if (!message) return null;
+  const content = message.content;
+  if (typeof content === "string") return content.length;
+  if (!Array.isArray(content)) return 0;
+  let length = 0;
+  for (const block of content) {
+    if (!isRecord(block)) continue;
+    if (typeof block.text === "string") length += block.text.length;
+    else if (typeof block.thinking === "string") length += block.thinking.length;
+    else if ("input" in block) length += JSON.stringify(block.input ?? {}).length;
+    else if ("arguments" in block) length += JSON.stringify(block.arguments ?? {}).length;
+  }
+  return length;
+}
+
 function extractToolName(event: AgentEvent): string {
   return typeof event.toolName === "string" ? event.toolName : typeof event.name === "string" ? event.name : "";
 }
@@ -81,6 +99,12 @@ export class AgentSessionWrapper {
   private roleId: string | null = null;
   private temporaryRoleSettings: string[] = [];
   private baseSystemPrompt = "";
+  private lastEventType = "";
+  private lastEventAt = 0;
+  private lastContentAt = 0;
+  private eventCount = 0;
+  private runStartedAt = 0;
+  private lastContentLength = 0;
 
   constructor(public readonly inner: AgentSessionLike, roleId?: string | null) {
     this.roleId = roleId ?? null;
@@ -128,6 +152,7 @@ export class AgentSessionWrapper {
     liveIsland.trackSession(this.inner.sessionId, cwd);
 
     this.unsubscribe = this.inner.subscribe((event: AgentEvent) => {
+      this.recordEventStatus(event);
       this.resetIdleTimer();
       for (const l of this.listeners) l(event);
 
@@ -159,6 +184,40 @@ export class AgentSessionWrapper {
   private resetIdleTimer(): void {
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = setTimeout(() => this.destroy(), 10 * 60 * 1000);
+  }
+
+  private recordEventStatus(event: AgentEvent): void {
+    const now = Date.now();
+    if (event.type === "agent_start" || !this.runStartedAt || (!this.inner.isStreaming && !this.inner.isCompacting)) {
+      this.runStartedAt = now;
+      this.eventCount = 0;
+      this.lastContentLength = 0;
+      this.lastContentAt = now;
+    }
+    this.eventCount += 1;
+    this.lastEventType = event.type;
+    this.lastEventAt = now;
+
+    const nextContentLength = getEventContentLength(event);
+    if (nextContentLength !== null && nextContentLength !== this.lastContentLength) {
+      this.lastContentLength = nextContentLength;
+      this.lastContentAt = now;
+    }
+  }
+
+  getStatus() {
+    const now = Date.now();
+    const runningForMs = this.runStartedAt ? Math.max(0, now - this.runStartedAt) : 0;
+    return {
+      sessionId: this.sessionId,
+      isStreaming: Boolean(this.inner.isStreaming),
+      isCompacting: Boolean(this.inner.isCompacting),
+      lastEventType: this.lastEventType,
+      eventCount: this.eventCount,
+      eventRate: runningForMs > 0 ? this.eventCount / (runningForMs / 1000) : 0,
+      eventIdleMs: this.lastEventAt ? now - this.lastEventAt : null,
+      contentIdleMs: this.lastContentAt ? now - this.lastContentAt : null,
+    };
   }
 
   onEvent(listener: EventListener): () => void {
@@ -407,14 +466,10 @@ export function getRpcSession(sessionId: string): AgentSessionWrapper | undefine
   return getRegistry().get(sessionId);
 }
 
-export function listRpcSessionStates(): Array<{ sessionId: string; isStreaming: boolean; isCompacting: boolean }> {
+export function listRpcSessionStates(): Array<{ sessionId: string; isStreaming: boolean; isCompacting: boolean; lastEventType: string; eventCount: number; eventRate: number; eventIdleMs: number | null; contentIdleMs: number | null }> {
   return [...getRegistry().values()]
     .filter((session) => session.isAlive())
-    .map((session) => ({
-      sessionId: session.sessionId,
-      isStreaming: Boolean(session.inner.isStreaming),
-      isCompacting: Boolean(session.inner.isCompacting),
-    }));
+    .map((session) => session.getStatus());
 }
 
 /**

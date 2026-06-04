@@ -208,6 +208,13 @@ export type WatchdogInfo = {
   contentThresholdMs: number;
 };
 
+type AgentStatus = {
+  isStreaming?: boolean;
+  isCompacting?: boolean;
+  eventIdleMs?: number | null;
+  contentIdleMs?: number | null;
+};
+
 export function useAgentSession(opts: UseAgentSessionOptions) {
   const {
     activeTabId,
@@ -256,6 +263,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const lastContentChangedAtRef = useRef(Date.now());
   const lastContentLengthRef = useRef(0);
   const watchdogCheckingRef = useRef(false);
+  const watchdogStaleRecoveriesRef = useRef(0);
   const autoContinueSentRef = useRef(false);
 
   const setNewSessionModel = opts.setNewSessionModel ?? setNewSessionModelState;
@@ -375,6 +383,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         break;
       }
       case "agent_start":
+        watchdogStaleRecoveriesRef.current = 0;
         lastAgentEventAtRef.current = Date.now();
         lastContentChangedAtRef.current = Date.now();
         lastContentLengthRef.current = 0;
@@ -383,6 +392,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         dispatch({ type: "start" });
         break;
       case "agent_end":
+        watchdogStaleRecoveriesRef.current = 0;
         setAgentRunning(false);
         setAgentPhase(null);
         setRetryInfo(null);
@@ -408,6 +418,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           const normalizedMsg = normalizeToolCalls(msg as AgentMessage);
           const nextLen = getStreamingContentLength(normalizedMsg);
           if (nextLen !== lastContentLengthRef.current) {
+            watchdogStaleRecoveriesRef.current = 0;
             lastContentLengthRef.current = nextLen;
             lastContentChangedAtRef.current = Date.now();
           }
@@ -487,6 +498,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // Set the ref immediately to prevent duplicate sends before React re-renders
     agentRunningRef.current = true;
     autoContinueSentRef.current = false;
+    watchdogStaleRecoveriesRef.current = 0;
     lastAgentEventAtRef.current = Date.now();
     lastContentChangedAtRef.current = Date.now();
     lastContentLengthRef.current = 0;
@@ -656,6 +668,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (!sid) return;
     setMessages((prev) => [...prev, { role: "user", content: message, timestamp: Date.now() } as AgentMessage]);
     autoContinueSentRef.current = false;
+    watchdogStaleRecoveriesRef.current = 0;
     lastAgentEventAtRef.current = Date.now();
     lastContentChangedAtRef.current = Date.now();
     lastContentLengthRef.current = 0;
@@ -699,15 +712,52 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   // Business watchdog for cases where the SSE connection is alive but the
   // streaming turn appears stuck or the terminal events were missed. It first
-  // asks the server for the authoritative AgentSession state. If the backend is
-  // still running, only reconnect the SSE stream. If the backend has already
-  // stopped while the UI still thinks it is running, reload the session and send
-  // one automatic "continue" follow-up for this stalled turn.
+  // asks the server for the authoritative AgentSession state/status. A first
+  // stale hit only reconnects SSE; if both frontend and backend remain stale on
+  // the next hit, treat `isStreaming=true` as unreliable, abort the stuck run,
+  // reload the session, and send one automatic "continue" follow-up.
   useEffect(() => {
     if (!agentRunning) return;
     const STALE_EVENT_MS = WATCHDOG_STALE_EVENT_MS;
     const STALE_CONTENT_MS = WATCHDOG_STALE_CONTENT_MS;
     const CHECK_INTERVAL_MS = WATCHDOG_CHECK_INTERVAL_MS;
+
+    const recoverWithContinue = async (sid: string, abortFirst: boolean) => {
+      if (abortFirst) {
+        try {
+          await sendAgentCommand(sid, { type: "abort" });
+        } catch (e) {
+          console.error("Agent watchdog abort failed:", e);
+        }
+      }
+
+      await loadSession(sid);
+      setAgentRunning(false);
+      setAgentPhase(null);
+      dispatch({ type: "end" });
+
+      if (autoContinueSentRef.current) return;
+      autoContinueSentRef.current = true;
+      watchdogStaleRecoveriesRef.current = 0;
+      lastAgentEventAtRef.current = Date.now();
+      lastContentChangedAtRef.current = Date.now();
+      lastContentLengthRef.current = 0;
+      agentRunningRef.current = true;
+      setMessages((prev) => [...prev, { role: "user", content: "continue", timestamp: Date.now() } as AgentMessage]);
+      setAgentRunning(true);
+      setAgentPhase({ kind: "waiting_model" });
+      dispatch({ type: "start" });
+      connectEvents(sid);
+      try {
+        await sendAgentCommand(sid, { type: "follow_up", message: "continue" });
+      } catch (e) {
+        console.error("Agent watchdog auto-continue failed:", e);
+        agentRunningRef.current = false;
+        setAgentRunning(false);
+        setAgentPhase(null);
+        dispatch({ type: "end" });
+      }
+    };
 
     const id = setInterval(async () => {
       const sid = sessionIdRef.current;
@@ -721,46 +771,34 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       watchdogCheckingRef.current = true;
       try {
         const res = await fetch(`/api/agent/${encodeURIComponent(sid)}`, { cache: "no-store" });
-        const d = await res.json().catch(() => ({})) as { running?: boolean; state?: { isStreaming?: boolean; isCompacting?: boolean } };
+        const d = await res.json().catch(() => ({})) as { running?: boolean; state?: { isStreaming?: boolean; isCompacting?: boolean }; status?: AgentStatus };
+        const status = d.status;
+        const backendNoRecentEvent = typeof status?.eventIdleMs === "number" && status.eventIdleMs > STALE_EVENT_MS;
+        const backendNoContentGrowth = typeof status?.contentIdleMs === "number" && status.contentIdleMs > STALE_CONTENT_MS;
+        const backendStale = backendNoRecentEvent || backendNoContentGrowth;
 
-        if (d.running && d.state?.isCompacting) {
+        if (d.running && (d.state?.isCompacting || status?.isCompacting)) {
           connectEvents(sid);
           lastAgentEventAtRef.current = Date.now();
           return;
         }
 
         if (d.running && d.state?.isStreaming !== false) {
-          connectEvents(sid);
-          lastAgentEventAtRef.current = Date.now();
+          watchdogStaleRecoveriesRef.current += 1;
+
+          // If only the browser has gone stale, this is probably an SSE hiccup.
+          // Reconnect once (or repeatedly while backend is still visibly active).
+          if (!backendStale || watchdogStaleRecoveriesRef.current <= 1) {
+            connectEvents(sid);
+            lastAgentEventAtRef.current = Date.now();
+            return;
+          }
+
+          await recoverWithContinue(sid, true);
           return;
         }
 
-        await loadSession(sid);
-        setAgentRunning(false);
-        setAgentPhase(null);
-        dispatch({ type: "end" });
-
-        if (!autoContinueSentRef.current) {
-          autoContinueSentRef.current = true;
-          lastAgentEventAtRef.current = Date.now();
-          lastContentChangedAtRef.current = Date.now();
-          lastContentLengthRef.current = 0;
-          agentRunningRef.current = true;
-          setMessages((prev) => [...prev, { role: "user", content: "continue", timestamp: Date.now() } as AgentMessage]);
-          setAgentRunning(true);
-          setAgentPhase({ kind: "waiting_model" });
-          dispatch({ type: "start" });
-          connectEvents(sid);
-          try {
-            await sendAgentCommand(sid, { type: "follow_up", message: "continue" });
-          } catch (e) {
-            console.error("Agent watchdog auto-continue failed:", e);
-            agentRunningRef.current = false;
-            setAgentRunning(false);
-            setAgentPhase(null);
-            dispatch({ type: "end" });
-          }
-        }
+        await recoverWithContinue(sid, false);
       } catch (e) {
         console.error("Agent watchdog failed:", e);
       } finally {
@@ -833,6 +871,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     eventSourceRef.current = null;
     agentRunningRef.current = false;
     autoContinueSentRef.current = false;
+    watchdogStaleRecoveriesRef.current = 0;
     initialScrollDoneRef.current = false;
     pendingScrollToUserRef.current = false;
     changedFilesRef.current.clear();
