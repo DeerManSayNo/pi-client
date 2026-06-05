@@ -37,8 +37,8 @@ export async function POST(request: Request): Promise<NextResponse> {
     if (!name || typeof name !== "string" || !name.trim()) {
       return NextResponse.json({ error: "Task name is required" }, { status: 400 });
     }
-    if (type !== "prompt" && type !== "shell") {
-      return NextResponse.json({ error: 'Task type must be "prompt" or "shell"' }, { status: 400 });
+    if (type !== "prompt") {
+      return NextResponse.json({ error: 'Task type must be "prompt"' }, { status: 400 });
     }
     if (!cronExpression || typeof cronExpression !== "string") {
       return NextResponse.json({ error: "Cron expression is required" }, { status: 400 });
@@ -47,17 +47,10 @@ export async function POST(request: Request): Promise<NextResponse> {
       return NextResponse.json({ error: "Task config is required" }, { status: 400 });
     }
 
-    // Validate config based on type
-    if (type === "prompt") {
-      const promptConfig = config as { cwd?: string; message?: string };
-      if (!promptConfig.cwd || !promptConfig.message) {
-        return NextResponse.json({ error: "Prompt tasks require cwd and message in config" }, { status: 400 });
-      }
-    } else if (type === "shell") {
-      const shellConfig = config as { cwd?: string; command?: string };
-      if (!shellConfig.command) {
-        return NextResponse.json({ error: "Shell tasks require command in config" }, { status: 400 });
-      }
+    // Validate config
+    const promptConfig = config as { cwd?: string; message?: string };
+    if (!promptConfig.cwd || !promptConfig.message) {
+      return NextResponse.json({ error: "Prompt tasks require cwd and message in config" }, { status: 400 });
     }
 
     const task = createTask(name.trim(), type, cronExpression.trim(), config as unknown as ScheduledTask["config"]);

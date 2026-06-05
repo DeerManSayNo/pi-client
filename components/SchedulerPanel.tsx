@@ -1,7 +1,13 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
-import type { ScheduledTask } from "@/lib/scheduler/types";
+import { useState, useEffect, useCallback, useRef } from "react";
+import type { ScheduledTask, TaskLog } from "@/lib/scheduler/types";
+
+interface ModelOption {
+  provider: string;
+  modelId: string;
+  name: string;
+}
 
 // ============================================================================
 // Cron presets for quick selection
@@ -31,12 +37,10 @@ interface Props {
 
 interface TaskFormData {
   name: string;
-  type: "prompt" | "shell";
   cron: string;
   config: {
     cwd: string;
-    message?: string;
-    command?: string;
+    message: string;
     model?: { provider: string; modelId: string };
     toolNames?: string[];
   };
@@ -44,10 +48,30 @@ interface TaskFormData {
 
 const EMPTY_FORM: TaskFormData = {
   name: "",
-  type: "prompt",
   cron: "0 9 * * *",
-  config: { cwd: "" },
+  config: { cwd: "", message: "" },
 };
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+function formatDuration(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+  const min = Math.floor(ms / 60_000);
+  const sec = Math.round((ms % 60_000) / 1000);
+  return `${min}m ${sec}s`;
+}
+
+function formatTime(iso: string): string {
+  try {
+    const d = new Date(iso);
+    return d.toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  } catch {
+    return iso;
+  }
+}
 
 // ============================================================================
 // Component
@@ -60,6 +84,10 @@ export function SchedulerPanel({ onClose, cwd }: Props) {
   const [isCreating, setIsCreating] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [models, setModels] = useState<ModelOption[]>([]);
+  const [defaultModel, setDefaultModel] = useState<{ provider: string; modelId: string } | null>(null);
+  const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
+  const modelDropdownRef = useRef<HTMLDivElement>(null);
 
   const selectedTask = tasks.find((t) => t.id === selectedId) ?? null;
 
@@ -79,14 +107,41 @@ export function SchedulerPanel({ onClose, cwd }: Props) {
     void fetchTasks();
   }, [fetchTasks]);
 
+  // Fetch available models
+  useEffect(() => {
+    fetch("/api/models")
+      .then((res) => res.json())
+      .then((data: { modelList?: ModelOption[]; defaultModel?: { provider: string; modelId: string } | null }) => {
+        if (data.modelList) setModels(data.modelList);
+        if (data.defaultModel) setDefaultModel(data.defaultModel);
+      })
+      .catch(() => { /* ignore */ });
+  }, []);
+
+  // Close model dropdown on outside click
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (modelDropdownRef.current && !modelDropdownRef.current.contains(e.target as Node)) {
+        setModelDropdownOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, []);
+
   // Populate form when selecting a task
   useEffect(() => {
     if (selectedTask) {
+      const cfg = selectedTask.config as { cwd: string; message: string; model?: { provider: string; modelId: string }; toolNames?: string[] };
       setForm({
         name: selectedTask.name,
-        type: selectedTask.type,
         cron: selectedTask.cron,
-        config: { ...selectedTask.config } as TaskFormData["config"],
+        config: {
+          cwd: cfg.cwd || "",
+          message: cfg.message || "",
+          model: cfg.model,
+          toolNames: cfg.toolNames,
+        },
       });
       setIsCreating(false);
     }
@@ -117,7 +172,7 @@ export function SchedulerPanel({ onClose, cwd }: Props) {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             name: form.name,
-            type: form.type,
+            type: "prompt",
             cron: form.cron,
             config: form.config,
           }),
@@ -174,7 +229,7 @@ export function SchedulerPanel({ onClose, cwd }: Props) {
     }
   };
 
-  // -- Render --
+  // -- Render helpers --
 
   const resultIcon = (task: ScheduledTask) => {
     if (!task.lastResult) return null;
@@ -185,7 +240,34 @@ export function SchedulerPanel({ onClose, cwd }: Props) {
     );
   };
 
-  const typeLabel = (type: string) => (type === "prompt" ? "AI 对话" : "Shell 命令");
+  const logResultIcon = (log: TaskLog) => {
+    return log.result === "success" ? (
+      <span style={{ color: "#22c55e", fontWeight: 600 }}>✓ 成功</span>
+    ) : (
+      <span style={{ color: "#ef4444", fontWeight: 600 }}>✗ 失败</span>
+    );
+  };
+
+  // Provider-grouped model options
+  const modelGroups: { provider: string; options: ModelOption[] }[] = [];
+  for (const opt of models) {
+    const group = modelGroups.find((g) => g.provider === opt.provider);
+    if (group) group.options.push(opt);
+    else modelGroups.push({ provider: opt.provider, options: [opt] });
+  }
+
+  const selectedModelName = (() => {
+    const m = form.config.model;
+    if (m) {
+      const found = models.find((o) => o.provider === m.provider && o.modelId === m.modelId);
+      return found ? found.name : `${m.provider}/${m.modelId}`;
+    }
+    if (defaultModel) {
+      const found = models.find((o) => o.provider === defaultModel.provider && o.modelId === defaultModel.modelId);
+      return found ? `默认 — ${found.name}` : `默认 — ${defaultModel.provider}/${defaultModel.modelId}`;
+    }
+    return models.length > 0 ? `默认 — ${models[0].name}` : "加载中...";
+  })();
 
   return (
     <div
@@ -205,7 +287,7 @@ export function SchedulerPanel({ onClose, cwd }: Props) {
     >
       <div
         style={{
-          width: 680,
+          width: 820,
           maxWidth: "calc(100vw - 32px)",
           minHeight: 500,
           maxHeight: "calc(100vh - 64px)",
@@ -335,28 +417,6 @@ export function SchedulerPanel({ onClose, cwd }: Props) {
                   />
                 </div>
 
-                {/* Task type */}
-                <div>
-                  <label style={labelStyle}>任务类型</label>
-                  <div style={{ display: "flex", gap: 8 }}>
-                    {(["prompt", "shell"] as const).map((t) => (
-                      <button
-                        key={t}
-                        onClick={() => setForm({ ...form, type: t })}
-                        style={{
-                          padding: "6px 14px", borderRadius: 8,
-                          border: form.type === t ? "2px solid var(--accent)" : "1px solid var(--border)",
-                          background: form.type === t ? "var(--bg-selected)" : "transparent",
-                          color: form.type === t ? "var(--accent)" : "var(--text-muted)",
-                          cursor: "pointer", fontSize: 13, fontWeight: 600,
-                        }}
-                      >
-                        {typeLabel(t)}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
                 {/* Cron expression */}
                 <div>
                   <label style={labelStyle}>执行计划 (Cron 表达式)</label>
@@ -396,30 +456,92 @@ export function SchedulerPanel({ onClose, cwd }: Props) {
                   />
                 </div>
 
-                {/* Type-specific config */}
-                {form.type === "prompt" ? (
-                  <div>
-                    <label style={labelStyle}>AI 对话内容</label>
-                    <textarea
-                      value={form.config.message || ""}
-                      onChange={(e) => setForm({ ...form, config: { ...form.config, message: e.target.value } })}
-                      placeholder="发送给 AI 的指令，例如：请检查代码库中是否有未使用的导入"
-                      rows={5}
-                      style={{ ...inputStyle, resize: "vertical", minHeight: 80 }}
-                    />
-                  </div>
-                ) : (
-                  <div>
-                    <label style={labelStyle}>Shell 命令</label>
-                    <textarea
-                      value={form.config.command || ""}
-                      onChange={(e) => setForm({ ...form, config: { ...form.config, command: e.target.value } })}
-                      placeholder="例如：npm test"
-                      rows={3}
-                      style={{ ...inputStyle, resize: "vertical", fontFamily: "var(--font-mono)", minHeight: 60 }}
-                    />
-                  </div>
-                )}
+                {/* AI prompt */}
+                <div>
+                  <label style={labelStyle}>AI 对话内容</label>
+                  <textarea
+                    value={form.config.message}
+                    onChange={(e) => setForm({ ...form, config: { ...form.config, message: e.target.value } })}
+                    placeholder="发送给 AI 的指令，例如：请检查代码库中是否有未使用的导入"
+                    rows={4}
+                    style={{ ...inputStyle, resize: "vertical", minHeight: 80 }}
+                  />
+                </div>
+
+                {/* Model selector */}
+                <div ref={modelDropdownRef} style={{ position: "relative" }}>
+                  <label style={labelStyle}>选择模型</label>
+                  <button
+                    onClick={() => setModelDropdownOpen((v) => !v)}
+                    style={{
+                      ...inputStyle,
+                      display: "flex", alignItems: "center", justifyContent: "space-between",
+                      cursor: "pointer", textAlign: "left",
+                      background: modelDropdownOpen ? "var(--bg-hover)" : "var(--bg)",
+                    }}
+                  >
+                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {selectedModelName}
+                    </span>
+                    <span style={{ flexShrink: 0, marginLeft: 8, fontSize: 10, opacity: 0.5 }}>▼</span>
+                  </button>
+
+                  {modelDropdownOpen && (
+                    <div
+                      style={{
+                        position: "absolute", top: "100%", left: 0, right: 0, zIndex: 10,
+                        marginTop: 4, maxHeight: 240, overflowY: "auto",
+                        background: "var(--bg-panel)", border: "1px solid var(--border)",
+                        borderRadius: 8, boxShadow: "0 8px 24px rgba(0,0,0,0.15)",
+                      }}
+                    >
+                      <button
+                        onClick={() => {
+                          setForm({ ...form, config: { ...form.config, model: undefined } });
+                          setModelDropdownOpen(false);
+                        }}
+                        style={{
+                          display: "block", width: "100%", padding: "8px 12px",
+                          border: "none", background: !form.config.model ? "var(--bg-selected)" : "transparent",
+                          color: !form.config.model ? "var(--accent)" : "var(--text-muted)",
+                          cursor: "pointer", fontSize: 13, textAlign: "left",
+                          fontWeight: !form.config.model ? 600 : 400,
+                        }}
+                      >
+                        使用默认模型
+                      </button>
+                      {modelGroups.map((group) => (
+                        <div key={group.provider}>
+                          <div style={{ padding: "4px 12px 2px", fontSize: 10, fontWeight: 600, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.05em", borderTop: "1px solid var(--border)" }}>
+                            {group.provider}
+                          </div>
+                          {group.options.map((opt) => {
+                            const isSelected = form.config.model?.provider === opt.provider && form.config.model?.modelId === opt.modelId;
+                            return (
+                              <button
+                                key={`${opt.provider}:${opt.modelId}`}
+                                onClick={() => {
+                                  setForm({ ...form, config: { ...form.config, model: { provider: opt.provider, modelId: opt.modelId } } });
+                                  setModelDropdownOpen(false);
+                                }}
+                                style={{
+                                  display: "block", width: "100%", padding: "7px 12px 7px 24px",
+                                  border: "none", background: isSelected ? "var(--bg-selected)" : "transparent",
+                                  color: isSelected ? "var(--accent)" : "var(--text)",
+                                  cursor: "pointer", fontSize: 13, textAlign: "left",
+                                  fontWeight: isSelected ? 600 : 400,
+                                  overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                                }}
+                              >
+                                {opt.name}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
 
                 {/* Error */}
                 {error && (
@@ -469,6 +591,55 @@ export function SchedulerPanel({ onClose, cwd }: Props) {
                     </button>
                   </div>
                 </div>
+
+                {/* Execution log — only for existing tasks */}
+                {selectedTask && (
+                  <div style={{ borderTop: "1px solid var(--border)", paddingTop: 14, marginTop: 4 }}>
+                    <label style={{ ...labelStyle, marginBottom: 8 }}>
+                      执行日志 ({selectedTask.runCount || 0} 次)
+                    </label>
+                    {(selectedTask.logs || []).length === 0 ? (
+                      <div style={{ padding: 16, textAlign: "center", color: "var(--text-dim)", fontSize: 13, background: "var(--bg)", borderRadius: 8 }}>
+                        暂无执行记录
+                      </div>
+                    ) : (
+                      <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 260, overflowY: "auto" }}>
+                        {(selectedTask.logs || []).map((log) => (
+                          <div
+                            key={log.id}
+                            style={{
+                              padding: "10px 12px",
+                              borderRadius: 8,
+                              background: "var(--bg)",
+                              border: "1px solid var(--border)",
+                              fontSize: 12,
+                            }}
+                          >
+                            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: log.output || log.error ? 6 : 0 }}>
+                              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                                {logResultIcon(log)}
+                                <span style={{ color: "var(--text-dim)" }}>{formatTime(log.timestamp)}</span>
+                                <span style={{ color: "var(--text-dim)", fontFamily: "var(--font-mono)", fontSize: 11 }}>
+                                  {formatDuration(log.durationMs)}
+                                </span>
+                              </div>
+                            </div>
+                            {log.error && (
+                              <div style={{ color: "#ef4444", fontSize: 11, fontFamily: "var(--font-mono)", wordBreak: "break-all", lineHeight: 1.5 }}>
+                                {log.error}
+                              </div>
+                            )}
+                            {log.output && (
+                              <div style={{ color: "var(--text-muted)", fontSize: 11, fontFamily: "var(--font-mono)", whiteSpace: "pre-wrap", wordBreak: "break-all", lineHeight: 1.5, marginTop: log.error ? 4 : 0 }}>
+                                {log.output}
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
               </>
             ) : (
               <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", color: "var(--text-dim)", fontSize: 13 }}>

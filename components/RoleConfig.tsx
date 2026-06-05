@@ -31,6 +31,10 @@ function roleScope(role: AgentRole): string {
   return role.sourceInfo?.scope ?? (role.builtIn ? "builtIn" : "user");
 }
 
+function roleProjectCwd(role: AgentRole): string {
+  return role.sourceInfo?.filePath?.match(/^(.+?)[/\\][.]agents[/\\]roles\.json$/)?.[1] ?? "";
+}
+
 function rolesApiUrl(cwd?: string): string {
   return cwd ? `/api/roles?cwd=${encodeURIComponent(cwd)}` : "/api/roles";
 }
@@ -51,6 +55,98 @@ function cloneBlocks(blocks: Record<string, RoleSetting[]>): Record<string, Role
 
 function notifyRolesUpdated() {
   window.dispatchEvent(new Event("pi-agent.roles-updated"));
+}
+
+function ProjectList({ projects, selectedCwd, onSelect }: { projects: { cwd: string; displayName: string }[]; selectedCwd: string; onSelect: (cwd: string) => void }) {
+  const [open, setOpen] = useState(false);
+
+  if (projects.length === 0) {
+    return <div style={{ fontSize: 12, color: "var(--text-muted)", padding: "8px 2px" }}>暂无项目</div>;
+  }
+
+  const selectedProject = projects.find((project) => project.cwd === selectedCwd) ?? projects[0];
+  const selectedName = selectedProject.displayName || projectName(selectedProject.cwd);
+
+  return (
+    <div style={{ position: "relative" }}>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        title={selectedProject.cwd}
+        style={{
+          width: "100%",
+          minHeight: 40,
+          padding: "8px 10px",
+          border: "1px solid var(--border)",
+          borderRadius: 11,
+          background: "var(--bg)",
+          color: "var(--text)",
+          cursor: "pointer",
+          textAlign: "left",
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+        }}
+      >
+        <span style={{ width: 8, height: 8, borderRadius: 99, background: "var(--accent)", flexShrink: 0 }} />
+        <span style={{ flex: 1, minWidth: 0 }}>
+          <span style={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 12, fontWeight: 800 }}>{selectedName}</span>
+          <span style={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 10, color: "var(--text-dim)", marginTop: 2 }}>{selectedProject.cwd}</span>
+        </span>
+        <span style={{ color: "var(--text-dim)", fontSize: 12, transform: open ? "rotate(180deg)" : "none", transition: "transform 0.15s" }}>⌄</span>
+      </button>
+
+      {open && (
+        <div
+          className="role-project-list"
+          style={{
+            position: "absolute",
+            left: 0,
+            right: 0,
+            top: "calc(100% + 6px)",
+            zIndex: 20,
+            maxHeight: 220,
+            overflowY: "auto",
+            padding: 6,
+            border: "1px solid var(--border)",
+            borderRadius: 12,
+            background: "var(--bg-panel)",
+            boxShadow: "0 12px 28px rgba(0,0,0,0.14)",
+          }}
+        >
+          {projects.map((project) => {
+            const active = project.cwd === selectedCwd;
+            const name = project.displayName || projectName(project.cwd);
+            return (
+              <button
+                key={project.cwd}
+                type="button"
+                onClick={() => { onSelect(project.cwd); setOpen(false); }}
+                title={project.cwd}
+                style={{
+                  width: "100%",
+                  padding: "8px 9px",
+                  border: "none",
+                  borderRadius: 9,
+                  background: active ? "var(--bg-selected)" : "transparent",
+                  color: active ? "var(--text)" : "var(--text-muted)",
+                  cursor: "pointer",
+                  textAlign: "left",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  marginBottom: 2,
+                }}
+              >
+                <span style={{ width: 7, height: 7, borderRadius: 99, background: active ? "var(--accent)" : "var(--border)", flexShrink: 0 }} />
+                <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 12, fontWeight: active ? 800 : 600 }}>{name}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
 }
 
 export function RoleConfig({ onClose, cwd, projects = [] }: { onClose: () => void; cwd?: string; projects?: { cwd: string; displayName: string }[] }) {
@@ -80,10 +176,11 @@ export function RoleConfig({ onClose, cwd, projects = [] }: { onClose: () => voi
   const [draftScope, setDraftScope] = useState<"user" | "project">("user");
   const [draftProjectCwd, setDraftProjectCwd] = useState(() => selectedProjectCwd);
 
-  const loadRoles = useCallback(async () => {
+  const loadRoles = useCallback(async (overrideCwd?: string) => {
+    const targetCwd = overrideCwd ?? effectiveCwd;
     setLoading(true);
     try {
-      const res = await fetch(rolesApiUrl(effectiveCwd), { cache: "no-store" });
+      const res = await fetch(rolesApiUrl(targetCwd), { cache: "no-store" });
       if (!res.ok) return;
       const data = await res.json() as { roles: AgentRole[] };
       const list = data.roles ?? [];
@@ -164,17 +261,39 @@ export function RoleConfig({ onClose, cwd, projects = [] }: { onClose: () => voi
         patchBody.moveRole = true;
         patchBody.scope = draftScope;
         if (draftScope === "project" && draftProjectCwd) patchBody.cwd = draftProjectCwd;
-        const currentFileCwd = selectedRole?.sourceInfo?.filePath?.match(/^(.+?)[/\\][.]agents[/\\]roles\.json$/)?.[1] ?? null;
-        if (currentFileCwd && currentFileCwd !== effectiveCwd) patchBody.fromCwd = currentFileCwd;
+        // Set fromCwd to tell the backend where the role currently lives.
+        // null → global role (search only global file).
+        // Non-null string → project role (search that project file first).
+        if (currentScope === "user") {
+          patchBody.fromCwd = null;
+        } else {
+          const currentFileCwd = selectedRole?.sourceInfo?.filePath?.match(/^(.+?)[/\\][.]agents[/\\]roles\.json$/)?.[1] ?? null;
+          if (currentFileCwd && currentFileCwd !== effectiveCwd) patchBody.fromCwd = currentFileCwd;
+        }
       }
       const res = await fetch(roleApiUrl(draft.id, effectiveCwd), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(patchBody),
       });
-      if (!res.ok) return;
-      if (shouldMove && draftScope === "project" && draftProjectCwd) setSelectedProjectCwd(draftProjectCwd);
-      await loadRoles();
+      if (!res.ok) {
+        let errMsg = `保存失败 (HTTP ${res.status})`;
+        try {
+          const errData = await res.json() as { error?: string };
+          if (errData.error) errMsg = errData.error;
+        } catch { /* ignore parse error */ }
+        window.alert(errMsg);
+        return;
+      }
+      if (shouldMove && draftScope === "project" && draftProjectCwd) {
+        setSelectedProjectCwd(draftProjectCwd);
+        // Reload with the target project cwd immediately, because
+        // setSelectedProjectCwd won't have taken effect yet and effectiveCwd
+        // still points to the old project.
+        await loadRoles(draftProjectCwd);
+      } else {
+        await loadRoles();
+      }
       notifyRolesUpdated();
     } finally {
       setSaving(false);
@@ -220,11 +339,11 @@ export function RoleConfig({ onClose, cwd, projects = [] }: { onClose: () => voi
               </div>
               <button onClick={() => setNewRoleOpen((v) => !v)} style={{ width: 30, height: 30, borderRadius: 9, border: "1px solid var(--border)", background: "var(--bg)", color: "var(--text)", cursor: "pointer", fontSize: 18 }}>+</button>
             </div>
-            <select value={selectedProjectCwd} onChange={(e) => setSelectedProjectCwd(e.target.value)} style={{ ...selectStyle, marginTop: 0, marginBottom: 0 }} title="选择要管理项目角色的项目">
-              {projectChoices.length === 0 && <option value="">无项目</option>}
-              {projectChoices.map((project) => <option key={project.cwd} value={project.cwd}>{project.displayName || projectName(project.cwd)}</option>)}
-            </select>
-            {selectedProjectCwd && <div style={{ fontSize: 10, color: "var(--text-dim)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{selectedProjectCwd}</div>}
+            <ProjectList
+              projects={projectChoices}
+              selectedCwd={selectedProjectCwd}
+              onSelect={setSelectedProjectCwd}
+            />
           </div>
           {newRoleOpen && (
             <div style={createPanelStyle}>
@@ -271,9 +390,10 @@ export function RoleConfig({ onClose, cwd, projects = [] }: { onClose: () => voi
           <div style={{ flex: 1, overflowY: "auto", padding: 8 }}>
             {loading ? <div style={{ padding: 12, color: "var(--text-muted)", fontSize: 12 }}>加载中...</div> : (() => {
               const groups = ["project", "user", "builtIn"].map((scope) => ({ scope, items: roles.filter((role) => roleScope(role) === scope) })).filter((g) => g.items.length);
+              const selectedProjectLabel = projectChoices.find((project) => project.cwd === selectedProjectCwd)?.displayName ?? (selectedProjectCwd ? projectName(selectedProjectCwd) : "项目");
               return groups.map((group) => (
                 <div key={group.scope} style={{ marginBottom: 8 }}>
-                  <div style={{ padding: "8px 8px 5px", fontSize: 10, fontWeight: 700, color: group.scope === "project" ? "var(--accent)" : "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.06em" }}>{SCOPE_LABELS[group.scope] ?? group.scope}</div>
+                  <div style={{ padding: "8px 8px 5px", fontSize: 10, fontWeight: 700, color: group.scope === "project" ? "var(--accent)" : "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.06em" }}>{group.scope === "project" ? `项目 · ${selectedProjectLabel}` : (SCOPE_LABELS[group.scope] ?? group.scope)}</div>
                   {group.items.map((role) => {
                     const active = role.id === selectedRoleId;
                     const scope = roleScope(role);
@@ -281,7 +401,7 @@ export function RoleConfig({ onClose, cwd, projects = [] }: { onClose: () => voi
                       <button key={role.id} onClick={() => setSelectedRoleId(role.id)} style={{ width: "100%", display: "block", textAlign: "left", padding: "10px 11px", border: "none", borderRadius: 10, background: active ? "var(--bg-selected)" : "transparent", color: active ? "var(--text)" : "var(--text-muted)", cursor: "pointer", marginBottom: 4 }}>
                         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                           <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 13, fontWeight: active ? 700 : 500 }}>{role.name}</span>
-                          <span style={{ ...scopeBadgeStyle, color: scope === "project" ? "var(--accent)" : "var(--text-dim)" }}>{SCOPE_LABELS[scope] ?? scope}</span>
+                          <span style={{ ...scopeBadgeStyle, color: scope === "project" ? "var(--accent)" : "var(--text-dim)" }}>{scope === "project" ? (projectName(roleProjectCwd(role)) || SCOPE_LABELS[scope]) : (SCOPE_LABELS[scope] ?? scope)}</span>
                         </div>
                         <div style={{ marginTop: 4, fontSize: 11, color: "var(--text-dim)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{settingCount(role)} 条设定 · {role.description || "无描述"}</div>
                       </button>

@@ -87,6 +87,81 @@ function setEffectiveSystemPrompt(session: AgentSessionLike, prompt: string): vo
   (session as unknown as { _baseSystemPrompt?: string })._baseSystemPrompt = prompt;
 }
 
+const MIN_AUTO_RETRY_DELAY_MS = 5000;
+const AUTO_RETRY_SETTLE_MS = 5000;
+const PREMATURE_STREAM_ERROR_RE = /connection.?lost|websocket.?closed|websocket.?error|other side closed|ended without|stream ended before message_stop|http2 request did not get a response|terminated/i;
+
+type AssistantLike = {
+  stopReason?: string;
+  errorMessage?: string;
+  content?: unknown;
+};
+
+function getAssistantContentLength(message: AssistantLike): number {
+  const content = message.content;
+  if (typeof content === "string") return content.trim().length;
+  if (!Array.isArray(content)) return 0;
+
+  let length = 0;
+  for (const block of content) {
+    if (!isRecord(block)) continue;
+    if (typeof block.text === "string") length += block.text.trim().length;
+    else if (typeof block.thinking === "string") length += block.thinking.trim().length;
+  }
+  return length;
+}
+
+function sleepMs(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function hardenAutoRetry(session: AgentSessionLike): void {
+  const settingsManager = session.settingsManager as unknown as {
+    getRetrySettings?: () => { enabled: boolean; maxRetries: number; baseDelayMs: number };
+  };
+  const originalGetRetrySettings = settingsManager.getRetrySettings?.bind(session.settingsManager);
+  if (originalGetRetrySettings) {
+    settingsManager.getRetrySettings = () => {
+      const settings = originalGetRetrySettings();
+      return { ...settings, baseDelayMs: Math.max(settings.baseDelayMs ?? 0, MIN_AUTO_RETRY_DELAY_MS) };
+    };
+  }
+
+  const rawSession = session as unknown as {
+    _isRetryableError?: (message: AssistantLike) => boolean;
+    _prepareRetry?: (message: AssistantLike) => Promise<boolean>;
+  };
+
+  const originalIsRetryableError = rawSession._isRetryableError?.bind(session);
+  if (originalIsRetryableError) {
+    rawSession._isRetryableError = (message: AssistantLike) => {
+      const retryable = originalIsRetryableError(message);
+      if (!retryable) return false;
+
+      // Premature-stream/transport-close errors are noisy: providers can emit
+      // them after a complete-looking assistant message. Retrying those causes
+      // an unnecessary `continue`. Only retry these when essentially no useful
+      // assistant content was received.
+      const err = message.errorMessage ?? "";
+      if (PREMATURE_STREAM_ERROR_RE.test(err) && getAssistantContentLength(message) >= 20) {
+        return false;
+      }
+
+      return true;
+    };
+  }
+
+  const originalPrepareRetry = rawSession._prepareRetry?.bind(session);
+  if (originalPrepareRetry) {
+    rawSession._prepareRetry = async (message: AssistantLike) => {
+      // Give SSE/tool/agent-end bookkeeping a clean quiet window before deciding
+      // to send `continue`; this avoids racing other async cleanup paths.
+      await sleepMs(AUTO_RETRY_SETTLE_MS);
+      return originalPrepareRetry(message);
+    };
+  }
+}
+
 const TOOL_EXECUTION_MODES: Record<string, "parallel" | "sequential"> = {
   read: "parallel",
   grep: "parallel",
@@ -347,7 +422,19 @@ export class AgentSessionWrapper {
       case "set_model": {
         const { provider, modelId } = command as { provider: string; modelId: string };
         const registry = this.inner.modelRegistry;
-        const model = registry.find(provider, modelId);
+        let model = registry.find(provider, modelId);
+
+        // Existing AgentSession instances keep the ModelRegistry they were
+        // created with. If ~/.pi/agent/models.json was edited while this
+        // wrapper is alive, the UI may already show the new model (loaded via
+        // /api/models) but the stale in-memory registry cannot find it. Try a
+        // fresh registry before failing so newly-saved models are selectable
+        // without restarting the app/session.
+        if (!model) {
+          const { AuthStorage, ModelRegistry } = await import("@earendil-works/pi-coding-agent");
+          model = ModelRegistry.create(AuthStorage.create()).find(provider, modelId);
+        }
+
         if (!model) throw new Error(`Model not found: ${provider}/${modelId}`);
         await this.inner.setModel(model);
         return { id: model.id, provider: model.provider };
@@ -588,6 +675,7 @@ export async function startRpcSession(
     });
 
     configureToolExecutionModes(inner);
+    hardenAutoRetry(inner);
 
     // If specific tool names were requested (non-empty), narrow active tools now
     if (toolNames && toolNames.length > 0) {

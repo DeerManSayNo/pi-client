@@ -183,12 +183,21 @@ export function readRoles(cwd?: string | null): AgentRole[] {
 
   const byId = new Map<string, AgentRole>();
   for (const role of BUILT_IN_ROLES) byId.set(role.id, { ...role, sourceInfo: { scope: "builtIn" }, canDelete: false });
+  // Global custom: merge with built-in if same ID, otherwise add standalone
   for (const role of globalCustom) {
     const base = byId.get(role.id);
     byId.set(role.id, base?.builtIn ? { ...base, ...role, builtIn: true, sourceInfo: { scope: "user", filePath: rolesFilePath() }, canDelete: false } : role);
   }
-  const roles = [...byId.values(), ...projectCustom.filter((role) => !byId.has(role.id))];
-  return roles;
+  // Project custom: override global / built-in when IDs conflict (so project roles show correct scope)
+  for (const role of projectCustom) {
+    const base = byId.get(role.id);
+    if (base?.builtIn) {
+      byId.set(role.id, { ...base, ...role, builtIn: true, sourceInfo: { scope: "project", filePath: projectRolesFilePath(cwd!) }, canDelete: false });
+    } else {
+      byId.set(role.id, role);
+    }
+  }
+  return [...byId.values()];
 }
 
 export function writeRoles(roles: AgentRole[], cwd?: string | null, scope: "user" | "project" = "user"): void {
@@ -286,17 +295,26 @@ export function moveRole(roleId: string, input: { scope: "user" | "project"; cwd
 
   const targetScope = input.scope === "project" && input.cwd?.trim() ? "project" : "user";
   const targetFile = fileForScope(targetScope, input.cwd);
-  if (targetFile === found.file) return role;
 
-  const sourceNext = found.roles.filter((r) => r.id !== roleId);
-  const targetRoles = readRolesFromFile(targetFile, targetScope).filter((r) => r.id !== roleId);
   const moved: AgentRole = {
     ...role,
     sourceInfo: { scope: targetScope, filePath: targetFile },
     canDelete: true,
     updatedAt: nowIso(),
   };
+
+  if (targetFile === found.file) {
+    // Already in the target file — just update sourceInfo in place and return
+    found.roles[found.index] = moved;
+    writeRolesToFile(found.file, found.roles);
+    return moved;
+  }
+
+  // Remove from source file; overwrite any existing copy in target file
+  const sourceNext = found.roles.filter((r) => r.id !== roleId);
   writeRolesToFile(found.file, sourceNext);
+
+  const targetRoles = readRolesFromFile(targetFile, targetScope).filter((r) => r.id !== roleId);
   writeRolesToFile(targetFile, [...targetRoles, moved]);
   return moved;
 }

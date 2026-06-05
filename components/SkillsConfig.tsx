@@ -28,6 +28,42 @@ function sourceLabel(skill: Skill): string {
   return "path";
 }
 
+/** Derive a human-friendly sub-group name for a skill within its scope. */
+function subGroupKey(skill: Skill): string {
+  const src = skill.sourceInfo?.source;
+  // If source is a meaningful identifier (e.g. package name from skills.sh),
+  // use it as the subgroup key
+  if (src && src !== "auto" && src !== "local" && src !== "project" && src !== "user") {
+    return src;
+  }
+  // Otherwise, use the baseDir (the directory that was scanned for skills)
+  return skill.baseDir || "";
+}
+
+/** Shorten a sub-group key for display. */
+function subGroupDisplay(key: string): string {
+  // Package-style sources (e.g. owner/repo@skill) — just show the repo part
+  const atIdx = key.indexOf("@");
+  if (atIdx > -1) {
+    const beforeAt = key.slice(0, atIdx);
+    const parts = beforeAt.split("/");
+    return parts.length >= 2 ? parts.slice(-2).join("/") : beforeAt;
+  }
+  // Path-like key — shorten
+  if (key.startsWith("/") || key.startsWith("~")) {
+    // Extract the last meaningful directory name
+    const parts = key.replace(/\/+$/, "").split("/");
+    // e.g. ~/.pi/agent/skills → "pi/agent/skills", ~/.agents → ".agents"
+    // Show last 1-2 segments that help distinguish
+    const homeIdx = parts.findIndex((p) => p === "~" || p === ".pi" || p === ".agents");
+    if (homeIdx >= 0) {
+      return parts.slice(homeIdx).join("/");
+    }
+    return parts.slice(-2).join("/");
+  }
+  return key || "其他";
+}
+
 const labelMap: Record<string, string> = {
   global: "全局",
   project: "项目",
@@ -101,6 +137,8 @@ function SkillDetail({
   saveError: string | null;
 }) {
   const label = sourceLabel(skill);
+  const sgKey = subGroupKey(skill);
+  const sgDisplay = subGroupDisplay(sgKey);
   const enabled = !skill.disableModelInvocation;
 
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -115,7 +153,7 @@ function SkillDetail({
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-      {/* Path + tag + toggle + delete */}
+      {/* Path + tags + toggle + delete */}
       <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
         <span
           style={{
@@ -133,6 +171,26 @@ function SkillDetail({
         >
           {labelMap[label] ?? label}
         </span>
+        {sgDisplay && (
+          <span
+            style={{
+              fontSize: 9,
+              padding: "1px 4px",
+              borderRadius: 3,
+              flexShrink: 0,
+              background: "rgba(139,92,246,0.1)",
+              color: "rgba(139,92,246,0.75)",
+              fontFamily: "var(--font-mono)",
+              maxWidth: 140,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+            title={sgKey}
+          >
+            {sgDisplay}
+          </span>
+        )}
         <span
           style={{
             fontFamily: "var(--font-mono)",
@@ -858,99 +916,142 @@ export function SkillsConfig({
                 </div>
               ) : (
                 (() => {
-                  const groups: { label: string; skills: typeof skills }[] = [];
-                  for (const grpLabel of ["project", "global", "path"]) {
-                    const grpSkills = skills.filter(
-                      (s) => sourceLabel(s) === grpLabel,
+                  // Build nested groups: scope → sub-group → skills
+                  type SubGroup = { label: string; skills: typeof skills };
+                  type ScopeGroup = { label: string; subGroups: SubGroup[] };
+                  const scopeGroups: ScopeGroup[] = [];
+                  for (const scope of ["project", "global", "path"]) {
+                    const scopeSkills = skills.filter(
+                      (s) => sourceLabel(s) === scope,
                     );
-                    if (grpSkills.length > 0)
-                      groups.push({ label: grpLabel, skills: grpSkills });
+                    if (scopeSkills.length === 0) continue;
+                    // Within a scope, group by subGroupKey
+                    const subMap = new Map<string, typeof skills>();
+                    for (const skill of scopeSkills) {
+                      const key = subGroupKey(skill);
+                      if (!subMap.has(key)) subMap.set(key, []);
+                      subMap.get(key)!.push(skill);
+                    }
+                    const subGroups: SubGroup[] = [...subMap.entries()].map(
+                      ([key, list]) => ({
+                        label: subGroupDisplay(key),
+                        skills: list,
+                      }),
+                    );
+                    scopeGroups.push({
+                      label: labelMap[scope] ?? scope,
+                      subGroups,
+                    });
                   }
-                  return groups.map(
-                    ({ label: grpLabel, skills: grpSkills }) => (
-                      <div key={grpLabel} style={{ marginBottom: 6 }}>
-                        <div
-                          style={{
-                            padding: "4px 8px 3px",
-                            fontSize: 10,
-                            fontWeight: 600,
-                            color: "var(--text-dim)",
-                            textTransform: "uppercase",
-                            letterSpacing: "0.06em",
-                          }}
-                        >
-                          {labelMap[grpLabel] ?? grpLabel}
-                        </div>
-                        {grpSkills.map((skill) => {
-                          const isSelected =
-                            !addMode && selected === skill.filePath;
-                          const disabled = skill.disableModelInvocation;
-                          return (
-                            <div
-                              key={skill.filePath}
-                              onClick={() => {
-                                setSelected(skill.filePath);
-                                setAddMode(false);
-                              }}
-                              style={{
-                                display: "flex",
-                                alignItems: "center",
-                                gap: 7,
-                                padding: "8px 8px",
-                                borderRadius: 5,
-                                cursor: "pointer",
-                                background: isSelected
-                                  ? "var(--bg-selected)"
-                                  : "none",
-                              }}
-                              onMouseEnter={(e) => {
-                                if (!isSelected)
-                                  e.currentTarget.style.background =
-                                    "var(--bg-hover)";
-                              }}
-                              onMouseLeave={(e) => {
-                                if (!isSelected)
-                                  e.currentTarget.style.background = "none";
-                              }}
-                            >
-                              <span
+                  return scopeGroups.map(({ label: scopeLabel, subGroups }) => (
+                    <div key={scopeLabel} style={{ marginBottom: 6 }}>
+                      <div
+                        style={{
+                          padding: "4px 8px 3px",
+                          fontSize: 10,
+                          fontWeight: 600,
+                          color: "var(--text-dim)",
+                          textTransform: "uppercase",
+                          letterSpacing: "0.06em",
+                        }}
+                      >
+                        {scopeLabel}
+                      </div>
+                      {subGroups.map(({ label: sgLabel, skills: sgSkills }) => {
+                        // Only show sub-group header when there are multiple sub-groups
+                        const showHeader = subGroups.length > 1;
+                        return (
+                          <div key={sgLabel}>
+                            {showHeader && (
+                              <div
                                 style={{
-                                  flexShrink: 0,
-                                  width: 7,
-                                  height: 7,
-                                  borderRadius: "50%",
-                                  background: disabled
-                                    ? "var(--border)"
-                                    : "var(--accent)",
-                                  boxShadow: disabled
-                                    ? "none"
-                                    : "0 0 4px var(--accent)",
-                                  transition:
-                                    "background 0.15s, box-shadow 0.15s",
-                                }}
-                              />
-                              <span
-                                style={{
-                                  fontSize: 12,
-                                  fontWeight: isSelected ? 600 : 400,
-                                  color: disabled
-                                    ? "var(--text-dim)"
-                                    : "var(--text)",
+                                  padding: "2px 8px 2px 16px",
+                                  fontSize: 9,
+                                  fontWeight: 500,
+                                  color: "var(--text-dim)",
                                   fontFamily: "var(--font-mono)",
-                                  flex: 1,
+                                  opacity: 0.65,
                                   overflow: "hidden",
                                   textOverflow: "ellipsis",
                                   whiteSpace: "nowrap",
                                 }}
+                                title={sgLabel}
                               >
-                                {skill.name}
-                              </span>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    ),
-                  );
+                                {sgLabel}
+                              </div>
+                            )}
+                            {sgSkills.map((skill) => {
+                              const isSelected =
+                                !addMode && selected === skill.filePath;
+                              const disabled = skill.disableModelInvocation;
+                              return (
+                                <div
+                                  key={skill.filePath}
+                                  onClick={() => {
+                                    setSelected(skill.filePath);
+                                    setAddMode(false);
+                                  }}
+                                  style={{
+                                    display: "flex",
+                                    alignItems: "center",
+                                    gap: 7,
+                                    padding: "8px 8px",
+                                    borderRadius: 5,
+                                    cursor: "pointer",
+                                    background: isSelected
+                                      ? "var(--bg-selected)"
+                                      : "none",
+                                  }}
+                                  onMouseEnter={(e) => {
+                                    if (!isSelected)
+                                      e.currentTarget.style.background =
+                                        "var(--bg-hover)";
+                                  }}
+                                  onMouseLeave={(e) => {
+                                    if (!isSelected)
+                                      e.currentTarget.style.background = "none";
+                                  }}
+                                >
+                                  <span
+                                    style={{
+                                      flexShrink: 0,
+                                      width: 7,
+                                      height: 7,
+                                      borderRadius: "50%",
+                                      background: disabled
+                                        ? "var(--border)"
+                                        : "var(--accent)",
+                                      boxShadow: disabled
+                                        ? "none"
+                                        : "0 0 4px var(--accent)",
+                                      transition:
+                                        "background 0.15s, box-shadow 0.15s",
+                                    }}
+                                  />
+                                  <span
+                                    style={{
+                                      fontSize: 12,
+                                      fontWeight: isSelected ? 600 : 400,
+                                      color: disabled
+                                        ? "var(--text-dim)"
+                                        : "var(--text)",
+                                      fontFamily: "var(--font-mono)",
+                                      flex: 1,
+                                      overflow: "hidden",
+                                      textOverflow: "ellipsis",
+                                      whiteSpace: "nowrap",
+                                    }}
+                                  >
+                                    {skill.name}
+                                  </span>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ));
                 })()
               )}
             </div>

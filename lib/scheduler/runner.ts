@@ -1,40 +1,32 @@
 // ============================================================================
-// Task runner — executes scheduled tasks (prompt or shell)
+// Task runner — executes scheduled prompt tasks via AI agent
 // ============================================================================
 
-import { exec } from "child_process";
-import { promisify } from "util";
-import type { ScheduledTask, PromptTaskConfig, ShellTaskConfig } from "./types";
-import { updateTask } from "./store";
+import type { ScheduledTask, PromptTaskConfig, TaskLog } from "./types";
+import { updateTask, appendTaskLog } from "./store";
 
-const execAsync = promisify(exec);
-
-function recordResult(taskId: string, result: "success" | "error", error?: string): void {
+function recordResult(taskId: string, result: "success" | "error", output?: string, error?: string, durationMs?: number): void {
   updateTask(taskId, {
     lastRunAt: new Date().toISOString(),
     lastResult: result,
     lastError: error,
   });
-}
 
-async function runShellTask(task: ScheduledTask, config: ShellTaskConfig): Promise<void> {
-  try {
-    const { stdout, stderr } = await execAsync(config.command, {
-      cwd: config.cwd || process.cwd(),
-      timeout: 300_000, // 5 minutes
-      maxBuffer: 10 * 1024 * 1024, // 10MB
-    });
-    const output = (stdout + stderr).trim();
-    recordResult(task.id, "success");
-    console.log(`[scheduler] Shell task "${task.name}" completed. Output: ${output.slice(0, 200)}`);
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err);
-    recordResult(task.id, "error", message);
-    console.error(`[scheduler] Shell task "${task.name}" failed: ${message}`);
-  }
+  const log: TaskLog = {
+    id: crypto.randomUUID(),
+    timestamp: new Date().toISOString(),
+    result,
+    error,
+    output: output?.slice(0, 500),
+    durationMs: durationMs ?? 0,
+  };
+  appendTaskLog(taskId, log);
 }
 
 async function runPromptTask(task: ScheduledTask, config: PromptTaskConfig): Promise<void> {
+  const startTime = Date.now();
+  let capturedOutput: string | undefined;
+
   try {
     const { createAgentSession, SessionManager, getAgentDir } = await import("@earendil-works/pi-coding-agent");
 
@@ -74,7 +66,7 @@ async function runPromptTask(task: ScheduledTask, config: PromptTaskConfig): Pro
 
     await new Promise<void>((resolve, reject) => {
       let finished = false;
-      const startTime = Date.now();
+      const execStartTime = Date.now();
 
       const unsubscribe = session.subscribe((event) => {
         if (finished) return;
@@ -83,9 +75,21 @@ async function runPromptTask(task: ScheduledTask, config: PromptTaskConfig): Pro
         if (event.type === "agent_end") {
           finished = true;
           unsubscribe();
-          // Check for error messages in the agent's output
-          const messages = (event as { messages?: Array<{ errorMessage?: string }> }).messages;
+
+          const agentEndEvent = event as { messages?: Array<{ role?: string; content?: unknown; errorMessage?: string }> };
+          const messages = agentEndEvent.messages;
           if (messages) {
+            // Capture last assistant message as output
+            for (let i = messages.length - 1; i >= 0; i--) {
+              const msg = messages[i];
+              if (msg.role === "assistant" && msg.content) {
+                capturedOutput = typeof msg.content === "string"
+                  ? msg.content
+                  : JSON.stringify(msg.content);
+                break;
+              }
+            }
+            // Check for error messages
             for (const msg of messages) {
               if (msg.errorMessage) {
                 agentError = msg.errorMessage;
@@ -98,7 +102,7 @@ async function runPromptTask(task: ScheduledTask, config: PromptTaskConfig): Pro
         }
 
         // Timeout check
-        if (Date.now() - startTime > maxWaitMs) {
+        if (Date.now() - execStartTime > maxWaitMs) {
           finished = true;
           unsubscribe();
           reject(new Error("Prompt execution timed out (30 minutes)"));
@@ -115,15 +119,20 @@ async function runPromptTask(task: ScheduledTask, config: PromptTaskConfig): Pro
       });
     });
 
+    const durationMs = Date.now() - startTime;
+
     if (agentError) {
-      throw new Error(agentError);
+      recordResult(task.id, "error", capturedOutput, agentError, durationMs);
+      console.error(`[scheduler] Prompt task "${task.name}" failed: ${agentError}`);
+      return;
     }
 
-    recordResult(task.id, "success");
-    console.log(`[scheduler] Prompt task "${task.name}" completed successfully`);
+    recordResult(task.id, "success", capturedOutput, undefined, durationMs);
+    console.log(`[scheduler] Prompt task "${task.name}" completed successfully (${durationMs}ms)`);
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
-    recordResult(task.id, "error", message);
+    const durationMs = Date.now() - startTime;
+    recordResult(task.id, "error", capturedOutput, message, durationMs);
     console.error(`[scheduler] Prompt task "${task.name}" failed: ${message}`);
   }
 }
@@ -136,9 +145,5 @@ export async function executeTask(task: ScheduledTask): Promise<void> {
     runCount: (task.runCount || 0) + 1,
   });
 
-  if (task.type === "shell") {
-    await runShellTask(task, task.config as ShellTaskConfig);
-  } else if (task.type === "prompt") {
-    await runPromptTask(task, task.config as PromptTaskConfig);
-  }
+  await runPromptTask(task, task.config as PromptTaskConfig);
 }

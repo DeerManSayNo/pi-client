@@ -9,24 +9,32 @@ export interface PromptTaskConfig {
   toolNames?: string[];
 }
 
-export interface ShellTaskConfig {
-  cwd: string;
-  command: string;
+/** Single execution record */
+export interface TaskLog {
+  id: string;
+  timestamp: string;
+  result: "success" | "error";
+  error?: string;
+  /** First ~500 chars of the agent's final output */
+  output?: string;
+  durationMs: number;
 }
 
 export interface ScheduledTask {
   id: string;
   name: string;
-  type: "prompt" | "shell";
+  type: "prompt";
   cron: string;
   enabled: boolean;
-  config: PromptTaskConfig | ShellTaskConfig;
+  config: PromptTaskConfig;
   createdAt: string;
   lastRunAt?: string;
   lastResult?: "success" | "error";
   lastError?: string;
   /** How many times this task has been executed */
   runCount: number;
+  /** Execution logs, most recent first. Capped at 50 entries. */
+  logs: TaskLog[];
 }
 
 export interface TaskStore {

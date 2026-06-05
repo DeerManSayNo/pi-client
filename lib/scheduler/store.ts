@@ -4,7 +4,9 @@
 
 import fs from "fs";
 import path from "path";
-import type { ScheduledTask, TaskStore } from "./types";
+import type { ScheduledTask, TaskLog, TaskStore } from "./types";
+
+const MAX_LOGS_PER_TASK = 50;
 
 function getStorePath(): string {
   const home = process.env.HOME || process.env.USERPROFILE || "/tmp";
@@ -23,7 +25,12 @@ export function loadTasks(): ScheduledTask[] {
   try {
     const raw = fs.readFileSync(storePath, "utf-8");
     const store = JSON.parse(raw) as TaskStore;
-    return Array.isArray(store.tasks) ? store.tasks : [];
+    const tasks = Array.isArray(store.tasks) ? store.tasks : [];
+    // Ensure logs field exists on all tasks (migration)
+    for (const t of tasks) {
+      if (!Array.isArray(t.logs)) (t as ScheduledTask).logs = [];
+    }
+    return tasks;
   } catch {
     return [];
   }
@@ -54,6 +61,17 @@ export function updateTask(id: string, updates: Partial<ScheduledTask>): Schedul
   tasks[index] = { ...tasks[index], ...updates, id }; // id is immutable
   saveTasks(tasks);
   return tasks[index];
+}
+
+export function appendTaskLog(taskId: string, log: TaskLog): boolean {
+  const tasks = loadTasks();
+  const index = tasks.findIndex((t) => t.id === taskId);
+  if (index === -1) return false;
+  const task = tasks[index];
+  const logs = [log, ...(task.logs || [])].slice(0, MAX_LOGS_PER_TASK);
+  tasks[index] = { ...task, logs };
+  saveTasks(tasks);
+  return true;
 }
 
 export function deleteTask(id: string): boolean {

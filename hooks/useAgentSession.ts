@@ -267,6 +267,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const watchdogCheckingRef = useRef(false);
   const watchdogStaleRecoveriesRef = useRef(0);
   const autoContinueSentRef = useRef(false);
+  const autoContinueInProgressRef = useRef(false);
+  const abortCompletedRef = useRef(false);
   const receivedAssistantMessageRef = useRef(false);
 
   const setNewSessionModel = opts.setNewSessionModel ?? setNewSessionModelState;
@@ -398,6 +400,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         dispatch({ type: "start" });
         break;
       case "agent_end": {
+        // If an auto-continue is in progress, this agent_end is the stale
+        // event from the aborted run.  Don't touch UI state — just signal
+        // that abort has completed so recoverWithContinue can proceed.
+        if (autoContinueInProgressRef.current) {
+          abortCompletedRef.current = true;
+          break;
+        }
         watchdogStaleRecoveriesRef.current = 0;
         const eventData = event as { willRetry?: boolean; error?: string };
         const willRetry = eventData.willRetry ?? true;
@@ -768,34 +777,66 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const CHECK_INTERVAL_MS = WATCHDOG_CHECK_INTERVAL_MS;
 
     // Recovery for genuinely stuck sessions (backend still thinks it's
-    // streaming but no progress is being made). Aborts first, then
-    // reloads and sends "continue" so the model picks up where it left off.
+    // streaming but no progress is being made). Aborts first, then waits
+    // for the abort's agent_end event so it doesn't collide with the
+    // follow-up, reloads, and sends "continue" so the model picks up
+    // where it left off.
     const recoverWithContinue = async (sid: string, abortFirst: boolean) => {
+      if (autoContinueSentRef.current) return;
+      autoContinueSentRef.current = true;
+
       if (abortFirst) {
+        autoContinueInProgressRef.current = true;
+        abortCompletedRef.current = false;
         try {
           await sendAgentCommand(sid, { type: "abort" });
         } catch (e) {
           console.error("Agent watchdog abort failed:", e);
+          // Even if abort RPC fails, mark as completed so we don't wait forever
+          abortCompletedRef.current = true;
+        }
+
+        // Wait for the agent_end event that the aborted run emits.
+        // If we don't wait, that stale event will arrive on the new SSE
+        // connection and kill our follow-up turn.
+        if (!abortCompletedRef.current) {
+          const MAX_WAIT_MS = 5000;
+          const startWait = Date.now();
+          while (!abortCompletedRef.current && (Date.now() - startWait) < MAX_WAIT_MS) {
+            await new Promise((r) => setTimeout(r, 100));
+          }
         }
       }
 
+      // Reload the latest session state from disk now that abort has settled.
       await loadSession(sid);
-      setAgentRunning(false);
-      setAgentPhase(null);
-      dispatch({ type: "end" });
 
-      if (autoContinueSentRef.current) return;
-      autoContinueSentRef.current = true;
+      // Reset all tracking state for the fresh turn.
       watchdogStaleRecoveriesRef.current = 0;
       lastAgentEventAtRef.current = Date.now();
       lastContentChangedAtRef.current = Date.now();
       lastContentLengthRef.current = 0;
-      agentRunningRef.current = true;
-      setMessages((prev) => [...prev, { role: "user", content: "continue", timestamp: Date.now() } as AgentMessage]);
-      setAgentRunning(true);
+      lastModelErrorRef.current = null;
+      setLastModelError(null);
+      receivedAssistantMessageRef.current = false;
+      setRetryInfo(null);
       setAgentPhase({ kind: "waiting_model" });
+      dispatch({ type: "reset" });
       dispatch({ type: "start" });
+
+      agentRunningRef.current = true;
+      setAgentRunning(true);
+      setMessages((prev) => [...prev, { role: "user", content: "continue", timestamp: Date.now() } as AgentMessage]);
+
+      // Reconnect SSE (closes the old connection), then disable the
+      // guard so future agent_end events are processed normally.
       connectEvents(sid);
+      autoContinueInProgressRef.current = false;
+
+      // Allow a short settle so the server-side subscription is set up
+      // before the follow-up command fires.
+      await new Promise((r) => setTimeout(r, 150));
+
       try {
         await sendAgentCommand(sid, { type: "follow_up", message: "continue" });
       } catch (e) {

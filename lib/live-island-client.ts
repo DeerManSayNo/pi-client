@@ -331,6 +331,13 @@ class LiveIslandClient {
 
   private handleAgentStart(session: SessionState): void {
     this.cancelPendingRemoval(session.id);
+
+    // Remove the existing row first so AIControls clears its internal
+    // remove_at deadline (set by a previous done-retract). Without this,
+    // AIControls may silently delete the row mid-run after the deadline
+    // expires — even though client-side state has been reset.
+    this.write({ id: session.id, type: "remove" });
+
     session.finished = false;
     session.activeToolCount = 0;
     session.frozenElapsed = null;

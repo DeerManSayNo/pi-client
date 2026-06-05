@@ -5,7 +5,7 @@
 import cron, { type ScheduledTask as CronScheduledTask } from "node-cron";
 import { loadTasks, addTask, updateTask, deleteTask } from "./store";
 import { executeTask } from "./runner";
-import type { ScheduledTask, PromptTaskConfig, ShellTaskConfig } from "./types";
+import type { ScheduledTask, PromptTaskConfig } from "./types";
 
 // Map of task id → cron ScheduledTask instance
 const runningJobs = new Map<string, CronScheduledTask>();
@@ -82,9 +82,9 @@ export function getTask(id: string): ScheduledTask | undefined {
 
 export function createTask(
   name: string,
-  type: "prompt" | "shell",
+  type: "prompt",
   cronExpression: string,
-  config: PromptTaskConfig | ShellTaskConfig
+  config: PromptTaskConfig
 ): ScheduledTask {
   const task: ScheduledTask = {
     id: crypto.randomUUID(),
@@ -95,6 +95,7 @@ export function createTask(
     config,
     createdAt: new Date().toISOString(),
     runCount: 0,
+    logs: [],
   };
 
   addTask(task);

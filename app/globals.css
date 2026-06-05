@@ -101,6 +101,14 @@ body {
   background: var(--text-dim);
 }
 
+.role-project-list {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.role-project-list::-webkit-scrollbar {
+  display: none;
+}
+
 :root {
   --font-mono: var(--font-noto-mono), 'JetBrains Mono', 'Fira Code', 'Consolas', ui-monospace, 'PingFang SC', 'Microsoft YaHei', monospace;
 }
