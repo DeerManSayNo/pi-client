@@ -250,7 +250,8 @@ export function RoleConfig({ onClose, cwd, projects = [] }: { onClose: () => voi
     setSaving(true);
     try {
       const currentScope = selectedRole ? (roleScope(selectedRole) === "project" ? "project" : "user") : "user";
-      const shouldMove = Boolean(selectedRole && !selectedRole.builtIn && selectedRole.id !== "default" && (draftScope !== currentScope || (draftScope === "project" && draftProjectCwd && draftProjectCwd !== effectiveCwd)));
+      const currentRoleCwd = selectedRole && currentScope === "project" ? (roleProjectCwd(selectedRole) || effectiveCwd) : undefined;
+      const shouldMove = Boolean(selectedRole && !selectedRole.builtIn && selectedRole.id !== "default" && (draftScope !== currentScope || (draftScope === "project" && draftProjectCwd && draftProjectCwd !== currentRoleCwd)));
       const patchBody: Record<string, unknown> = {
         name: draft.name,
         description: draft.description,
@@ -264,14 +265,10 @@ export function RoleConfig({ onClose, cwd, projects = [] }: { onClose: () => voi
         // Set fromCwd to tell the backend where the role currently lives.
         // null → global role (search only global file).
         // Non-null string → project role (search that project file first).
-        if (currentScope === "user") {
-          patchBody.fromCwd = null;
-        } else {
-          const currentFileCwd = selectedRole?.sourceInfo?.filePath?.match(/^(.+?)[/\\][.]agents[/\\]roles\.json$/)?.[1] ?? null;
-          if (currentFileCwd && currentFileCwd !== effectiveCwd) patchBody.fromCwd = currentFileCwd;
-        }
+        patchBody.fromCwd = currentScope === "project" ? (currentRoleCwd ?? effectiveCwd) : null;
       }
-      const res = await fetch(roleApiUrl(draft.id, effectiveCwd), {
+      const requestCwd = currentScope === "project" ? currentRoleCwd : undefined;
+      const res = await fetch(roleApiUrl(draft.id, requestCwd), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(patchBody),
@@ -305,7 +302,8 @@ export function RoleConfig({ onClose, cwd, projects = [] }: { onClose: () => voi
     if (!window.confirm(`确定删除角色「${selectedRole.name}」吗？角色设定库也会一起删除。`)) return;
     setSaving(true);
     try {
-      await fetch(roleApiUrl(selectedRole.id, effectiveCwd), { method: "DELETE" });
+      const requestCwd = roleScope(selectedRole) === "project" ? (roleProjectCwd(selectedRole) || effectiveCwd) : undefined;
+      await fetch(roleApiUrl(selectedRole.id, requestCwd), { method: "DELETE" });
       setSelectedRoleId("default");
       await loadRoles();
       notifyRolesUpdated();

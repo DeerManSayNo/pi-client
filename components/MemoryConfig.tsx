@@ -12,6 +12,7 @@ function cloneItems(items: MemoryItem[]): MemoryItem[] { return items.map((m) =>
 function rolesUrl(cwd?: string): string { return cwd ? `/api/roles?cwd=${encodeURIComponent(cwd)}` : "/api/roles"; }
 function roleUrl(id: string, cwd?: string): string { return cwd ? `/api/roles/${encodeURIComponent(id)}?cwd=${encodeURIComponent(cwd)}` : `/api/roles/${encodeURIComponent(id)}`; }
 function roleScope(role: AgentRole): string { return role.sourceInfo?.scope ?? (role.builtIn ? "builtIn" : "user"); }
+function roleProjectCwd(role: AgentRole): string { return role.sourceInfo?.filePath?.match(/^(.+?)[/\\][.]agents[/\\]roles\.json$/)?.[1] ?? ""; }
 function scopeLabel(scope: string): string { return scope === "project" ? "项目" : scope === "user" ? "全局" : scope === "builtIn" ? "内置" : scope; }
 
 export function MemoryConfig({ onClose, cwd }: { onClose: () => void; cwd?: string }) {
@@ -61,7 +62,8 @@ export function MemoryConfig({ onClose, cwd }: { onClose: () => void; cwd?: stri
         if (res.ok) setGlobalMemory(((await res.json()) as { global: MemoryItem[] }).global);
       } else {
         const blocks = { ...(selected.role.blocks ?? {}), Memory: cleaned };
-        const res = await fetch(roleUrl(selected.role.id, cwd), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ blocks }) });
+        const requestCwd = roleScope(selected.role) === "project" ? (roleProjectCwd(selected.role) || cwd) : undefined;
+        const res = await fetch(roleUrl(selected.role.id, requestCwd), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ blocks }) });
         if (res.ok) await load();
       }
       window.dispatchEvent(new Event("pi-agent.roles-updated"));

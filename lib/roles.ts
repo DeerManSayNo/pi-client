@@ -188,14 +188,12 @@ export function readRoles(cwd?: string | null): AgentRole[] {
     const base = byId.get(role.id);
     byId.set(role.id, base?.builtIn ? { ...base, ...role, builtIn: true, sourceInfo: { scope: "user", filePath: rolesFilePath() }, canDelete: false } : role);
   }
-  // Project custom: override global / built-in when IDs conflict (so project roles show correct scope)
+  // Project custom roles are project-scoped additions only.
+  // Do not let a project role override a global/built-in role with the same id,
+  // otherwise the "global" role appears different when switching projects.
   for (const role of projectCustom) {
-    const base = byId.get(role.id);
-    if (base?.builtIn) {
-      byId.set(role.id, { ...base, ...role, builtIn: true, sourceInfo: { scope: "project", filePath: projectRolesFilePath(cwd!) }, canDelete: false });
-    } else {
-      byId.set(role.id, role);
-    }
+    if (byId.has(role.id)) continue;
+    byId.set(role.id, role);
   }
   return [...byId.values()];
 }
@@ -323,7 +321,8 @@ export function addRoleSetting(roleId: string, block: RoleBlock, text: string, c
   const role = getRole(roleId, cwd);
   const setting: RoleSetting = { id: uid("setting"), text: text.trim(), createdAt: nowIso() };
   const blocks = { ...role.blocks, [block]: [...role.blocks[block], setting] };
-  updateRole(role.id, { blocks }, cwd);
+  const targetCwd = role.sourceInfo?.scope === "project" ? cwd : null;
+  updateRole(role.id, { blocks }, targetCwd);
   return setting;
 }
 
