@@ -157,7 +157,7 @@ export class AgentSessionWrapper {
     const basePrompt = this.baseSystemPrompt;
     const configuredPrompt = applyRolePromptConfigToPrompt(basePrompt, this.roleId);
     const nextPrompt = isRoleSystemPromptSectionEnabled(this.roleId, "role_profile")
-      ? applyRolePromptToSystemPrompt(configuredPrompt, this.roleId, this.temporaryRoleSettings)
+      ? applyRolePromptToSystemPrompt(configuredPrompt, this.roleId, this.temporaryRoleSettings, this.inner.sessionManager.getCwd())
       : configuredPrompt;
     setEffectiveSystemPrompt(this.inner, nextPrompt);
   }

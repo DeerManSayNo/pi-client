@@ -64,6 +64,51 @@ function PreviewIcon({ size = 14 }: { size?: number }) {
   );
 }
 
+function SourcePreviewToggle({
+  previewMode,
+  setPreviewMode,
+  sourceLabel = "查看源码",
+  previewLabel = "预览",
+}: {
+  previewMode: boolean;
+  setPreviewMode: (preview: boolean) => void;
+  sourceLabel?: string;
+  previewLabel?: string;
+}) {
+  return (
+    <div style={{ display: "flex", flexShrink: 0, borderRadius: 5, overflow: "hidden", border: "1px solid var(--border)" }}>
+      <button
+        onClick={() => setPreviewMode(false)}
+        aria-label={sourceLabel}
+        title="源码"
+        style={{
+          width: 28, height: 24, padding: 0, fontSize: 11, border: "none", cursor: "pointer",
+          display: "flex", alignItems: "center", justifyContent: "center",
+          background: !previewMode ? "var(--bg-selected)" : "var(--bg-hover)",
+          color: !previewMode ? "var(--text)" : "var(--text-muted)",
+          fontWeight: !previewMode ? 600 : 400,
+        }}
+      >
+        <CodeIcon />
+      </button>
+      <button
+        onClick={() => setPreviewMode(true)}
+        aria-label={previewLabel}
+        title="预览"
+        style={{
+          width: 28, height: 24, padding: 0, fontSize: 11, border: "none", borderLeft: "1px solid var(--border)", cursor: "pointer",
+          display: "flex", alignItems: "center", justifyContent: "center",
+          background: previewMode ? "var(--bg-selected)" : "var(--bg-hover)",
+          color: previewMode ? "var(--text)" : "var(--text-muted)",
+          fontWeight: previewMode ? 600 : 400,
+        }}
+      >
+        <PreviewIcon />
+      </button>
+    </div>
+  );
+}
+
 function MiddleEllipsisPath({ path, title }: { path: string; title?: string }) {
   const normalized = path.replace(/\\/g, "/");
   const lastSlash = normalized.lastIndexOf("/");
@@ -77,7 +122,8 @@ function MiddleEllipsisPath({ path, title }: { path: string; title?: string }) {
         display: "inline-flex",
         alignItems: "center",
         minWidth: 0,
-        maxWidth: "min(560px, 45vw)",
+        flex: "1 1 auto",
+        overflow: "hidden",
         whiteSpace: "nowrap",
         fontFamily: "var(--font-mono)",
       }}
@@ -386,10 +432,8 @@ function ImageViewer({ filePath, cwd }: { filePath: string; cwd?: string }) {
           flexShrink: 0,
         }}
       >
-        <span style={{ fontFamily: "var(--font-mono)" }} title={filePath}>
-          {getRelativeFilePath(filePath, cwd)}
-        </span>
-        <span style={{ marginLeft: "auto" }}>{ext || "image"}</span>
+        <MiddleEllipsisPath path={getRelativeFilePath(filePath, cwd)} title={filePath} />
+        <span style={{ marginLeft: "auto", flexShrink: 0 }}>{ext || "image"}</span>
         {naturalSize && <span style={{ flexShrink: 0, whiteSpace: "nowrap" }}>{naturalSize.w} × {naturalSize.h}</span>}
         {formatSizeStr && <span style={{ flexShrink: 0, whiteSpace: "nowrap" }}>{formatSizeStr}</span>}
         <span
@@ -520,10 +564,8 @@ function AudioViewer({ filePath, cwd }: { filePath: string; cwd?: string }) {
           flexShrink: 0,
         }}
       >
-        <span style={{ fontFamily: "var(--font-mono)" }} title={filePath}>
-          {getRelativeFilePath(filePath, cwd)}
-        </span>
-        <span style={{ marginLeft: "auto" }}>{ext || "audio"}</span>
+        <MiddleEllipsisPath path={getRelativeFilePath(filePath, cwd)} title={filePath} />
+        <span style={{ marginLeft: "auto", flexShrink: 0 }}>{ext || "audio"}</span>
         {duration != null && <span style={{ flexShrink: 0, whiteSpace: "nowrap" }}>{formatDuration(duration)}</span>}
         {size != null && <span style={{ flexShrink: 0, whiteSpace: "nowrap" }}>{formatSize(size)}</span>}
         <span
@@ -734,7 +776,7 @@ function TextFileViewer({ filePath, cwd }: Props) {
 
         {/* Diff / Source toggle — shown only when there are changes */}
         {hasDiff && (
-          <div style={{ display: "flex", borderRadius: 5, overflow: "hidden", border: "1px solid var(--border)" }}>
+          <div style={{ display: "flex", flexShrink: 0, borderRadius: 5, overflow: "hidden", border: "1px solid var(--border)" }}>
             <button
               onClick={() => setViewMode("source")}
               style={{
@@ -760,66 +802,14 @@ function TextFileViewer({ filePath, cwd }: Props) {
           </div>
         )}
 
-        {/* HTML source/preview toggle */}
-        {isHtml && viewMode === "source" && (
-          <div style={{ display: "flex", borderRadius: 5, overflow: "hidden", border: "1px solid var(--border)" }}>
-            <button
-              onClick={() => setPreviewMode(false)}
-              aria-label="查看 HTML 代码"
-              title="代码"
-              style={{
-                width: 28, height: 24, padding: 0, fontSize: 11, border: "none", cursor: "pointer",
-                display: "flex", alignItems: "center", justifyContent: "center",
-                background: !previewMode ? "var(--bg-selected)" : "var(--bg-hover)",
-                color: !previewMode ? "var(--text)" : "var(--text-muted)",
-                fontWeight: !previewMode ? 600 : 400,
-              }}
-            >
-              <CodeIcon />
-            </button>
-            <button
-              onClick={() => setPreviewMode(true)}
-              aria-label="预览 HTML"
-              title="预览"
-              style={{
-                width: 28, height: 24, padding: 0, fontSize: 11, border: "none", borderLeft: "1px solid var(--border)", cursor: "pointer",
-                display: "flex", alignItems: "center", justifyContent: "center",
-                background: previewMode ? "var(--bg-selected)" : "var(--bg-hover)",
-                color: previewMode ? "var(--text)" : "var(--text-muted)",
-                fontWeight: previewMode ? 600 : 400,
-              }}
-            >
-              <PreviewIcon />
-            </button>
-          </div>
-        )}
-
-        {/* Markdown preview/raw toggle */}
-        {isMarkdown && viewMode === "source" && (
-          <div style={{ display: "flex", borderRadius: 5, overflow: "hidden", border: "1px solid var(--border)" }}>
-            <button
-              onClick={() => setPreviewMode(true)}
-              style={{
-                padding: "2px 8px", fontSize: 11, border: "none", cursor: "pointer",
-                background: previewMode ? "var(--bg-selected)" : "var(--bg-hover)",
-                color: previewMode ? "var(--text)" : "var(--text-muted)",
-                fontWeight: previewMode ? 600 : 400,
-              }}
-            >
-              预览
-            </button>
-            <button
-              onClick={() => setPreviewMode(false)}
-              style={{
-                padding: "2px 8px", fontSize: 11, border: "none", borderLeft: "1px solid var(--border)", cursor: "pointer",
-                background: !previewMode ? "var(--bg-selected)" : "var(--bg-hover)",
-                color: !previewMode ? "var(--text)" : "var(--text-muted)",
-                fontWeight: !previewMode ? 600 : 400,
-              }}
-            >
-              源码
-            </button>
-          </div>
+        {/* Source / Preview toggle */}
+        {(isHtml || isMarkdown) && viewMode === "source" && (
+          <SourcePreviewToggle
+            previewMode={previewMode}
+            setPreviewMode={setPreviewMode}
+            sourceLabel={isHtml ? "查看 HTML 源码" : "查看 Markdown 源码"}
+            previewLabel={isHtml ? "预览 HTML" : "预览 Markdown"}
+          />
         )}
       </div>
 

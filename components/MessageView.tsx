@@ -608,6 +608,18 @@ function TextBlock({ block }: { block: TextContent }) {
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
+          a({ href, children, ...props }) {
+            return (
+              <a
+                href={href}
+                target="_blank"
+                rel="noopener noreferrer"
+                {...props}
+              >
+                {children}
+              </a>
+            );
+          },
           code({ className, children, ...props }) {
             const lang = className?.replace("language-", "") ?? "";
             const raw = String(children);

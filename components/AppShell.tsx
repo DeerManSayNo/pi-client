@@ -13,6 +13,7 @@ import { RoleConfig } from "./RoleConfig";
 import { MemoryConfig } from "./MemoryConfig";
 import { McpConfig } from "./McpConfig";
 import { useTheme } from "@/hooks/useTheme";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { SessionInfo } from "@/lib/types";
 import type { ChatInputHandle } from "./ChatInput";
 
@@ -100,6 +101,18 @@ export function AppShell() {
   const chatInputRef = useRef<ChatInputHandle | null>(null);
   const topBarRef = useRef<HTMLDivElement>(null);
 
+  // Platform detection — only show custom window controls on Windows
+  const isWindowsPlatform = typeof navigator !== 'undefined' && /windows/i.test(navigator.userAgent);
+  const winCtrlShift = isWindowsPlatform ? 86 : 0;
+  const handleWindowAction = useCallback((action: 'minimize' | 'maximize' | 'close') => {
+    try {
+      const win = getCurrentWindow();
+      if (action === 'minimize') win.minimize();
+      else if (action === 'maximize') win.toggleMaximize();
+      else if (action === 'close') win.close();
+    } catch { /* ignore in non-Tauri contexts */ }
+  }, []);
+
   // Session stats (tokens + cost) — populated by ChatWindow, displayed in top bar
   const [sessionStats, setSessionStats] = useState<{ tokens: { input: number; output: number; cacheRead: number; cacheWrite: number }; cost?: number } | null>(null);
   const handleSessionStatsChange = useCallback((stats: { tokens: { input: number; output: number; cacheRead: number; cacheWrite: number }; cost?: number } | null) => {
@@ -127,6 +140,17 @@ export function AppShell() {
 
   const handleProjectsChange = useCallback((projects: { cwd: string; displayName: string }[]) => {
     setProjectOptions(projects);
+  }, []);
+
+  // Window control callbacks (Windows only)
+  const handleWindowMinimize = useCallback(() => {
+    try { getCurrentWindow().minimize(); } catch { /* not in Tauri */ }
+  }, []);
+  const handleWindowMaximize = useCallback(() => {
+    try { getCurrentWindow().toggleMaximize(); } catch { /* not in Tauri */ }
+  }, []);
+  const handleWindowClose = useCallback(() => {
+    try { getCurrentWindow().close(); } catch { /* not in Tauri */ }
   }, []);
 
   const [initialSessionId] = useState<string | null>(() => searchParams.get("session"));
@@ -177,6 +201,16 @@ export function AppShell() {
       window.clearInterval(interval);
     };
   }, []);
+
+  // Periodically refresh the sidebar session list while any session is running,
+  // so newly created sessions and updated modified timestamps are reflected.
+  useEffect(() => {
+    if (runningSessionStatuses.size === 0) return;
+    const interval = setInterval(() => {
+      setRefreshKey((k) => k + 1);
+    }, 4000);
+    return () => clearInterval(interval);
+  }, [runningSessionStatuses.size]);
 
   const setSessionRunning = useCallback((sessionId: string | null | undefined, running: boolean) => {
     if (!sessionId) return;
@@ -341,7 +375,9 @@ export function AppShell() {
 
   const handleSessionStarted = useCallback((session: SessionInfo | null) => {
     if (!session) {
-      setSessionRunning(pendingSessionIdRef.current, false);
+      if (pendingSessionIdRef.current) {
+        setSessionRunning(pendingSessionIdRef.current, false);
+      }
       pendingSessionIdRef.current = null;
       setPendingSession(null);
       return;
@@ -443,13 +479,15 @@ export function AppShell() {
     setRightPanelOpen(true);
   }, []);
 
-  const handleAgentEnd = useCallback((changedFiles?: string[]) => {
-    if (selectedSession?.id) setSessionRunning(selectedSession.id, false);
+  const handleAgentEnd = useCallback((sessionId: string, changedFiles?: string[]) => {
+    setSessionRunning(sessionId, false);
+    // Clear pendingSession if the ended session was being tracked as pending
+    setPendingSession((prev) => (prev?.id === sessionId ? null : prev));
     setRefreshKey((k) => k + 1);
     setExplorerRefreshKey((k) => k + 1);
     const filePath = changedFiles?.filter(shouldAutoOpenFile).at(-1);
     if (filePath) handleOpenFile(filePath, fileNameFromPath(filePath));
-  }, [handleOpenFile, selectedSession?.id, setSessionRunning]);
+  }, [handleOpenFile, setSessionRunning]);
 
   const handleCloseFileTab = useCallback((tabId: string) => {
     setFileTabs((prev) => {
@@ -724,7 +762,7 @@ export function AppShell() {
         aria-expanded={settingsMenuOpen}
         style={{
           position: "absolute",
-          right: 68,
+          right: isWindowsPlatform ? 158 : 68,
           top: 2,
           width: 24,
           height: 24,
@@ -755,7 +793,7 @@ export function AppShell() {
           style={{
             position: "absolute",
             top: 30,
-            right: 64,
+            right: isWindowsPlatform ? 154 : 64,
             width: 180,
             maxHeight: 360,
             overflowY: "auto",
@@ -882,7 +920,7 @@ export function AppShell() {
         aria-pressed={isDark}
         style={{
           position: "absolute",
-          right: 40,
+          right: isWindowsPlatform ? 126 : 40,
           top: 2,
           width: 24,
           height: 24,
@@ -923,7 +961,7 @@ export function AppShell() {
         aria-pressed={rightPanelOpen}
         style={{
           position: "absolute",
-          right: 10,
+          right: isWindowsPlatform ? 96 : 10,
           top: 2,
           width: 24,
           height: 24,
@@ -946,6 +984,101 @@ export function AppShell() {
           <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="15" y1="3" x2="15" y2="21" />
         </svg>
       </button>
+      {/* Window control buttons — Windows only */}
+      {isWindowsPlatform && (
+        <>
+          <button
+            data-tauri-drag-region="false"
+            onClick={() => handleWindowAction('minimize')}
+            title="最小化"
+            aria-label="最小化"
+            style={{
+              position: "absolute",
+              right: 64,
+              top: 2,
+              width: 24,
+              height: 24,
+              padding: 0,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              background: "transparent",
+              border: "1px solid transparent",
+              borderRadius: 7,
+              color: "var(--text-muted)",
+              cursor: "pointer",
+              transition: "color 0.12s, background 0.12s, border-color 0.12s",
+              WebkitAppRegion: "no-drag",
+            } as DraggableStyle}
+            onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; e.currentTarget.style.background = "var(--bg-hover)"; }}
+            onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-muted)"; e.currentTarget.style.background = "transparent"; }}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+              <line x1="5" y1="12" x2="19" y2="12" />
+            </svg>
+          </button>
+          <button
+            data-tauri-drag-region="false"
+            onClick={() => handleWindowAction('maximize')}
+            title="最大化"
+            aria-label="最大化"
+            style={{
+              position: "absolute",
+              right: 36,
+              top: 2,
+              width: 24,
+              height: 24,
+              padding: 0,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              background: "transparent",
+              border: "1px solid transparent",
+              borderRadius: 7,
+              color: "var(--text-muted)",
+              cursor: "pointer",
+              transition: "color 0.12s, background 0.12s, border-color 0.12s",
+              WebkitAppRegion: "no-drag",
+            } as DraggableStyle}
+            onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; e.currentTarget.style.background = "var(--bg-hover)"; }}
+            onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-muted)"; e.currentTarget.style.background = "transparent"; }}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="4" y="4" width="16" height="16" rx="2" />
+            </svg>
+          </button>
+          <button
+            data-tauri-drag-region="false"
+            onClick={() => handleWindowAction('close')}
+            title="关闭"
+            aria-label="关闭"
+            style={{
+              position: "absolute",
+              right: 8,
+              top: 2,
+              width: 24,
+              height: 24,
+              padding: 0,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              background: "transparent",
+              border: "1px solid transparent",
+              borderRadius: 7,
+              color: "var(--text-muted)",
+              cursor: "pointer",
+              transition: "color 0.12s, background 0.12s, border-color 0.12s",
+              WebkitAppRegion: "no-drag",
+            } as DraggableStyle}
+            onMouseEnter={(e) => { e.currentTarget.style.color = "#fff"; e.currentTarget.style.background = "#e81123"; }}
+            onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-muted)"; e.currentTarget.style.background = "transparent"; }}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <line x1="6" y1="6" x2="18" y2="18" /><line x1="18" y1="6" x2="6" y2="18" />
+            </svg>
+          </button>
+        </>
+      )}
     </div>
     <div style={{ display: "flex", height: "calc(100dvh - 28px)", marginTop: 28, overflow: "hidden", background: "var(--bg)" }}>
       {/* Mobile overlay backdrop */}
@@ -1566,6 +1699,7 @@ export function AppShell() {
             activeTabId={activeFileTabId ?? ""}
             onSelectTab={(id) => setActiveFileTabId(id)}
             onCloseTab={handleCloseFileTab}
+            cwd={effectiveProjectCwd ?? undefined}
           />
         )}
         {/* File content */}
@@ -1587,8 +1721,8 @@ export function AppShell() {
     {schedulerPanelOpen && (
       <SchedulerPanel onClose={() => setSchedulerPanelOpen(false)} cwd={activeCwd ?? selectedSession?.cwd ?? newSessionCwd ?? undefined} />
     )}
-    {quickConfigOpen === "role" && <RoleConfig onClose={() => setQuickConfigOpen(null)} cwd={activeCwd ?? selectedSession?.cwd ?? newSessionCwd ?? undefined} />}
-    {quickConfigOpen === "memory" && <MemoryConfig onClose={() => setQuickConfigOpen(null)} />}
+    {quickConfigOpen === "role" && <RoleConfig onClose={() => setQuickConfigOpen(null)} cwd={activeCwd ?? selectedSession?.cwd ?? newSessionCwd ?? undefined} projects={projectOptions} />}
+    {quickConfigOpen === "memory" && <MemoryConfig onClose={() => setQuickConfigOpen(null)} cwd={activeCwd ?? selectedSession?.cwd ?? newSessionCwd ?? undefined} />}
     {quickConfigOpen === "mcp" && <McpConfig onClose={() => setQuickConfigOpen(null)} />}
     </>
   );

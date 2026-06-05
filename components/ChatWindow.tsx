@@ -17,13 +17,14 @@ interface AgentRole {
   basePrompt: string;
   blocks: Record<string, { id: string; text: string; createdAt: string }[]>;
   builtIn?: boolean;
+  sourceInfo?: { scope?: string; filePath?: string };
 }
 
 interface Props {
   activeTabId?: string | null;
   session: SessionInfo | null;
   newSessionCwd: string | null;
-  onAgentEnd?: (changedFiles?: string[]) => void;
+  onAgentEnd?: (sessionId: string, changedFiles?: string[]) => void;
   onSessionCreated?: (session: SessionInfo) => void;
   onSessionStarted?: (session: SessionInfo | null) => void;
   onAgentRunningChange?: (sessionId: string | null | undefined, running: boolean) => void;
@@ -106,17 +107,21 @@ function Typewriter({ phrases }: { phrases: string[] }) {
 }
 
 export function ChatWindow({ activeTabId, session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionStarted, onAgentRunningChange, onSessionForked, modelsRefreshKey, chatInputRef, onSessionStatsChange, onContextUsageChange, onOpenFile, onOpenRoleConfig }: Props) {
-  // Track changed files from agent_end event
-  const [changedFiles, setChangedFiles] = useState<string[]>([]);
+  // Track changed files from agent_end event per session so switching chats
+  // does not show another session's bottom "x files modified" banner.
+  const [changedFilesBySession, setChangedFilesBySession] = useState<Record<string, string[]>>({});
+  const activeSessionKey = session?.id ?? null;
+  const changedFiles = activeSessionKey ? (changedFilesBySession[activeSessionKey] ?? []) : [];
   const [currentRoleId, setCurrentRoleId] = useState("default");
   const [roles, setRoles] = useState<AgentRole[]>([]);
   const [pendingRoleSetting, setPendingRoleSetting] = useState<{ roleId: string; roleName: string; block: string; setting: string } | null>(null);
   const [systemPromptExpanded, setSystemPromptExpanded] = useState(false);
-  const wrappedOnAgentEnd = useCallback((cf?: string[]) => {
-    if (cf && cf.length > 0) {
-      setChangedFiles(cf);
-    }
-    onAgentEnd?.(cf);
+  const wrappedOnAgentEnd = useCallback((sessionId: string, cf?: string[]) => {
+    setChangedFilesBySession((prev) => ({
+      ...prev,
+      [sessionId]: cf && cf.length > 0 ? cf : [],
+    }));
+    onAgentEnd?.(sessionId, cf);
   }, [onAgentEnd]);
 
   const {
@@ -137,6 +142,8 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, onAgentEnd, on
     modelsRefreshKey,
     activeTabId,
   });
+
+  const currentCwd = session?.cwd ?? newSessionCwd ?? undefined;
 
   const applyRoleToSession = useCallback(async (roleId: string) => {
     if (!session?.id) return;
@@ -196,12 +203,16 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, onAgentEnd, on
     if (!pending) return;
     setPendingRoleSetting(null);
     if (mode === "save") {
-      await fetch(`/api/roles/${encodeURIComponent(pending.roleId)}/settings`, {
+      const rolesUrl = currentCwd ? `/api/roles?cwd=${encodeURIComponent(currentCwd)}` : "/api/roles";
+      const settingsUrl = currentCwd
+        ? `/api/roles/${encodeURIComponent(pending.roleId)}/settings?cwd=${encodeURIComponent(currentCwd)}`
+        : `/api/roles/${encodeURIComponent(pending.roleId)}/settings`;
+      await fetch(settingsUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ block: pending.block, text: pending.setting }),
       });
-      const data = await fetch("/api/roles").then((r) => r.json()).catch(() => null) as { roles?: AgentRole[] } | null;
+      const data = await fetch(rolesUrl).then((r) => r.json()).catch(() => null) as { roles?: AgentRole[] } | null;
       if (data?.roles) setRoles(data.roles);
       if (session?.id) await applyRoleToSession(pending.roleId);
     } else if (mode === "temporary" && session?.id) {
@@ -211,7 +222,7 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, onAgentEnd, on
         if (json?.data && json.data.systemPrompt !== undefined) setSystemPrompt(json.data.systemPrompt ?? null);
       }
     }
-  }, [pendingRoleSetting, session?.id, applyRoleToSession, setSystemPrompt]);
+  }, [pendingRoleSetting, currentCwd, session?.id, applyRoleToSession, setSystemPrompt]);
 
   const handleResend = useCallback((message: string) => {
     if (agentRunning && handleSteer) {
@@ -236,7 +247,10 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, onAgentEnd, on
   useEffect(() => {
     handleAgentEventRef.current = (event) => {
       if (event.type === "agent_start") {
-        setChangedFiles([]);
+        const id = session?.id;
+        if (id) {
+          setChangedFilesBySession((prev) => ({ ...prev, [id]: [] }));
+        }
       }
       if (event.type === "agent_end" && soundEnabledRef.current) {
         playDoneSoundRef.current();

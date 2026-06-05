@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useState, useCallback, useEffect, useRef, type CSSProperties } from "react";
 import { getFileIcon, FolderIcon } from "./FileIcons";
 import { encodeFilePathForApi, getRelativeFilePath, joinFilePath } from "@/lib/file-paths";
 
@@ -51,6 +51,7 @@ function TreeNode({
   expandedPaths,
   onToggleExpanded,
   refreshKey,
+  onContextMenu,
 }: {
   node: FileNode;
   depth: number;
@@ -60,6 +61,7 @@ function TreeNode({
   expandedPaths: Set<string>;
   onToggleExpanded: (fullPath: string, open: boolean) => void;
   refreshKey?: number;
+  onContextMenu?: (event: React.MouseEvent, filePath: string, fileName: string, isDir: boolean) => void;
 }) {
   const open = expandedPaths.has(node.fullPath);
   const [children, setChildren] = useState<FileNode[]>(node.children ?? []);
@@ -105,10 +107,17 @@ function TreeNode({
     }
   }, [node.isDir, node.fullPath, node.name, loaded, open, loadChildren, onOpenFile, onToggleExpanded]);
 
+  const handleContextMenu = useCallback((event: React.MouseEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    onContextMenu?.(event, node.fullPath, node.name, node.isDir);
+  }, [node.fullPath, node.name, node.isDir, onContextMenu]);
+
   return (
     <div>
       <div
         onClick={handleClick}
+        onContextMenu={handleContextMenu}
         onMouseEnter={() => setHovered(true)}
         onMouseLeave={() => setHovered(false)}
         style={{
@@ -120,10 +129,11 @@ function TreeNode({
           paddingRight: 8,
           height: 24,
           cursor: "pointer",
-          background: hovered ? "var(--bg-hover)" : "transparent",
+          background: hovered ? "color-mix(in srgb, var(--accent) 18%, var(--bg-hover))" : "transparent",
           borderRadius: 3,
           userSelect: "none",
-          transition: "background 0.08s",
+          transition: "background 0.12s ease, color 0.12s ease",
+          color: hovered ? "var(--text)" : "var(--text-muted)",
         }}
       >
         {node.isDir && (
@@ -142,7 +152,7 @@ function TreeNode({
         <span
           style={{
             fontSize: 11,
-            color: "var(--text)",
+            color: hovered ? "var(--text)" : "var(--text-muted)",
             overflow: "hidden",
             textOverflow: "ellipsis",
             whiteSpace: "nowrap",
@@ -196,7 +206,7 @@ function TreeNode({
       {node.isDir && open && (
         <div>
           {children.map((child) => (
-            <TreeNode key={child.fullPath} node={child} depth={depth + 1} cwd={cwd} onOpenFile={onOpenFile} onAtMention={onAtMention} expandedPaths={expandedPaths} onToggleExpanded={onToggleExpanded} refreshKey={refreshKey} />
+            <TreeNode key={child.fullPath} node={child} depth={depth + 1} cwd={cwd} onOpenFile={onOpenFile} onAtMention={onAtMention} expandedPaths={expandedPaths} onToggleExpanded={onToggleExpanded} refreshKey={refreshKey} onContextMenu={onContextMenu} />
           ))}
           {children.length === 0 && loaded && (
             <div style={{ paddingLeft: 6 + (depth + 1) * 12 + 14, fontSize: 10, color: "var(--text-dim)", height: 22, display: "flex", alignItems: "center", fontStyle: "italic" }}>
@@ -215,6 +225,68 @@ export function FileExplorer({ cwd, onOpenFile, refreshKey, onAtMention }: Props
   const [error, setError] = useState<string | null>(null);
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set());
   const prevCwdRef = useRef<string | null>(null);
+
+  // Context menu state
+  const [contextMenu, setContextMenu] = useState<{
+    filePath: string;
+    fileName: string;
+    isDir: boolean;
+    x: number;
+    y: number;
+  } | null>(null);
+  const [copied, setCopied] = useState<string | null>(null);
+  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Close context menu on click outside or Escape
+  useEffect(() => {
+    if (!contextMenu) return;
+    const close = () => setContextMenu(null);
+    const handleKey = (e: KeyboardEvent) => { if (e.key === "Escape") close(); };
+    window.addEventListener("click", close);
+    window.addEventListener("keydown", handleKey);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("keydown", handleKey);
+    };
+  }, [contextMenu]);
+
+  const handleContextMenu = useCallback(
+    (event: React.MouseEvent, filePath: string, fileName: string, isDir: boolean) => {
+      setContextMenu({ filePath, fileName, isDir, x: event.clientX, y: event.clientY });
+    },
+    []
+  );
+
+  const handleCopyPath = useCallback(
+    async (type: "absolute" | "relative") => {
+      if (!contextMenu) return;
+      const text = type === "absolute" ? contextMenu.filePath : getRelativeFilePath(contextMenu.filePath, cwd);
+      try {
+        await navigator.clipboard.writeText(text);
+        setCopied(type);
+        if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+        copyTimerRef.current = setTimeout(() => setCopied(null), 1500);
+      } catch {
+        // fallback: ignore
+      }
+      setContextMenu(null);
+    },
+    [contextMenu, cwd]
+  );
+
+  const handleRevealInFinder = useCallback(async () => {
+    if (!contextMenu) return;
+    try {
+      await fetch("/api/files/reveal", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filePath: contextMenu.filePath }),
+      });
+    } catch {
+      // ignore
+    }
+    setContextMenu(null);
+  }, [contextMenu]);
 
   const handleToggleExpanded = useCallback((fullPath: string, open: boolean) => {
     setExpandedPaths((prev) => {
@@ -255,6 +327,23 @@ export function FileExplorer({ cwd, onOpenFile, refreshKey, onAtMention }: Props
     );
   }
 
+  const itemStyle: CSSProperties = {
+    width: "100%",
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    padding: "7px 9px",
+    background: "transparent",
+    border: "none",
+    borderRadius: 7,
+    color: "var(--text-muted)",
+    cursor: "pointer",
+    textAlign: "left",
+    fontSize: 12,
+  };
+
+  const isMac = typeof navigator !== "undefined" && navigator.platform.toUpperCase().indexOf("MAC") >= 0;
+
   return (
     <div style={{ padding: "2px 4px" }}>
       {roots.map((node) => (
@@ -268,11 +357,91 @@ export function FileExplorer({ cwd, onOpenFile, refreshKey, onAtMention }: Props
           expandedPaths={expandedPaths}
           onToggleExpanded={handleToggleExpanded}
           refreshKey={refreshKey}
+          onContextMenu={handleContextMenu}
         />
       ))}
       {roots.length === 0 && (
         <div style={{ padding: "8px 12px", fontSize: 11, color: "var(--text-dim)" }}>
           未找到文件
+        </div>
+      )}
+
+      {/* Context Menu */}
+      {contextMenu && (
+        <div
+          style={{
+            position: "fixed",
+            left: contextMenu.x,
+            top: contextMenu.y,
+            zIndex: 1000,
+            width: 200,
+            padding: 6,
+            background: "var(--bg-panel)",
+            border: "1px solid var(--border)",
+            borderRadius: 10,
+            boxShadow: "0 12px 28px rgba(0,0,0,0.16)",
+          }}
+          onClick={(e) => e.stopPropagation()}
+          onContextMenu={(e) => e.preventDefault()}
+        >
+          <div
+            style={{
+              padding: "5px 8px 7px",
+              color: "var(--text-dim)",
+              fontSize: 10,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+            title={contextMenu.filePath}
+          >
+            {contextMenu.fileName}
+          </div>
+          <button
+            style={itemStyle}
+            onClick={() => handleCopyPath("absolute")}
+            onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text)"; }}
+            onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "var(--text-muted)"; }}
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+            </svg>
+            {copied === "absolute" ? "已复制!" : "复制绝对路径"}
+          </button>
+          <button
+            style={itemStyle}
+            onClick={() => handleCopyPath("relative")}
+            onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text)"; }}
+            onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "var(--text-muted)"; }}
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+            </svg>
+            {copied === "relative" ? "已复制!" : "复制相对路径"}
+          </button>
+          <div style={{ height: 1, background: "var(--border)", margin: "5px 4px" }} />
+          <button
+            style={itemStyle}
+            onClick={handleRevealInFinder}
+            onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text)"; }}
+            onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "var(--text-muted)"; }}
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              {contextMenu.isDir ? (
+                <>
+                  <path d="M5 12h14" />
+                  <path d="M12 5l7 7-7 7" />
+                </>
+              ) : (
+                <>
+                  <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+                </>
+              )}
+            </svg>
+            {isMac ? "在 Finder 中显示" : "打开所在文件夹"}
+          </button>
         </div>
       )}
     </div>

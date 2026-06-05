@@ -33,6 +33,7 @@ interface AgentRole {
   basePrompt: string;
   blocks: Record<string, RoleSetting[]>;
   builtIn?: boolean;
+  sourceInfo?: { scope?: string; filePath?: string };
 }
 
 interface Props {
@@ -615,13 +616,14 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
 
   const loadRoles = useCallback(async () => {
     try {
-      const res = await fetch("/api/roles");
+      const url = cwd ? `/api/roles?cwd=${encodeURIComponent(cwd)}` : "/api/roles";
+      const res = await fetch(url);
       if (!res.ok) return;
       const data = await res.json() as { roles: AgentRole[] };
       setRoles(data.roles ?? []);
       onRolesLoaded?.(data.roles ?? []);
     } catch { /* ignore */ }
-  }, [onRolesLoaded]);
+  }, [onRolesLoaded, cwd]);
 
   useEffect(() => {
     loadRoles();
@@ -1244,6 +1246,8 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                     {roles.map((role) => {
                       const active = role.id === selectedRole.id;
                       const count = Object.values(role.blocks ?? {}).reduce((n, arr) => n + (arr?.length ?? 0), 0);
+                      const scope = role.sourceInfo?.scope ?? (role.builtIn ? "builtIn" : "user");
+                      const scopeText = scope === "project" ? "项目" : scope === "user" ? "全局" : scope === "builtIn" ? "内置" : scope;
                       return <button
                         key={role.id}
                         onClick={() => { onRoleChange(role.id); setRoleDropdownOpen(false); }}
@@ -1262,6 +1266,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                       >
                         {active ? <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="1.5 5 4 7.5 8.5 2.5" /></svg> : <span style={{ width: 10 }} />}
                         <span style={{ flex: 1 }}>{role.name}</span>
+                        <span style={{ fontSize: 10, color: scope === "project" ? "var(--accent)" : "var(--text-dim)" }}>{scopeText}</span>
                         {count > 0 && <span style={{ fontSize: 10, color: "var(--text-dim)" }}>{count} 条</span>}
                       </button>;
                     })}

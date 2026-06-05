@@ -132,7 +132,7 @@ export interface UseAgentSessionOptions {
   activeTabId?: string | null;
   session: SessionInfo | null;
   newSessionCwd: string | null;
-  onAgentEnd?: (changedFiles?: string[]) => void;
+  onAgentEnd?: (sessionId: string, changedFiles?: string[]) => void;
   onSessionCreated?: (session: SessionInfo) => void;
   onSessionStarted?: (session: SessionInfo | null) => void;
   onSessionForked?: (newSessionId: string) => void;
@@ -436,7 +436,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         }
         const changedFiles = [...changedFilesRef.current];
         changedFilesRef.current.clear();
-        onAgentEnd?.(changedFiles);
+        if (sessionIdRef.current) onAgentEnd?.(sessionIdRef.current, changedFiles);
         break;
       }
       case "message_start":

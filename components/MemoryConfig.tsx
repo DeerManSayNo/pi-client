@@ -3,14 +3,18 @@
 import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
 
 interface MemoryItem { id: string; text: string; createdAt: string }
-interface AgentRole { id: string; name: string; description: string; builtIn?: boolean; blocks: Record<string, MemoryItem[]> }
+interface AgentRole { id: string; name: string; description: string; builtIn?: boolean; sourceInfo?: { scope?: string; filePath?: string }; blocks: Record<string, MemoryItem[]> }
 
 type MemoryScope = { type: "global"; id: "global"; name: string; description: string; count: number } | { type: "role"; id: string; name: string; description: string; count: number; role: AgentRole };
 
 function newItem(): MemoryItem { return { id: `local_${Date.now()}`, text: "", createdAt: new Date().toISOString() }; }
 function cloneItems(items: MemoryItem[]): MemoryItem[] { return items.map((m) => ({ ...m })); }
+function rolesUrl(cwd?: string): string { return cwd ? `/api/roles?cwd=${encodeURIComponent(cwd)}` : "/api/roles"; }
+function roleUrl(id: string, cwd?: string): string { return cwd ? `/api/roles/${encodeURIComponent(id)}?cwd=${encodeURIComponent(cwd)}` : `/api/roles/${encodeURIComponent(id)}`; }
+function roleScope(role: AgentRole): string { return role.sourceInfo?.scope ?? (role.builtIn ? "builtIn" : "user"); }
+function scopeLabel(scope: string): string { return scope === "project" ? "项目" : scope === "user" ? "全局" : scope === "builtIn" ? "内置" : scope; }
 
-export function MemoryConfig({ onClose }: { onClose: () => void }) {
+export function MemoryConfig({ onClose, cwd }: { onClose: () => void; cwd?: string }) {
   const [globalMemory, setGlobalMemory] = useState<MemoryItem[]>([]);
   const [roles, setRoles] = useState<AgentRole[]>([]);
   const [selectedId, setSelectedId] = useState("global");
@@ -21,11 +25,11 @@ export function MemoryConfig({ onClose }: { onClose: () => void }) {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [memoryRes, rolesRes] = await Promise.all([fetch("/api/memory", { cache: "no-store" }), fetch("/api/roles", { cache: "no-store" })]);
+      const [memoryRes, rolesRes] = await Promise.all([fetch("/api/memory", { cache: "no-store" }), fetch(rolesUrl(cwd), { cache: "no-store" })]);
       if (memoryRes.ok) setGlobalMemory(((await memoryRes.json()) as { global?: MemoryItem[] }).global ?? []);
       if (rolesRes.ok) setRoles(((await rolesRes.json()) as { roles?: AgentRole[] }).roles ?? []);
     } finally { setLoading(false); }
-  }, []);
+  }, [cwd]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -57,12 +61,12 @@ export function MemoryConfig({ onClose }: { onClose: () => void }) {
         if (res.ok) setGlobalMemory(((await res.json()) as { global: MemoryItem[] }).global);
       } else {
         const blocks = { ...(selected.role.blocks ?? {}), Memory: cleaned };
-        const res = await fetch(`/api/roles/${encodeURIComponent(selected.role.id)}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ blocks }) });
+        const res = await fetch(roleUrl(selected.role.id, cwd), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ blocks }) });
         if (res.ok) await load();
       }
       window.dispatchEvent(new Event("pi-agent.roles-updated"));
     } finally { setSaving(false); }
-  }, [draft, load, selected]);
+  }, [draft, load, selected, cwd]);
 
   return (
     <div role="dialog" aria-modal="true" aria-label="记忆" style={overlayStyle} onClick={onClose}>
@@ -75,7 +79,7 @@ export function MemoryConfig({ onClose }: { onClose: () => void }) {
             {loading ? <div style={emptyStyle}>加载中...</div> : scopes.map((scope) => {
               const active = scope.id === selectedId;
               return <button key={scope.id} onClick={() => setSelectedId(scope.id)} style={{ ...scopeBtnStyle, background: active ? "var(--bg-selected)" : "transparent", color: active ? "var(--text)" : "var(--text-muted)" }}>
-                <div style={{ display: "flex", gap: 8, alignItems: "center" }}><span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 13, fontWeight: active ? 800 : 600 }}>{scope.name}</span>{scope.type === "global" && <span style={pillStyle}>默认</span>}</div>
+                <div style={{ display: "flex", gap: 8, alignItems: "center" }}><span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 13, fontWeight: active ? 800 : 600 }}>{scope.name}</span>{scope.type === "global" ? <span style={pillStyle}>默认</span> : <span style={{ ...pillStyle, color: roleScope(scope.role) === "project" ? "var(--accent)" : "var(--text-dim)" }}>{scopeLabel(roleScope(scope.role))}</span>}</div>
                 <div style={scopeMetaStyle}>{scope.count} 条记忆 · {scope.description}</div>
               </button>;
             })}

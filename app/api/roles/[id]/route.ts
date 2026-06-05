@@ -1,11 +1,21 @@
 import { NextResponse } from "next/server";
-import { deleteRole, readRoles, updateRole } from "@/lib/roles";
+import { deleteRole, moveRole, readRoles, updateRole } from "@/lib/roles";
 
 export async function PATCH(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   try {
+    const { searchParams } = new URL(req.url);
+    const cwd = searchParams.get("cwd");
     const body = await req.json();
-    const role = updateRole(id, body);
+    const wantsMove = (body.scope === "user" || body.scope === "project") && (body.moveRole === true || body.scopeTarget === true);
+    if (wantsMove) {
+      const searchCwd = (body.fromCwd as string) || cwd;
+      const updated = updateRole(id, { name: body.name, description: body.description, basePrompt: body.basePrompt, blocks: body.blocks }, searchCwd);
+      const moved = moveRole(id, { scope: body.scope, cwd: (body.cwd as string) ?? cwd, fromCwd: searchCwd });
+      if (!moved) return NextResponse.json({ error: "Role cannot be moved" }, { status: 400 });
+      return NextResponse.json({ role: moved });
+    }
+    const role = updateRole(id, body, cwd);
     if (!role) return NextResponse.json({ error: "Role not found" }, { status: 404 });
     return NextResponse.json({ role });
   } catch (error) {
@@ -13,8 +23,10 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
   }
 }
 
-export async function DELETE(_req: Request, { params }: { params: Promise<{ id: string }> }) {
+export async function DELETE(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const ok = deleteRole(id);
-  return NextResponse.json({ ok, roles: readRoles() }, { status: ok ? 200 : 400 });
+  const { searchParams } = new URL(req.url);
+  const cwd = searchParams.get("cwd");
+  const ok = deleteRole(id, cwd);
+  return NextResponse.json({ ok, roles: readRoles(cwd) }, { status: ok ? 200 : 400 });
 }

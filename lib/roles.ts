@@ -18,6 +18,11 @@ export interface AgentRole {
   basePrompt: string;
   blocks: Record<RoleBlock, RoleSetting[]>;
   builtIn?: boolean;
+  sourceInfo?: {
+    scope: "builtIn" | "user" | "project";
+    filePath?: string;
+  };
+  canDelete?: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -124,6 +129,33 @@ export function rolesFilePath(): string {
   return path.join(getAgentDir(), "roles.json");
 }
 
+export function projectRolesFilePath(cwd: string): string {
+  return path.join(cwd, ".agents", "roles.json");
+}
+
+function readRolesFromFile(file: string, scope: "user" | "project"): AgentRole[] {
+  if (!existsSync(file)) return [];
+  try {
+    const parsed = JSON.parse(readFileSync(file, "utf8")) as RolesFile;
+    return (parsed.roles ?? [])
+      .map(normalizeRole)
+      .filter((r): r is AgentRole => Boolean(r))
+      .map((role) => ({ ...role, builtIn: false, sourceInfo: { scope, filePath: file }, canDelete: true }));
+  } catch {
+    return [];
+  }
+}
+
+function fileForScope(scope: "user" | "project", cwd?: string | null): string {
+  return scope === "project" && cwd?.trim() ? projectRolesFilePath(cwd) : rolesFilePath();
+}
+
+function writeRolesToFile(file: string, roles: AgentRole[]): void {
+  mkdirSync(path.dirname(file), { recursive: true });
+  const persisted = roles.map(({ sourceInfo: _sourceInfo, canDelete: _canDelete, ...role }) => role);
+  writeFileSync(file, JSON.stringify({ version: 1, roles: persisted }, null, 2));
+}
+
 function normalizeRole(raw: Partial<AgentRole>): AgentRole | null {
   if (!raw.id || !raw.name) return null;
   const blocks = emptyBlocks();
@@ -145,58 +177,83 @@ function normalizeRole(raw: Partial<AgentRole>): AgentRole | null {
   };
 }
 
-export function readRoles(): AgentRole[] {
-  let custom: AgentRole[] = [];
-  const file = rolesFilePath();
-  if (existsSync(file)) {
-    try {
-      const parsed = JSON.parse(readFileSync(file, "utf8")) as RolesFile;
-      custom = (parsed.roles ?? []).map(normalizeRole).filter((r): r is AgentRole => Boolean(r));
-    } catch {
-      custom = [];
-    }
-  }
+export function readRoles(cwd?: string | null): AgentRole[] {
+  const globalCustom = readRolesFromFile(rolesFilePath(), "user");
+  const projectCustom = cwd?.trim() ? readRolesFromFile(projectRolesFilePath(cwd), "project") : [];
 
   const byId = new Map<string, AgentRole>();
-  for (const role of BUILT_IN_ROLES) byId.set(role.id, role);
-  for (const role of custom) {
+  for (const role of BUILT_IN_ROLES) byId.set(role.id, { ...role, sourceInfo: { scope: "builtIn" }, canDelete: false });
+  for (const role of globalCustom) {
     const base = byId.get(role.id);
-    byId.set(role.id, base?.builtIn ? { ...base, ...role, builtIn: true } : role);
+    byId.set(role.id, base?.builtIn ? { ...base, ...role, builtIn: true, sourceInfo: { scope: "user", filePath: rolesFilePath() }, canDelete: false } : role);
   }
-  return [...byId.values()];
+  const roles = [...byId.values(), ...projectCustom.filter((role) => !byId.has(role.id))];
+  return roles;
 }
 
-export function writeRoles(roles: AgentRole[]): void {
-  const file = rolesFilePath();
-  mkdirSync(path.dirname(file), { recursive: true });
-  writeFileSync(file, JSON.stringify({ version: 1, roles }, null, 2));
+export function writeRoles(roles: AgentRole[], cwd?: string | null, scope: "user" | "project" = "user"): void {
+  const file = scope === "project" && cwd?.trim() ? projectRolesFilePath(cwd) : rolesFilePath();
+  writeRolesToFile(file, roles);
 }
 
-export function getRole(roleId?: string | null): AgentRole {
-  const roles = readRoles();
+function findEditableRoleFile(roleId: string, cwd?: string | null): { file: string; roles: AgentRole[]; index: number; scope: "user" | "project" } | null {
+  const candidates: Array<{ file: string; scope: "user" | "project" }> = [];
+  if (cwd?.trim()) candidates.push({ file: projectRolesFilePath(cwd), scope: "project" });
+  candidates.push({ file: rolesFilePath(), scope: "user" });
+  for (const candidate of candidates) {
+    const roles = readRolesFromFile(candidate.file, candidate.scope);
+    const index = roles.findIndex((r) => r.id === roleId);
+    if (index !== -1) return { ...candidate, roles, index };
+  }
+  return null;
+}
+
+export function getRole(roleId?: string | null, cwd?: string | null): AgentRole {
+  const roles = readRoles(cwd);
   return roles.find((r) => r.id === roleId) ?? roles.find((r) => r.id === DEFAULT_ROLE_ID)!;
 }
 
-export function createRole(input: { name: string; description?: string; basePrompt?: string }): AgentRole {
-  const roles = readRoles();
+export function createRole(input: { name: string; description?: string; basePrompt?: string; scope?: "user" | "project"; cwd?: string | null }): AgentRole {
+  const scope = input.scope === "project" && input.cwd?.trim() ? "project" : "user";
+  const file = scope === "project" ? projectRolesFilePath(input.cwd!) : rolesFilePath();
+  const roles = readRolesFromFile(file, scope);
   const role: AgentRole = {
     id: uid(),
     name: input.name.trim(),
     description: input.description?.trim() ?? "",
     basePrompt: input.basePrompt?.trim() ?? "",
     blocks: emptyBlocks(),
+    sourceInfo: { scope, filePath: file },
+    canDelete: true,
     createdAt: nowIso(),
     updatedAt: nowIso(),
   };
-  writeRoles([...roles, role]);
+  writeRolesToFile(file, [...roles, role]);
   return role;
 }
 
-export function updateRole(roleId: string, patch: Partial<Pick<AgentRole, "name" | "description" | "basePrompt" | "blocks">>): AgentRole | null {
-  const roles = readRoles();
-  const idx = roles.findIndex((r) => r.id === roleId);
-  if (idx === -1) return null;
-  const current = roles[idx];
+export function updateRole(roleId: string, patch: Partial<Pick<AgentRole, "name" | "description" | "basePrompt" | "blocks">>, cwd?: string | null): AgentRole | null {
+  const found = findEditableRoleFile(roleId, cwd);
+  if (!found) {
+    const builtIn = BUILT_IN_ROLES.find((r) => r.id === roleId);
+    if (!builtIn) return null;
+    const file = rolesFilePath();
+    const roles = readRolesFromFile(file, "user");
+    const next: AgentRole = {
+      ...builtIn,
+      ...patch,
+      builtIn: true,
+      name: patch.name?.trim() || builtIn.name,
+      description: patch.description ?? builtIn.description,
+      basePrompt: patch.basePrompt ?? builtIn.basePrompt,
+      sourceInfo: { scope: "user", filePath: file },
+      canDelete: false,
+      updatedAt: nowIso(),
+    };
+    writeRolesToFile(file, [...roles, next]);
+    return next;
+  }
+  const current = found.roles[found.index];
   const next: AgentRole = {
     ...current,
     ...patch,
@@ -205,32 +262,55 @@ export function updateRole(roleId: string, patch: Partial<Pick<AgentRole, "name"
     basePrompt: patch.basePrompt ?? current.basePrompt,
     updatedAt: nowIso(),
   };
-  roles[idx] = next;
-  writeRoles(roles);
+  found.roles[found.index] = next;
+  writeRolesToFile(found.file, found.roles);
   return next;
 }
 
-export function deleteRole(roleId: string): boolean {
+export function deleteRole(roleId: string, cwd?: string | null): boolean {
   if (roleId === DEFAULT_ROLE_ID) return false;
-  const roles = readRoles();
-  const role = roles.find((r) => r.id === roleId);
-  if (!role || role.builtIn) return false;
-  const next = roles.filter((r) => r.id !== roleId);
-  if (next.length === roles.length) return false;
-  writeRoles(next);
+  const found = findEditableRoleFile(roleId, cwd);
+  if (!found) return false;
+  const next = found.roles.filter((r) => r.id !== roleId);
+  if (next.length === found.roles.length) return false;
+  writeRolesToFile(found.file, next);
   return true;
 }
 
-export function addRoleSetting(roleId: string, block: RoleBlock, text: string): RoleSetting | null {
-  const role = getRole(roleId);
+export function moveRole(roleId: string, input: { scope: "user" | "project"; cwd?: string | null; fromCwd?: string | null }): AgentRole | null {
+  if (roleId === DEFAULT_ROLE_ID) return null;
+  const found = findEditableRoleFile(roleId, input.fromCwd ?? input.cwd);
+  if (!found) return null;
+  const role = found.roles[found.index];
+  if (role.builtIn) return null;
+
+  const targetScope = input.scope === "project" && input.cwd?.trim() ? "project" : "user";
+  const targetFile = fileForScope(targetScope, input.cwd);
+  if (targetFile === found.file) return role;
+
+  const sourceNext = found.roles.filter((r) => r.id !== roleId);
+  const targetRoles = readRolesFromFile(targetFile, targetScope).filter((r) => r.id !== roleId);
+  const moved: AgentRole = {
+    ...role,
+    sourceInfo: { scope: targetScope, filePath: targetFile },
+    canDelete: true,
+    updatedAt: nowIso(),
+  };
+  writeRolesToFile(found.file, sourceNext);
+  writeRolesToFile(targetFile, [...targetRoles, moved]);
+  return moved;
+}
+
+export function addRoleSetting(roleId: string, block: RoleBlock, text: string, cwd?: string | null): RoleSetting | null {
+  const role = getRole(roleId, cwd);
   const setting: RoleSetting = { id: uid("setting"), text: text.trim(), createdAt: nowIso() };
   const blocks = { ...role.blocks, [block]: [...role.blocks[block], setting] };
-  updateRole(role.id, { blocks });
+  updateRole(role.id, { blocks }, cwd);
   return setting;
 }
 
-export function composeRolePrompt(roleId?: string | null, temporarySettings: string[] = []): string {
-  const role = getRole(roleId);
+export function composeRolePrompt(roleId?: string | null, temporarySettings: string[] = [], cwd?: string | null): string {
+  const role = getRole(roleId, cwd);
   const lines: string[] = [];
   lines.push(`# Role: ${role.name}`);
   if (role.description.trim()) lines.push(role.description.trim());
@@ -257,7 +337,7 @@ export function composeRolePrompt(roleId?: string | null, temporarySettings: str
 const ROLE_START = "\n\n<!-- PI_ROLE_PROFILE_START -->\n";
 const ROLE_END = "\n<!-- PI_ROLE_PROFILE_END -->";
 
-export function applyRolePromptToSystemPrompt(systemPrompt: string | undefined, roleId?: string | null, temporarySettings: string[] = []): string {
+export function applyRolePromptToSystemPrompt(systemPrompt: string | undefined, roleId?: string | null, temporarySettings: string[] = [], cwd?: string | null): string {
   let base = systemPrompt ?? "";
   const start = base.indexOf(ROLE_START);
   const end = base.indexOf(ROLE_END, start >= 0 ? start : 0);
@@ -265,7 +345,7 @@ export function applyRolePromptToSystemPrompt(systemPrompt: string | undefined, 
     base = `${base.slice(0, start)}${base.slice(end + ROLE_END.length)}`;
   }
   base = base.trimEnd();
-  return `${base}${ROLE_START}${composeRolePrompt(roleId, temporarySettings)}${ROLE_END}`.trimStart();
+  return `${base}${ROLE_START}${composeRolePrompt(roleId, temporarySettings, cwd)}${ROLE_END}`.trimStart();
 }
 
 export function inferRoleBlock(text: string): RoleBlock {

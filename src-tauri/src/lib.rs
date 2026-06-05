@@ -6,9 +6,9 @@ use std::net::TcpStream;
 use std::process::Stdio;
 #[cfg(not(debug_assertions))]
 use std::time::Duration;
-use tauri::{WebviewUrl, WebviewWindowBuilder};
+use tauri::{LogicalPosition, Manager, WebviewUrl, WebviewWindowBuilder};
 #[cfg(target_os = "macos")]
-use tauri::{LogicalPosition, TitleBarStyle};
+use tauri::TitleBarStyle;
 
 #[cfg(not(debug_assertions))]
 fn find_available_port() -> std::io::Result<u16> {
@@ -110,6 +110,10 @@ pub fn run() {
                 .title_bar_style(TitleBarStyle::Overlay)
                 .hidden_title(true)
                 .traffic_light_position(LogicalPosition::new(14.0, 11.0));
+
+            #[cfg(target_os = "windows")]
+            let builder = builder
+                .decorations(false);
 
             let window = builder.build()?;
 
