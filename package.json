@@ -17,7 +17,7 @@
   ],
   "scripts": {
     "dev": "next dev -p 30141",
-    "build": "next build --webpack",
+    "build": "node scripts/with-build-home.js next build --webpack",
     "start": "next start -p 30141",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",

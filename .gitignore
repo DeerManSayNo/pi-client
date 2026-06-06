@@ -45,3 +45,4 @@ next-env.d.ts
 /src-tauri/target/
 /src-tauri/binaries/
 placeholder-dist/
+/.pi-build-home/

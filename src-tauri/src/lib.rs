@@ -6,9 +6,14 @@ use std::net::TcpStream;
 use std::process::Stdio;
 #[cfg(not(debug_assertions))]
 use std::time::Duration;
-use tauri::{LogicalPosition, Manager, WebviewUrl, WebviewWindowBuilder};
+#[cfg(all(not(debug_assertions), target_os = "windows"))]
+use std::os::windows::process::CommandExt;
+use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 #[cfg(target_os = "macos")]
-use tauri::TitleBarStyle;
+use tauri::{LogicalPosition, TitleBarStyle};
+
+#[cfg(all(not(debug_assertions), target_os = "windows"))]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 #[cfg(not(debug_assertions))]
 fn find_available_port() -> std::io::Result<u16> {
@@ -87,6 +92,9 @@ pub fn run() {
                         .stdout(Stdio::null())
                         .stderr(Stdio::null());
 
+                    #[cfg(target_os = "windows")]
+                    cmd.creation_flags(CREATE_NO_WINDOW);
+
                     cmd.spawn()?;
 
                     wait_for_server(port);
@@ -115,10 +123,16 @@ pub fn run() {
             let builder = builder
                 .decorations(false);
 
-            let window = builder.build()?;
-
             #[cfg(debug_assertions)]
-            window.open_devtools();
+            {
+                let window = builder.build()?;
+                window.open_devtools();
+            }
+
+            #[cfg(not(debug_assertions))]
+            {
+                builder.build()?;
+            }
 
             Ok(())
         })
