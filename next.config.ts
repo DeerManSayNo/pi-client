@@ -11,6 +11,7 @@ try {
 
 const nextConfig: NextConfig = {
   output: "standalone",
+  outputFileTracingRoot: __dirname,
   serverExternalPackages: ["@earendil-works/pi-coding-agent", "@earendil-works/pi-ai", "node-cron"],
   allowedDevOrigins: ["127.0.0.1", "192.168.*.*"],
   devIndicators: false,
