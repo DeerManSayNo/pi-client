@@ -12,6 +12,7 @@ import { SchedulerPanel } from "./SchedulerPanel";
 import { RoleConfig } from "./RoleConfig";
 import { MemoryConfig } from "./MemoryConfig";
 import { McpConfig } from "./McpConfig";
+import { LogPanel } from "./LogPanel";
 import { useTheme } from "@/hooks/useTheme";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { SessionInfo } from "@/lib/types";
@@ -133,6 +134,7 @@ export function AppShell() {
   const [fileTabs, setFileTabs] = useState<Tab[]>([]);
   const [activeFileTabId, setActiveFileTabId] = useState<string | null>(null);
   const [rightPanelOpen, setRightPanelOpen] = useState(false);
+  const [logPanelOpen, setLogPanelOpen] = useState(false);
 
   const handleAtMention = useCallback((relativePath: string) => {
     chatInputRef.current?.insertText("`" + relativePath + "`");
@@ -490,9 +492,16 @@ export function AppShell() {
   }, [handleOpenFile, setSessionRunning]);
 
   const handleCloseFileTab = useCallback((tabId: string) => {
+    // Closing the log tab
+    if (tabId === "__log__") {
+      setLogPanelOpen(false);
+      // If no file tabs remain, close the right panel
+      if (fileTabs.length === 0) setRightPanelOpen(false);
+      return;
+    }
     setFileTabs((prev) => {
       const next = prev.filter((t) => t.id !== tabId);
-      if (next.length === 0) setRightPanelOpen(false);
+      if (next.length === 0 && !logPanelOpen) setRightPanelOpen(false);
       return next;
     });
     setActiveFileTabId((cur) => {
@@ -500,7 +509,7 @@ export function AppShell() {
       const remaining = fileTabs.filter((t) => t.id !== tabId);
       return remaining.length > 0 ? remaining[remaining.length - 1].id : null;
     });
-  }, [fileTabs]);
+  }, [fileTabs, logPanelOpen]);
 
   const handleCloseSessionTab = useCallback((sessionId: string) => {
     if (pendingTempTabIdRef.current === sessionId) {
@@ -751,6 +760,39 @@ export function AppShell() {
             <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="9" y1="3" x2="9" y2="21" />
           </svg>
         )}
+      </button>
+      {/* Log panel button */}
+      <button
+        data-tauri-drag-region="false"
+        onClick={(e) => { e.stopPropagation(); setLogPanelOpen((v) => { const next = !v; if (next) { setRightPanelOpen(true); setActiveFileTabId("__log__"); } else { if (fileTabs.length === 0) setRightPanelOpen(false); setActiveFileTabId(fileTabs.length > 0 ? fileTabs[fileTabs.length - 1].id : null); } return next; }); }}
+        title={logPanelOpen ? "隐藏 AI Log" : "显示 AI Log"}
+        aria-label={logPanelOpen ? "隐藏 AI Log" : "显示 AI Log"}
+        aria-pressed={logPanelOpen}
+        style={{
+          position: "absolute",
+          right: isWindowsPlatform ? 186 : 96,
+          top: 2,
+          width: 24,
+          height: 24,
+          padding: 0,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          background: logPanelOpen ? "color-mix(in srgb, var(--accent) 15%, transparent)" : "transparent",
+          border: "1px solid transparent",
+          borderRadius: 7,
+          color: logPanelOpen ? "var(--accent)" : "var(--text-muted)",
+          cursor: "pointer",
+          transition: "color 0.12s, background 0.12s, border-color 0.12s",
+          WebkitAppRegion: "no-drag",
+        } as DraggableStyle}
+        onMouseEnter={(e) => { e.currentTarget.style.color = "var(--accent)"; e.currentTarget.style.background = "var(--bg-hover)"; }}
+        onMouseLeave={(e) => { e.currentTarget.style.color = logPanelOpen ? "var(--accent)" : "var(--text-muted)"; e.currentTarget.style.background = logPanelOpen ? "color-mix(in srgb, var(--accent) 15%, transparent)" : "transparent"; }}
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M12 20h9" />
+          <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" />
+        </svg>
       </button>
       {/* Settings button */}
       <button
@@ -1692,19 +1734,24 @@ export function AppShell() {
           background: "var(--bg)",
         }}
       >
-        {/* File tabs */}
-        {fileTabs.length > 0 && (
+        {/* Tabs: log tab + file tabs */}
+        {(logPanelOpen || fileTabs.length > 0) && (
           <TabBar
-            tabs={fileTabs}
-            activeTabId={activeFileTabId ?? ""}
+            tabs={[
+              ...(logPanelOpen ? [{ id: "__log__" as string, label: "AI Log", filePath: "__log__" }] : []),
+              ...fileTabs,
+            ]}
+            activeTabId={activeFileTabId ?? (logPanelOpen ? "__log__" : "")}
             onSelectTab={(id) => setActiveFileTabId(id)}
             onCloseTab={handleCloseFileTab}
             cwd={effectiveProjectCwd ?? undefined}
           />
         )}
-        {/* File content */}
-        <div style={{ flex: 1, overflow: "hidden" }}>
-          {activeFileTab?.filePath ? (
+        {/* Content: log panel or file viewer */}
+        <div style={{ flex: 1, overflow: "hidden", position: "relative" }}>
+          {activeFileTabId === "__log__" ? (
+            <LogPanel sessionId={selectedSession?.id} />
+          ) : activeFileTab?.filePath ? (
             <FileViewer filePath={activeFileTab.filePath} cwd={activeCwd ?? undefined} />
           ) : (
             <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-dim)", fontSize: 12 }}>

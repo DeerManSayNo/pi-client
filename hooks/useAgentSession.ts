@@ -3,6 +3,7 @@
 import { useState, useCallback, useRef, useEffect, useReducer, useMemo } from "react";
 import type { AgentMessage, SessionInfo } from "@/lib/types";
 import { normalizeCompletedMessage, normalizeCompletedMessages, normalizeToolCalls } from "@/lib/normalize";
+import { agentEventBus } from "@/lib/agent-event-bus";
 import { sendAgentCommand } from "@/lib/agent-client";
 import type { ToolEntry } from "@/components/ToolPanel";
 
@@ -194,8 +195,11 @@ function getStreamingContentLength(msg: Partial<AgentMessage> | null | undefined
       chars += block.text.length;
     } else if (block.type === "thinking" && "thinking" in block && typeof block.thinking === "string") {
       chars += block.thinking.length;
-    } else if (block.type === "toolCall" && "input" in block) {
-      chars += JSON.stringify(block.input ?? {}).length;
+    } else if (block.type === "toolCall") {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const b = block as any;
+      if (b.input) chars += JSON.stringify(b.input).length;
+      else if (b.arguments) chars += JSON.stringify(b.arguments).length;
     }
   }
   return chars;
@@ -208,9 +212,13 @@ export type WatchdogInfo = {
   contentThresholdMs: number;
 };
 
+export type AutoRecoveryMode = "off" | "conservative" | "aggressive";
+export type StallLevel = null | "warning" | "recovering";
+
 type AgentStatus = {
   isStreaming?: boolean;
   isCompacting?: boolean;
+  isRunning?: boolean;
   eventIdleMs?: number | null;
   contentIdleMs?: number | null;
 };
@@ -251,7 +259,20 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [lastModelError, setLastModelError] = useState<string | null>(null);
   const lastModelErrorRef = useRef<string | null>(null);
 
+  // Auto-recovery mode persisted in localStorage
+  const [autoRecoveryMode, setAutoRecoveryModeState] = useState<AutoRecoveryMode>(() => {
+    if (typeof window === "undefined") return "conservative";
+    const stored = window.localStorage.getItem("pi-agent.auto-recovery-mode");
+    return (stored === "off" || stored === "aggressive") ? stored : "conservative";
+  });
+  const [stallLevel, setStallLevel] = useState<StallLevel>(null);
+  const stallDismissedRef = useRef(false);
+  const stallRecoveriesRef = useRef(0);
+  const AUTO_CONTINUE_MESSAGE = "请从刚才中断的位置继续，不要重复已经完成的内容。如果上一步有未完成的工具调用或代码修改，请继续完成。";
+
   const eventSourceRef = useRef<EventSource | null>(null);
+  const sseReconnectAttemptRef = useRef(0);
+  const sseReconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const sessionIdRef = useRef<string | null>(null);
   const agentRunningRef = useRef(false);
   const handleAgentEventRef = useRef<((event: AgentEvent) => void) | null>(null);
@@ -266,10 +287,41 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const lastContentLengthRef = useRef(0);
   const watchdogCheckingRef = useRef(false);
   const watchdogStaleRecoveriesRef = useRef(0);
+  // Tracks how many times the watchdog has auto-recovered this logical turn.
+  // Reset only on user-initiated sends (handleSend / handleFollowUp), NOT in
+  // resetTurnTracking(), so it survives across watchdog recovery cycles and
+  // acts as a circuit breaker (max 3 auto-recoveries per user message).
+  const autoRecoveryAttemptsRef = useRef(0);
+  const agentPhaseRef = useRef<AgentPhase>(null);
   const autoContinueSentRef = useRef(false);
   const autoContinueInProgressRef = useRef(false);
   const abortCompletedRef = useRef(false);
   const receivedAssistantMessageRef = useRef(false);
+  const turnIdRef = useRef(0);
+
+  // Shared reset: clears all per-turn tracking state. Called at the start of
+  // every new turn (user send, follow_up, agent_start) to prevent stale
+  // watchdog/error state leaking across turns.
+  //
+  // NOTE: autoContinueSentRef / autoContinueInProgressRef are NOT reset here.
+  // They are managed exclusively by executeRecovery() and the agent_end handler.
+  // Resetting them inside resetTurnTracking() creates a race window: if the
+  // SDK's auto-retry fires an agent_start between executeRecovery's abort and
+  // follow_up, the agent_start → resetTurnTracking() would clear the recovery
+  // gate, causing two concurrent streams (SDK retry + our follow_up).
+  // handleSend / handleFollowUp explicitly reset these refs for user-initiated turns.
+  const resetTurnTracking = () => {
+    watchdogStaleRecoveriesRef.current = 0;
+    stallDismissedRef.current = false;
+    stallRecoveriesRef.current = 0;
+    setStallLevel(null);
+    lastModelErrorRef.current = null;
+    setLastModelError(null);
+    receivedAssistantMessageRef.current = false;
+    lastAgentEventAtRef.current = Date.now();
+    lastContentChangedAtRef.current = Date.now();
+    lastContentLengthRef.current = 0;
+  };
 
   const setNewSessionModel = opts.setNewSessionModel ?? setNewSessionModelState;
   const setToolPresetState = opts.setToolPreset ?? setToolPreset;
@@ -312,7 +364,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         return null;
       }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const d = await res.json() as SessionData & { agentState?: { running: boolean; state?: { isStreaming?: boolean; isCompacting?: boolean; contextUsage?: { percent: number | null; contextWindow: number; tokens: number | null } | null; systemPrompt?: string; thinkingLevel?: string } } };
+      const d = await res.json() as SessionData & { agentState?: { running: boolean; state?: { isStreaming?: boolean; isCompacting?: boolean; isRunning?: boolean; contextUsage?: { percent: number | null; contextWindow: number; tokens: number | null } | null; systemPrompt?: string; thinkingLevel?: string } } };
       if (sid !== sessionIdRef.current) return null;
       setData(d);
       setMessages(normalizeCompletedMessages(d.context.messages.map(compressMessageContent)));
@@ -348,34 +400,84 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [setToolPresetState]);
 
   const connectEvents = useCallback((sid: string) => {
+    // Clear any pending reconnect timer from a previous attempt
+    if (sseReconnectTimerRef.current) {
+      clearTimeout(sseReconnectTimerRef.current);
+      sseReconnectTimerRef.current = null;
+    }
     if (eventSourceRef.current) {
       eventSourceRef.current.close();
       eventSourceRef.current = null;
     }
+    sseReconnectAttemptRef.current = 0;
+
     const es = new EventSource(`/api/agent/${encodeURIComponent(sid)}/events`);
     eventSourceRef.current = es;
     es.onmessage = (e) => {
       try {
         const event = JSON.parse(e.data) as AgentEvent;
+        agentEventBus.emit(event);
         handleAgentEventRef.current?.(event);
       } catch {
         // ignore
       }
     };
+    es.onopen = () => {
+      sseReconnectAttemptRef.current = 0;
+      // On reconnect, verify we didn't miss agent_end during the backoff gap.
+      // If the backend session has already finished, sync state locally so the
+      // UI doesn't stay stuck in "streaming" mode waiting for events that will
+      // never arrive.
+      fetch(`/api/agent/${encodeURIComponent(sid)}`)
+        .then((r) => r.json())
+        .then((d: { running?: boolean; status?: AgentStatus }) => {
+          if (!d.running || d.status?.isRunning === false) {
+            // Session ended while we were disconnected — dispatch a synthetic
+            // agent_end so the client state resets cleanly.
+            handleAgentEventRef.current?.({ type: "agent_end", willRetry: false });
+          }
+        })
+        .catch(() => {});
+    };
     es.onerror = () => {
-      if (eventSourceRef.current === es && agentRunningRef.current) {
+      // Always close the broken EventSource so it doesn't keep reconnecting
+      // after the session has ended.  Without this, stale EventSources leak.
+      if (eventSourceRef.current !== es) {
         es.close();
-        eventSourceRef.current = null;
-        setTimeout(() => {
-          if (agentRunningRef.current) connectEvents(sid);
-        }, 1000);
+        return;
       }
+      es.close();
+      eventSourceRef.current = null;
+
+      if (!agentRunningRef.current) return;
+
+      sseReconnectAttemptRef.current += 1;
+      const attempt = sseReconnectAttemptRef.current;
+      const MAX_ATTEMPTS = 10;
+      if (attempt > MAX_ATTEMPTS) return;
+
+      // Exponential backoff: 1s, 2s, 4s, 8s, ... capped at 30s
+      const delay = Math.min(1000 * Math.pow(2, attempt - 1), 30_000);
+
+      sseReconnectTimerRef.current = setTimeout(() => {
+        sseReconnectTimerRef.current = null;
+        // Guard: only reconnect if we're still on the same session AND
+        // the agent is still running.  Without this check, a tab switch
+        // during the backoff delay would reconnect to the wrong session.
+        if (agentRunningRef.current && sessionIdRef.current === sid) {
+          connectEvents(sid);
+        }
+      }, delay);
     };
   }, []);
 
   useEffect(() => {
     agentRunningRef.current = agentRunning;
   }, [agentRunning]);
+
+  useEffect(() => {
+    agentPhaseRef.current = agentPhase;
+  }, [agentPhase]);
 
   const handleAgentEvent = useCallback((event: AgentEvent) => {
     lastAgentEventAtRef.current = Date.now();
@@ -388,28 +490,40 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         break;
       }
       case "agent_start":
-        watchdogStaleRecoveriesRef.current = 0;
-        lastAgentEventAtRef.current = Date.now();
-        lastContentChangedAtRef.current = Date.now();
-        lastContentLengthRef.current = 0;
-        lastModelErrorRef.current = null;
-        setLastModelError(null);
-        receivedAssistantMessageRef.current = false;
+        turnIdRef.current += 1;
+        // A fresh turn has started — reset all per-turn tracking.
+        resetTurnTracking();
         setAgentRunning(true);
         setAgentPhase({ kind: "waiting_model" });
         dispatch({ type: "start" });
         break;
       case "agent_end": {
-        // If an auto-continue is in progress, this agent_end is the stale
-        // event from the aborted run.  Don't touch UI state — just signal
-        // that abort has completed so recoverWithContinue can proceed.
-        if (autoContinueInProgressRef.current) {
+        const currentTurn = turnIdRef.current;
+        // If the stale-event protection gate is still open (set by a
+        // watchdog recovery cycle that sent abort), and abortCompletedRef
+        // has NOT been set yet, this agent_end is from the aborted old
+        // turn.  Consume it silently.
+        //
+        // Once abortCompletedRef is set (either by the abort's agent_end
+        // or by the recovery timeout), the gate lets subsequent agent_ends
+        // through — otherwise the follow_up's agent_end would be swallowed
+        // and the UI would stay stuck in streaming mode indefinitely.
+        if (autoContinueInProgressRef.current && !abortCompletedRef.current) {
           abortCompletedRef.current = true;
           break;
         }
+        // Reset autoContinueSentRef when a normal agent_end is received.
+        // This allows future watchdog recoveries if needed.
+        if (autoContinueSentRef.current) {
+          console.log('[Watchdog] agent_end received after auto-continue, resetting autoContinueSentRef');
+          autoContinueSentRef.current = false;
+        }
+        stallDismissedRef.current = false;
+        stallRecoveriesRef.current = 0;
+        setStallLevel(null);
         watchdogStaleRecoveriesRef.current = 0;
         const eventData = event as { willRetry?: boolean; error?: string };
-        const willRetry = eventData.willRetry ?? true;
+        const willRetry = eventData.willRetry ?? false;
         // Capture error from immediate prompt() failure (rpc-manager sends error field)
         if (eventData.error && !lastModelErrorRef.current) {
           lastModelErrorRef.current = eventData.error;
@@ -424,6 +538,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (!willRetry && !receivedAssistantMessageRef.current && !lastModelErrorRef.current) {
           lastModelErrorRef.current = "模型响应失败";
           setLastModelError("模型响应失败");
+        }
+        // When the agent will retry automatically, keep agentRunning=true so the
+        // UI stays in "streaming" mode and prevents accidental user "continue"
+        // inputs that would collide with the SDK's auto-retry.
+        if (willRetry) {
+          // Keep running — auto_retry_end or the next agent_start will update state.
+          // Don't clear retryInfo either; auto_retry_start will set it shortly.
+          // Still reload session to capture partial output so far.
+          if (sessionIdRef.current) {
+            loadSession(sessionIdRef.current);
+          }
+          break;
         }
         setAgentRunning(false);
         setAgentPhase(null);
@@ -507,13 +633,28 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         break;
       }
       case "auto_retry_start":
+        // Reset watchdog timers so the retry backoff period doesn't trigger a
+        // false-positive stale-detection and a conflicting auto-continue.
+        watchdogStaleRecoveriesRef.current = 0;
+        lastContentChangedAtRef.current = Date.now();
         setRetryInfo({ attempt: event.attempt as number, maxAttempts: event.maxAttempts as number, errorMessage: event.errorMessage as string | undefined });
         break;
       case "auto_retry_end": {
         const retryEndEvent = event as { success?: boolean; finalError?: string };
-        if (retryEndEvent.success === false && retryEndEvent.finalError) {
-          lastModelErrorRef.current = retryEndEvent.finalError;
-          setLastModelError(retryEndEvent.finalError);
+        if (retryEndEvent.success === false) {
+          // Retries exhausted — finalize the stop.
+          if (retryEndEvent.finalError) {
+            lastModelErrorRef.current = retryEndEvent.finalError;
+            setLastModelError(retryEndEvent.finalError);
+          }
+          if (agentRunningRef.current) {
+            agentRunningRef.current = false;
+            setAgentRunning(false);
+            setAgentPhase(null);
+            dispatch({ type: "end" });
+          }
+          // Reset autoContinueSentRef so watchdog can try again if needed
+          autoContinueSentRef.current = false;
         }
         setRetryInfo(null);
         break;
@@ -541,14 +682,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (agentRunningRef.current) return;
     // Set the ref immediately to prevent duplicate sends before React re-renders
     agentRunningRef.current = true;
+    turnIdRef.current += 1;
+    // Explicitly clear recovery state — a user-initiated send always starts a fresh turn
     autoContinueSentRef.current = false;
-    watchdogStaleRecoveriesRef.current = 0;
-    lastModelErrorRef.current = null;
-    setLastModelError(null);
-    receivedAssistantMessageRef.current = false;
-    lastAgentEventAtRef.current = Date.now();
-    lastContentChangedAtRef.current = Date.now();
-    lastContentLengthRef.current = 0;
+    autoContinueInProgressRef.current = false;
+    resetTurnTracking();
+    autoRecoveryAttemptsRef.current = 0;
 
     const imageBlocks = images?.map((img) => ({ type: "image" as const, source: { type: "base64" as const, media_type: img.mimeType, data: img.data } }));
     const userMsg: AgentMessage = {
@@ -628,9 +767,24 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } catch (e) {
       if (optimisticNewSession) onSessionStarted?.(null);
       console.error("Failed to send message:", e);
+      // Remove the optimistically-inserted user message so the UI doesn't
+      // show a dangling message with no reply.
+      setMessages((prev) => prev.filter((m) => m !== userMsg));
+      // Reset the ref synchronously so the watchdog and SSE reconnect logic
+      // see the correct state immediately — not after the next React render.
+      agentRunningRef.current = false;
       setAgentRunning(false);
       setAgentPhase(null);
       dispatch({ type: "end" });
+      // If connectEvents was called before sendAgentCommand threw (existing
+      // session path), close the orphaned EventSource so it doesn't keep
+      // retrying in the background for a prompt that was never sent.
+      if (sseReconnectTimerRef.current) {
+        clearTimeout(sseReconnectTimerRef.current);
+        sseReconnectTimerRef.current = null;
+      }
+      eventSourceRef.current?.close();
+      eventSourceRef.current = null;
     }
   }, [isNew, newSessionCwd, newSessionModel, toolPreset, thinkingLevel, session, connectEvents, onSessionCreated, onSessionStarted]);
 
@@ -714,14 +868,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const sid = sessionIdRef.current;
     if (!sid) return;
     setMessages((prev) => [...prev, { role: "user", content: message, timestamp: Date.now() } as AgentMessage]);
+    // Explicitly clear recovery state — a user-initiated follow_up always starts a fresh turn
     autoContinueSentRef.current = false;
-    watchdogStaleRecoveriesRef.current = 0;
-    lastModelErrorRef.current = null;
-    setLastModelError(null);
-    receivedAssistantMessageRef.current = false;
-    lastAgentEventAtRef.current = Date.now();
-    lastContentChangedAtRef.current = Date.now();
-    lastContentLengthRef.current = 0;
+    autoContinueInProgressRef.current = false;
+    resetTurnTracking();
+    autoRecoveryAttemptsRef.current = 0;
     const piImages = images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
     try {
       await sendAgentCommand(sid, {
@@ -734,9 +885,74 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, []);
 
-  const WATCHDOG_STALE_EVENT_MS = 30_000;
-  const WATCHDOG_STALE_CONTENT_MS = 45_000;
+  // Watchdog thresholds - can be configured via environment variables
+  const WATCHDOG_STALE_EVENT_MS = parseInt(process.env.NEXT_PUBLIC_WATCHDOG_STALE_EVENT_MS || '', 10) || 60_000;  // 60 seconds (was 30s)
+  const WATCHDOG_STALE_CONTENT_MS = parseInt(process.env.NEXT_PUBLIC_WATCHDOG_STALE_CONTENT_MS || '', 10) || 90_000;  // 90 seconds (was 45s)
   const WATCHDOG_CHECK_INTERVAL_MS = 5_000;
+
+  // Shared recovery flow: abort stuck turn, reload session, send follow_up.
+  // Used by both the automatic watchdog (tiered) and the manual "中断并继续" button.
+  const executeRecovery = async (sid: string) => {
+    if (autoContinueSentRef.current) return;
+    autoContinueSentRef.current = true;
+    setStallLevel("recovering");
+
+    autoContinueInProgressRef.current = true;
+    abortCompletedRef.current = false;
+    try {
+      await sendAgentCommand(sid, { type: "abort" });
+    } catch {
+      abortCompletedRef.current = true;
+    }
+
+    // Wait for the old turn's agent_end so it doesn't kill the new follow-up
+    if (!abortCompletedRef.current) {
+      const MAX_WAIT_MS = 8_000;
+      const startWait = Date.now();
+      while (!abortCompletedRef.current && (Date.now() - startWait) < MAX_WAIT_MS) {
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      // If we timed out without seeing abort's agent_end, mark it as
+      // handled so the follow_up's agent_end isn't swallowed by the gate.
+      if (!abortCompletedRef.current) {
+        abortCompletedRef.current = true;
+      }
+    }
+
+    await loadSession(sid);
+
+    turnIdRef.current += 1;
+    resetTurnTracking();
+    setRetryInfo(null);
+    setAgentPhase({ kind: "waiting_model" });
+    dispatch({ type: "reset" });
+    dispatch({ type: "start" });
+
+    agentRunningRef.current = true;
+    setAgentRunning(true);
+    setMessages((prev) => [...prev, { role: "user", content: `[continue] ${AUTO_CONTINUE_MESSAGE}`, timestamp: Date.now() } as AgentMessage]);
+
+    connectEvents(sid);
+    // Settle before firing follow_up so the server-side subscription is ready
+    await new Promise((r) => setTimeout(r, 150));
+
+    try {
+      await sendAgentCommand(sid, { type: "follow_up", message: AUTO_CONTINUE_MESSAGE });
+      setStallLevel(null);
+      // Recovery succeeded — close the gate so the follow_up's agent_end
+      // is processed normally (not swallowed).
+      autoContinueInProgressRef.current = false;
+    } catch (e) {
+      console.error("Recovery follow_up failed:", e);
+      autoContinueInProgressRef.current = false;
+      autoContinueSentRef.current = false;
+      agentRunningRef.current = false;
+      setAgentRunning(false);
+      setAgentPhase(null);
+      setStallLevel(null);
+      dispatch({ type: "end" });
+    }
+  };
 
   // Keep a lightweight UI-facing counter so users can see when the watchdog is
   // getting close to intervening.
@@ -760,104 +976,48 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     return () => clearInterval(id);
   }, [agentRunning]);
 
-  // Business watchdog for cases where the SSE connection is alive but the
-  // streaming turn appears stuck or the terminal events were missed. It first
-  // asks the server for the authoritative AgentSession state/status. A first
-  // stale hit only reconnects SSE; if both frontend and backend remain stale on
-  // the next hit, treat `isStreaming=true` as unreliable, abort the stuck run,
-  // reload the session, and send one automatic "continue" follow-up.
+  // Tiered business watchdog: detects stalled model turns and provides
+  // configurable auto-recovery (off / conservative / aggressive).
   //
-  // If the backend reports that the session has already stopped (isStreaming
-  // is false or the session wrapper is gone), just reload the data and stop
-  // the UI — do NOT send "continue", because the turn has already ended.
+  // Phase 1 (warning):  show UI banner with manual "续跑" button
+  // Phase 2 (reconnect): auto reconnect SSE
+  // Phase 3 (auto-recover): abort + follow_up with continue message
+  //
+  // Skips when: tools are running, compacting, retrying, or mode is "off".
+  // Uses longer thresholds for high/xhigh thinking levels.
   useEffect(() => {
-    if (!agentRunning) return;
-    const STALE_EVENT_MS = WATCHDOG_STALE_EVENT_MS;
-    const STALE_CONTENT_MS = WATCHDOG_STALE_CONTENT_MS;
-    const CHECK_INTERVAL_MS = WATCHDOG_CHECK_INTERVAL_MS;
+    if (!agentRunning || autoRecoveryMode === "off") return;
 
-    // Recovery for genuinely stuck sessions (backend still thinks it's
-    // streaming but no progress is being made). Aborts first, then waits
-    // for the abort's agent_end event so it doesn't collide with the
-    // follow-up, reloads, and sends "continue" so the model picks up
-    // where it left off.
-    const recoverWithContinue = async (sid: string, abortFirst: boolean) => {
-      if (autoContinueSentRef.current) return;
-      autoContinueSentRef.current = true;
+    // Base thresholds per mode
+    const isAggressive = autoRecoveryMode === "aggressive";
+    const baseWarningMs = isAggressive ? 30_000 : 60_000;
+    const baseReconnectMs = isAggressive ? 60_000 : 120_000;
+    const baseRecoverMs = isAggressive ? 120_000 : 0; // 0 = never auto-recover in conservative
 
-      if (abortFirst) {
-        autoContinueInProgressRef.current = true;
-        abortCompletedRef.current = false;
-        try {
-          await sendAgentCommand(sid, { type: "abort" });
-        } catch (e) {
-          console.error("Agent watchdog abort failed:", e);
-          // Even if abort RPC fails, mark as completed so we don't wait forever
-          abortCompletedRef.current = true;
-        }
+    // Scale thresholds up for high/xhigh thinking (reasoning models)
+    const thinkingMultiplier =
+      thinkingLevel === "xhigh" ? 2.0 :
+      thinkingLevel === "high" ? 1.5 : 1.0;
+    const warningMs = Math.round(baseWarningMs * thinkingMultiplier);
+    const reconnectMs = Math.round(baseReconnectMs * thinkingMultiplier);
+    const recoverMs = baseRecoverMs > 0 ? Math.round(baseRecoverMs * thinkingMultiplier) : 0;
 
-        // Wait for the agent_end event that the aborted run emits.
-        // If we don't wait, that stale event will arrive on the new SSE
-        // connection and kill our follow-up turn.
-        if (!abortCompletedRef.current) {
-          const MAX_WAIT_MS = 5000;
-          const startWait = Date.now();
-          while (!abortCompletedRef.current && (Date.now() - startWait) < MAX_WAIT_MS) {
-            await new Promise((r) => setTimeout(r, 100));
-          }
-        }
-      }
+    const CHECK_INTERVAL_MS = 5_000;
 
-      // Reload the latest session state from disk now that abort has settled.
-      await loadSession(sid);
-
-      // Reset all tracking state for the fresh turn.
-      watchdogStaleRecoveriesRef.current = 0;
-      lastAgentEventAtRef.current = Date.now();
-      lastContentChangedAtRef.current = Date.now();
-      lastContentLengthRef.current = 0;
-      lastModelErrorRef.current = null;
-      setLastModelError(null);
-      receivedAssistantMessageRef.current = false;
-      setRetryInfo(null);
-      setAgentPhase({ kind: "waiting_model" });
-      dispatch({ type: "reset" });
-      dispatch({ type: "start" });
-
-      agentRunningRef.current = true;
-      setAgentRunning(true);
-      setMessages((prev) => [...prev, { role: "user", content: "continue", timestamp: Date.now() } as AgentMessage]);
-
-      // Reconnect SSE (closes the old connection), then disable the
-      // guard so future agent_end events are processed normally.
-      connectEvents(sid);
-      autoContinueInProgressRef.current = false;
-
-      // Allow a short settle so the server-side subscription is set up
-      // before the follow-up command fires.
-      await new Promise((r) => setTimeout(r, 150));
-
-      try {
-        await sendAgentCommand(sid, { type: "follow_up", message: "continue" });
-      } catch (e) {
-        console.error("Agent watchdog auto-continue failed:", e);
-        agentRunningRef.current = false;
-        setAgentRunning(false);
-        setAgentPhase(null);
-        dispatch({ type: "end" });
-      }
+    // Recover: abort current stuck stream, reload session, and send
+    // follow_up with a clear continue instruction so the model resumes
+    // without duplicating completed content.
+    const recoverWithContinue = async (sid: string) => {
+      await executeRecovery(sid);
     };
 
-    // Recovery for sessions that the backend says have already finished.
-    // This happens when the frontend missed the `agent_end` SSE event
-    // (e.g. backgrounded tab, network hiccup) or the RPC wrapper was
-    // destroyed by idle timeout. Just reload data from disk and stop the
-    // UI — no need (and harmful) to send "continue".
+    // Session already finished — just reload and stop gracefully
     const recoverStop = async (sid: string) => {
       await loadSession(sid);
       agentRunningRef.current = false;
       setAgentRunning(false);
       setAgentPhase(null);
+      setStallLevel(null);
       dispatch({ type: "end" });
       autoContinueSentRef.current = false;
     };
@@ -866,46 +1026,97 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const sid = sessionIdRef.current;
       if (!sid || !agentRunningRef.current || watchdogCheckingRef.current) return;
 
+      // Never trigger recovery while tools are running or compacting or retrying
+      if (agentPhaseRef.current?.kind === "running_tools") {
+        lastAgentEventAtRef.current = Date.now();
+        lastContentChangedAtRef.current = Date.now();
+        return;
+      }
+      if (retryInfo) {
+        lastAgentEventAtRef.current = Date.now();
+        return;
+      }
+
       const now = Date.now();
-      const noRecentEvent = now - lastAgentEventAtRef.current > STALE_EVENT_MS;
-      const noContentGrowth = lastContentLengthRef.current > 0 && now - lastContentChangedAtRef.current > STALE_CONTENT_MS;
-      if (!noRecentEvent && !noContentGrowth) return;
+      const contentIdleMs = now - lastContentChangedAtRef.current;
+      // Primary signal: streaming content hasn't changed
+      const noContentGrowth = lastContentLengthRef.current > 0 && contentIdleMs > warningMs;
+      // Secondary signal: no events at all, with empty content
+      const noEventNoContent = lastContentLengthRef.current === 0 && now - lastAgentEventAtRef.current > warningMs;
+      if (!noContentGrowth && !noEventNoContent) return;
+
+      // User dismissed the warning for this turn — don't escalate
+      if (stallDismissedRef.current) return;
+
+      console.log('[Watchdog] Stale detected:', {
+        contentIdleMs,
+        eventIdleMs: now - lastAgentEventAtRef.current,
+        contentLength: lastContentLengthRef.current,
+        stallRecoveries: stallRecoveriesRef.current,
+        mode: autoRecoveryMode,
+        warningMs,
+        reconnectMs,
+        recoverMs,
+      });
 
       watchdogCheckingRef.current = true;
       try {
         const res = await fetch(`/api/agent/${encodeURIComponent(sid)}`, { cache: "no-store" });
         const d = await res.json().catch(() => ({})) as { running?: boolean; state?: { isStreaming?: boolean; isCompacting?: boolean }; status?: AgentStatus };
         const status = d.status;
-        const backendNoRecentEvent = typeof status?.eventIdleMs === "number" && status.eventIdleMs > STALE_EVENT_MS;
-        const backendNoContentGrowth = typeof status?.contentIdleMs === "number" && status.contentIdleMs > STALE_CONTENT_MS;
-        const backendStale = backendNoRecentEvent || backendNoContentGrowth;
 
+        // Backend compacting — reconnect and wait
         if (d.running && (d.state?.isCompacting || status?.isCompacting)) {
           connectEvents(sid);
           lastAgentEventAtRef.current = Date.now();
+          lastContentChangedAtRef.current = Date.now();
           return;
         }
 
-        if (d.running && d.state?.isStreaming !== false) {
-          watchdogStaleRecoveriesRef.current += 1;
+        // Backend already stopped — reload and stop.
+        // Use isRunning (tracks active turn: agent_start → agent_end)
+        // instead of isStreaming, which is false during normal gaps like
+        // waiting-for-model or between tool-execution batches.
+        if (!d.running || d.status?.isRunning === false) {
+          console.log('[Watchdog] Backend stopped, calling recoverStop');
+          await recoverStop(sid);
+          return;
+        }
 
-          // If only the browser has gone stale, this is probably an SSE hiccup.
-          // Reconnect once (or repeatedly while backend is still visibly active).
-          if (!backendStale || watchdogStaleRecoveriesRef.current <= 1) {
-            connectEvents(sid);
-            lastAgentEventAtRef.current = Date.now();
+        // Backend still streaming — check tiered actions
+        stallRecoveriesRef.current += 1;
+        const iteration = stallRecoveriesRef.current;
+
+        // Phase 1: Show warning banner (first detection)
+        if (contentIdleMs >= warningMs && stallLevel !== "warning" && stallLevel !== "recovering") {
+          console.log('[Watchdog] Phase 1: showing warning');
+          setStallLevel("warning");
+        }
+
+        // Phase 2: Auto reconnect SSE (conservative: +60s, aggressive: +60s after warning)
+        if (contentIdleMs >= reconnectMs) {
+          console.log('[Watchdog] Phase 2: reconnecting SSE');
+          connectEvents(sid);
+          lastAgentEventAtRef.current = Date.now();
+        }
+
+        // Phase 3: Auto recover (aggressive mode only, after recoverMs)
+        // Circuit breaker: max 3 auto-recoveries per logical user turn.
+        // Without this, aggressive mode could loop indefinitely when the
+        // model consistently fails (bad API key, persistent provider error).
+        if (recoverMs > 0 && contentIdleMs >= recoverMs && !autoContinueSentRef.current) {
+          const MAX_AUTO_RECOVERIES = 3;
+          if (autoRecoveryAttemptsRef.current >= MAX_AUTO_RECOVERIES) {
+            console.log('[Watchdog] Max auto-recoveries (%d) reached, stopping', MAX_AUTO_RECOVERIES);
+            await recoverStop(sid);
             return;
           }
-
-          // Both frontend and backend agree the session is stuck while the
-          // backend still thinks it's streaming — abort and send "continue".
-          await recoverWithContinue(sid, true);
+          autoRecoveryAttemptsRef.current += 1;
+          console.log('[Watchdog] Phase 3: auto-recovering (attempt %d/%d)', autoRecoveryAttemptsRef.current, MAX_AUTO_RECOVERIES);
+          await recoverWithContinue(sid);
           return;
         }
 
-        // Backend reports session has already finished (isStreaming is false
-        // or the RPC wrapper is gone). The turn ended — just reload and stop.
-        await recoverStop(sid);
       } catch (e) {
         console.error("Agent watchdog failed:", e);
       } finally {
@@ -914,7 +1125,32 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }, CHECK_INTERVAL_MS);
 
     return () => clearInterval(id);
-  }, [agentRunning, connectEvents, loadSession]);
+  }, [agentRunning, autoRecoveryMode, thinkingLevel, connectEvents, loadSession, retryInfo, stallLevel]);
+
+  // Manual recovery trigger — user clicks "中断并继续" when stall warning shown
+  const handleAutoRecover = useCallback(async () => {
+    const sid = sessionIdRef.current;
+    if (!sid || !agentRunningRef.current) return;
+    stallDismissedRef.current = true;
+    // Reset auto-recovery counter — a manual user action indicates the user
+    // is actively engaged and the watchdog should get a fresh allowance.
+    autoRecoveryAttemptsRef.current = 0;
+    await executeRecovery(sid);
+  }, []);
+
+  // User dismissed the stall warning — suppress further escalation this turn
+  const handleDismissStall = useCallback(() => {
+    stallDismissedRef.current = true;
+    setStallLevel(null);
+  }, []);
+
+  // Persist auto-recovery mode to localStorage
+  const handleAutoRecoveryModeChange = useCallback((mode: AutoRecoveryMode) => {
+    setAutoRecoveryModeState(mode);
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem("pi-agent.auto-recovery-mode", mode);
+    }
+  }, []);
 
   const handleAbortCompaction = useCallback(async () => {
     const sid = sessionIdRef.current;
@@ -927,6 +1163,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, []);
 
   const handleThinkingLevelChange = useCallback(async (level: ThinkingLevelOption) => {
+    const previousLevel = thinkingLevel;
     setThinkingLevel(level);
     if (level === "auto") return; // "auto" leaves pi's current setting untouched
     const sid = sessionIdRef.current;
@@ -935,12 +1172,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       await sendAgentCommand(sid, { type: "set_thinking_level", level });
     } catch (e) {
       console.error("Failed to set thinking level:", e);
+      // Roll back to the previous level on failure so the UI doesn't
+      // show a stale selection that doesn't match backend reality.
+      setThinkingLevel(previousLevel);
     }
-  }, []);
+  }, [thinkingLevel]);
 
   const handleToolPresetChange = useCallback(async (preset: "none" | "default" | "full") => {
     const { PRESET_NONE, PRESET_DEFAULT, PRESET_FULL } = await import("@/components/ToolPanel");
     const toolNames = preset === "none" ? PRESET_NONE : preset === "default" ? PRESET_DEFAULT : PRESET_FULL;
+    const previousPreset = toolPreset;
     setToolPresetState(preset);
     const sid = sessionIdRef.current;
     if (!sid) return;
@@ -948,8 +1189,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       await sendAgentCommand(sid, { type: "set_tools", toolNames });
     } catch (e) {
       console.error("Failed to set tools:", e);
+      // Roll back to the previous preset on failure.
+      setToolPresetState(previousPreset);
     }
-  }, [setToolPresetState]);
+  }, [setToolPresetState, toolPreset]);
 
   const scrollToBottom = useCallback((behavior: ScrollBehavior = "smooth") => {
     messagesEndRef.current?.scrollIntoView({ behavior });
@@ -974,11 +1217,20 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
     let cancelled = false;
 
+    // Cancel any pending SSE reconnect timer from the previous session
+    if (sseReconnectTimerRef.current) {
+      clearTimeout(sseReconnectTimerRef.current);
+      sseReconnectTimerRef.current = null;
+    }
     eventSourceRef.current?.close();
     eventSourceRef.current = null;
     agentRunningRef.current = false;
     autoContinueSentRef.current = false;
     watchdogStaleRecoveriesRef.current = 0;
+    autoRecoveryAttemptsRef.current = 0;
+    stallDismissedRef.current = false;
+    stallRecoveriesRef.current = 0;
+    setStallLevel(null);
     initialScrollDoneRef.current = false;
     pendingScrollToUserRef.current = false;
     changedFilesRef.current.clear();
@@ -1024,7 +1276,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (cancelled || sessionIdRef.current !== session.id) return;
       if (agentState?.running) {
         loadTools(session.id);
-        if (agentState.state?.isStreaming) {
+        // Reconnect SSE whenever a turn is active — isRunning stays true
+        // across gaps (waiting-for-model, between tool batches, auto-retry
+        // backoff) where isStreaming is temporarily false.
+        // Falls back to true for pre-isRunning servers (undefined !== false).
+        if (agentState.state?.isRunning !== false) {
           agentRunningRef.current = true;
           setAgentRunning(true);
           setAgentPhase({ kind: "waiting_model" });
@@ -1101,7 +1357,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     agentRunning, modelNames, modelList, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, toolPreset, thinkingLevel,
     retryInfo, contextUsage, systemPrompt, forkingEntryId,
     isCompacting, compactError, lastModelError, currentModel, displayModel, sessionStats,
-    agentPhase, watchdogInfo,
+    agentPhase, watchdogInfo, stallLevel, autoRecoveryMode,
     isNew,
     // Refs
     sessionIdRef, eventSourceRef, messagesEndRef, scrollContainerRef,
@@ -1110,9 +1366,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     handleSend, handleAbort, handleFork, handleModelChange,
     handleCompact, handleSteer, handleFollowUp, handleAbortCompaction,
     handleToolPresetChange, handleThinkingLevelChange, loadTools, setData, setMessages,
-    setSystemPrompt, setLastModelError,
+    setSystemPrompt, setLastModelError, handleAutoRecover, handleDismissStall, handleAutoRecoveryModeChange,
     dispatch, setAgentRunning, setForkingEntryId,
-    // Subscriptions
-    handleAgentEventRef,
   };
 }

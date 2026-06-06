@@ -196,94 +196,6 @@ function buildSessionTree(sessions: SessionInfo[]): SessionTreeNode[] {
   return roots;
 }
 
-const SCRAMBLE_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*";
-
-function useScramble(target: string, running: boolean): string {
-  const [display, setDisplay] = useState(target);
-  const frameRef = useRef<number | null>(null);
-  const iterRef = useRef(0);
-
-  useEffect(() => {
-    if (!running) {
-      setDisplay(target);
-      return;
-    }
-    iterRef.current = 0;
-    const totalFrames = target.length * 4;
-
-    const step = () => {
-      iterRef.current += 1;
-      const progress = iterRef.current / totalFrames;
-      const resolved = Math.floor(progress * target.length);
-
-      setDisplay(
-        target
-          .split("")
-          .map((char, i) => {
-            if (char === " ") return " ";
-            if (i < resolved) return char;
-            return SCRAMBLE_CHARS[Math.floor(Math.random() * SCRAMBLE_CHARS.length)];
-          })
-          .join("")
-      );
-
-      if (iterRef.current < totalFrames) {
-        frameRef.current = requestAnimationFrame(step);
-      } else {
-        setDisplay(target);
-      }
-    };
-
-    frameRef.current = requestAnimationFrame(step);
-    return () => { if (frameRef.current) cancelAnimationFrame(frameRef.current); };
-  }, [target, running]);
-
-  return display;
-}
-
-function PiAgentTitle() {
-  const [showVersion, setShowVersion] = useState(false);
-  const [scrambling, setScrambling] = useState(false);
-  const revertTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const target = showVersion ? `${process.env.NEXT_PUBLIC_APP_VERSION ?? "0.0.0"}p${process.env.NEXT_PUBLIC_PI_VERSION ?? "0.0.0"}` : "Pi Client";
-  const display = useScramble(target, scrambling);
-
-  const triggerScramble = useCallback((toVersion: boolean) => {
-    setShowVersion(toVersion);
-    setScrambling(true);
-    setTimeout(() => setScrambling(false), (toVersion ? 6 : 8) * 4 * (1000 / 60) + 100);
-  }, []);
-
-  const handleClick = useCallback(() => {
-    if (revertTimerRef.current) clearTimeout(revertTimerRef.current);
-
-    const next = !showVersion;
-    triggerScramble(next);
-
-    if (next) {
-      revertTimerRef.current = setTimeout(() => triggerScramble(false), 3000);
-    }
-  }, [showVersion, triggerScramble]);
-
-  useEffect(() => () => { if (revertTimerRef.current) clearTimeout(revertTimerRef.current); }, []);
-
-  return (
-    <button
-      onClick={handleClick}
-      style={{
-        background: "none", border: "none", padding: 0, cursor: "default",
-        fontWeight: 700, fontSize: 15, letterSpacing: "-0.01em",
-        color: showVersion ? "var(--accent)" : "var(--text)",
-        fontFamily: "var(--font-mono)",
-        minWidth: "6ch",
-      }}
-    >
-      {display}
-    </button>
-  );
-}
-
 export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, onInitialRestoreDone, refreshKey, optimisticSession, runningSessionStatuses = new Map(), onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onAtMention, compact = false, onProjectsChange }: Props) {
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
   const [loading, setLoading] = useState(true);
@@ -300,6 +212,9 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const autoExpandedRef = useRef(false);
   const [explorerOpen, setExplorerOpen] = useState(true);
   const [explorerKey, setExplorerKey] = useState(0);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const searchInputRef = useRef<HTMLInputElement>(null);
   // Sync client-only localStorage state after mount to avoid hydration mismatch
   useEffect(() => {
     setCustomCwds(readCustomCwds());
@@ -501,7 +416,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   }, [selectedCwdProp, selectedCwd, displayedSessions, ensureDefaultCwd, onNewSession]);
 
   const sessionProjects = useMemo(() => buildProjectGroups(displayedSessions), [displayedSessions]);
-  const projects = useMemo(() => {
+  const allProjects = useMemo(() => {
     const byCwd = new Map<string, ProjectGroup>();
     for (const project of sessionProjects) byCwd.set(project.cwd, project);
     for (const cwd of customCwds) {
@@ -529,14 +444,39 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         return b.latestModified.localeCompare(a.latestModified);
       });
   }, [sessionProjects, customCwds, defaultCwd, projectMeta]);
+
+  const normalizedSearchQuery = searchQuery.trim().toLowerCase();
+  const projects = useMemo(() => {
+    if (!normalizedSearchQuery) return allProjects;
+    return allProjects
+      .map((project) => {
+        const projectTitle = project.displayName ?? getProjectName(project.cwd);
+        const projectMatches = [projectTitle, project.cwd, project.note ?? ""]
+          .some((value) => value.toLowerCase().includes(normalizedSearchQuery));
+        const sessions = projectMatches
+          ? project.sessions
+          : project.sessions.filter((session) => [
+              session.name ?? "",
+              session.firstMessage ?? "",
+              session.id,
+              session.cwd,
+            ].some((value) => value.toLowerCase().includes(normalizedSearchQuery)));
+        return projectMatches || sessions.length > 0 ? { ...project, sessions } : null;
+      })
+      .filter((project) => project !== null) as ProjectGroup[];
+  }, [allProjects, normalizedSearchQuery]);
   const activeSelectedCwd = selectedCwdProp ?? selectedCwd;
 
   useEffect(() => {
-    onProjectsChange?.(projects.map((project) => ({
+    onProjectsChange?.(allProjects.map((project) => ({
       cwd: project.cwd,
       displayName: project.displayName ?? getProjectName(project.cwd),
     })));
-  }, [projects, onProjectsChange]);
+  }, [allProjects, onProjectsChange]);
+
+  useEffect(() => {
+    if (searchOpen) setTimeout(() => searchInputRef.current?.focus(), 0);
+  }, [searchOpen]);
 
   const updateProjectMeta = useCallback((updater: (prev: ProjectMeta) => ProjectMeta) => {
     setProjectMeta((prev) => {
@@ -684,9 +624,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
           flexShrink: 0,
         }}
       >
-        <div style={{ display: "flex", alignItems: "center", justifyContent: compact ? "center" : "space-between", marginBottom: compact ? 0 : 6 }}>
-          {!compact && <PiAgentTitle />}
-          <div style={{ display: "flex", gap: 6 }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: compact ? "center" : "space-between", gap: 6, marginBottom: compact ? 0 : 6 }}>
+          {!searchOpen ? (
             <button
               onClick={handleNewSession}
               disabled={false}
@@ -704,7 +643,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                 fontSize: 12,
                 fontWeight: 500,
                 letterSpacing: "-0.01em",
-                flexShrink: 0,
+                flex: compact ? "0 0 auto" : "0 0 auto",
                 transition: "background 0.12s, color 0.12s",
               }}
               title={activeSelectedCwd ? `在 ${activeSelectedCwd} 中新建会话` : "新建会话（将使用最近项目或默认项目）"}
@@ -724,8 +663,105 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
               </svg>
               {!compact && "新建"}
             </button>
+          ) : (
+            <div
+              style={{
+                position: "relative",
+                flex: 1,
+                minWidth: 0,
+                height: compact ? 34 : 32,
+                display: "flex",
+                alignItems: "center",
+              }}
+            >
+              <svg
+                width="13"
+                height="13"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                style={{ position: "absolute", left: 10, color: "var(--text-dim)", pointerEvents: "none" }}
+              >
+                <circle cx="11" cy="11" r="8" />
+                <path d="m21 21-4.35-4.35" />
+              </svg>
+              <input
+                ref={searchInputRef}
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Escape") {
+                    setSearchQuery("");
+                    setSearchOpen(false);
+                  }
+                }}
+                placeholder="搜索会话或项目"
+                aria-label="搜索会话或项目"
+                style={{
+                  width: "100%",
+                  height: "100%",
+                  border: "1px solid var(--border)",
+                  borderRadius: compact ? 999 : 8,
+                  background: "var(--bg)",
+                  color: "var(--text)",
+                  outline: "none",
+                  padding: compact ? "0 10px 0 30px" : "0 12px 0 30px",
+                  fontSize: 12,
+                  boxShadow: "0 0 0 3px color-mix(in srgb, var(--accent) 8%, transparent)",
+                }}
+              />
+            </div>
+          )}
 
-          </div>
+          <button
+            onClick={() => {
+              if (searchOpen) {
+                setSearchQuery("");
+                setSearchOpen(false);
+              } else {
+                setSearchOpen(true);
+              }
+            }}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              width: compact ? 34 : 32,
+              height: compact ? 34 : 32,
+              borderRadius: compact ? 999 : 8,
+              border: compact ? "1px solid var(--border)" : "none",
+              background: compact ? "var(--bg-hover)" : "transparent",
+              color: "var(--text-muted)",
+              cursor: "pointer",
+              flexShrink: 0,
+              transition: "background 0.12s, color 0.12s",
+            }}
+            title={searchOpen ? "关闭搜索" : "搜索"}
+            aria-label={searchOpen ? "关闭搜索" : "搜索"}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.background = "var(--bg-hover)";
+              e.currentTarget.style.color = "var(--accent)";
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = compact ? "var(--bg-hover)" : "transparent";
+              e.currentTarget.style.color = "var(--text-muted)";
+            }}
+          >
+            {searchOpen ? (
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
+                <line x1="18" y1="6" x2="6" y2="18" />
+                <line x1="6" y1="6" x2="18" y2="18" />
+              </svg>
+            ) : (
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="11" cy="11" r="8" />
+                <path d="m21 21-4.35-4.35" />
+              </svg>
+            )}
+          </button>
         </div>
 
       </div>
@@ -777,17 +813,17 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         )}
         {!loading && !error && projects.length === 0 && (
           <div style={{ padding: compact ? "8px 4px" : "16px 14px", color: "var(--text-muted)", fontSize: 12, textAlign: compact ? "center" : undefined }}>
-            {compact ? "—" : "未找到任何会话"}
+            {compact ? "—" : normalizedSearchQuery ? "没有匹配结果" : "未找到任何会话"}
           </div>
         )}
         {!loading && !error && (
           <>
-            {allProjectsState !== "collapsed" && (allProjectsState === "compact" ? projects.slice(0, 2) : projects).map((project, i) => (
+            {(normalizedSearchQuery || allProjectsState !== "collapsed") && (allProjectsState === "compact" && !normalizedSearchQuery ? projects.slice(0, 2) : projects).map((project, i) => (
           <ProjectSection
             key={project.cwd}
             project={project}
-            expanded={expandedCwds.has(project.cwd)}
-            showAll={showAllCwds.has(project.cwd)}
+            expanded={normalizedSearchQuery ? true : expandedCwds.has(project.cwd)}
+            showAll={normalizedSearchQuery ? true : showAllCwds.has(project.cwd)}
             selectedSessionId={selectedSessionId}
             runningSessionStatuses={runningSessionStatuses}
             onToggle={() => toggleProject(project.cwd)}

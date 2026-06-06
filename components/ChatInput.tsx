@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useRef, useState, useCallback, useEffect, useLayoutEffect, useImperativeHandle, forwardRef, KeyboardEvent } from "react";
+import type { AutoRecoveryMode, StallLevel } from "@/hooks/useAgentSession";
 
 export interface AttachedImage {
   data: string;   // base64, no prefix
@@ -66,6 +67,11 @@ interface Props {
   onRoleChange?: (roleId: string) => void;
   onRolesLoaded?: (roles: AgentRole[]) => void;
   onOpenRoleConfig?: () => void;
+  stallLevel?: StallLevel;
+  autoRecoveryMode?: AutoRecoveryMode;
+  onAutoRecover?: () => void;
+  onDismissStall?: () => void;
+  onAutoRecoveryModeChange?: (mode: AutoRecoveryMode) => void;
 }
 
 export interface ChatInputHandle {
@@ -107,6 +113,11 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   onRoleChange,
   onRolesLoaded,
   onOpenRoleConfig,
+  stallLevel,
+  autoRecoveryMode,
+  onAutoRecover,
+  onDismissStall,
+  onAutoRecoveryModeChange,
 }: Props, ref) {
   const [value, setValue] = useState("");
   const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
@@ -704,6 +715,56 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 ✕
               </button>
             )}
+          </div>
+        )}
+        {/* Stall warning banner — model hasn't produced content for a while */}
+        {stallLevel === "warning" && (
+          <div style={{
+            marginBottom: 8, padding: "6px 12px",
+            background: "rgba(234,179,8,0.08)", border: "1px solid rgba(234,179,8,0.28)",
+            borderRadius: 8, fontSize: 12, color: "rgba(200,150,40,0.9)",
+            display: "flex", alignItems: "center", gap: 8,
+          }}>
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+              <circle cx="12" cy="12" r="10" />
+              <line x1="12" y1="8" x2="12" y2="12" />
+              <line x1="12" y1="16" x2="12.01" y2="16" />
+            </svg>
+            <span style={{ flex: 1 }}>模型长时间无输出，可能已卡住</span>
+            {onDismissStall && (
+              <button onClick={onDismissStall} style={{ background: "none", border: "none", cursor: "pointer", padding: "2px 6px", color: "inherit", opacity: 0.6, fontSize: 11, whiteSpace: "nowrap" }}>
+                继续等待
+              </button>
+            )}
+            {onAutoRecover && (
+              <button
+                onClick={onAutoRecover}
+                style={{
+                  flexShrink: 0,
+                  background: "rgba(234,179,8,0.18)", border: "1px solid rgba(234,179,8,0.35)",
+                  borderRadius: 6, cursor: "pointer", padding: "3px 10px",
+                  color: "rgba(200,150,40,0.95)", fontSize: 11, fontWeight: 600,
+                  whiteSpace: "nowrap",
+                }}
+              >
+                中断并继续
+              </button>
+            )}
+          </div>
+        )}
+        {/* Recovering banner — auto-recovery in progress */}
+        {stallLevel === "recovering" && (
+          <div style={{
+            marginBottom: 8, padding: "6px 12px",
+            background: "rgba(59,130,246,0.08)", border: "1px solid rgba(59,130,246,0.25)",
+            borderRadius: 8, fontSize: 12, color: "rgba(96,165,250,0.9)",
+            display: "flex", alignItems: "center", gap: 6,
+          }}>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+              <polyline points="23 4 23 10 17 10" />
+              <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+            </svg>
+            正在中断旧连接并续跑…
           </div>
         )}
         {/* Image previews */}
@@ -1649,6 +1710,46 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                     <line x1="17" y1="9" x2="23" y2="15" />
                   </svg>
                 )}
+              </button>
+            )}
+
+            {/* Auto-recovery mode toggle */}
+            {onAutoRecoveryModeChange && autoRecoveryMode !== undefined && (
+              <button
+                onClick={() => {
+                  const next = autoRecoveryMode === "off" ? "conservative" : autoRecoveryMode === "conservative" ? "aggressive" : "off";
+                  onAutoRecoveryModeChange(next);
+                }}
+                title={`模型卡住自动续跑：${autoRecoveryMode === "off" ? "关闭" : autoRecoveryMode === "conservative" ? "保守" : "激进"}（点击切换）`}
+                style={{
+                  display: "flex", alignItems: "center", gap: 4,
+                  padding: "2px 8px",
+                  height: 32,
+                  background: autoRecoveryMode === "aggressive" ? "rgba(234,179,8,0.1)" : "none",
+                  border: autoRecoveryMode === "aggressive" ? "1px solid rgba(234,179,8,0.2)" : "1px solid transparent",
+                  borderRadius: 9,
+                  color: autoRecoveryMode === "off" ? "var(--text-dim)" : "var(--text-muted)",
+                  cursor: "pointer",
+                  fontSize: 11, fontWeight: autoRecoveryMode === "aggressive" ? 600 : 400,
+                  opacity: autoRecoveryMode === "off" ? 0.5 : 1,
+                  transition: "background 0.12s, color 0.12s",
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.background = "var(--bg-hover)";
+                  e.currentTarget.style.color = "var(--text)";
+                  e.currentTarget.style.borderColor = "transparent";
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = autoRecoveryMode === "aggressive" ? "rgba(234,179,8,0.1)" : "none";
+                  e.currentTarget.style.color = autoRecoveryMode === "off" ? "var(--text-dim)" : "var(--text-muted)";
+                  e.currentTarget.style.borderColor = autoRecoveryMode === "aggressive" ? "rgba(234,179,8,0.2)" : "transparent";
+                }}
+              >
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+                  <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+                  <path d="M3 3v5h5" />
+                </svg>
+                {autoRecoveryMode === "off" ? "关闭" : autoRecoveryMode === "conservative" ? "保守" : "激进"}
               </button>
             )}
           </div>

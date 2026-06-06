@@ -9,6 +9,8 @@ import { ChangedFilesList } from "./ChangedFilesList";
 import { useAgentSession, type AgentPhase } from "@/hooks/useAgentSession";
 import { useAudio } from "@/hooks/useAudio";
 import { useDragDrop } from "@/hooks/useDragDrop";
+import { logEventStore } from "@/lib/log-event-store";
+import { agentEventBus } from "@/lib/agent-event-bus";
 
 interface AgentRole {
   id: string;
@@ -131,11 +133,13 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, onAgentEnd, on
     isCompacting, compactError, lastModelError, displayModel: displayModelValue, sessionStats,
     agentPhase,
     isNew,
+    stallLevel, autoRecoveryMode,
+    handleAutoRecover, handleDismissStall, handleAutoRecoveryModeChange,
     messagesEndRef, scrollContainerRef,
     lastUserMsgRef,
     handleSend, handleAbort, handleFork, handleModelChange,
     handleCompact, handleSteer, handleFollowUp, handleAbortCompaction,
-    handleToolPresetChange, handleThinkingLevelChange, handleAgentEventRef,
+    handleToolPresetChange, handleThinkingLevelChange,
     systemPrompt, setSystemPrompt, setLastModelError,
   } = useAgentSession({
     session, newSessionCwd, onAgentEnd: wrappedOnAgentEnd, onSessionCreated, onSessionStarted, onSessionForked,
@@ -242,12 +246,14 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, onAgentEnd, on
   const soundEnabledRef = useRef(soundEnabled);
   soundEnabledRef.current = soundEnabled;
 
-  // Wrap agent event handler to play sound on agent_end and clear changed files on agent_start
-  const origHandler = handleAgentEventRef.current;
+  // Subscribe to the global event bus for sound effects and log forwarding.
+  // This avoids wrapping handleAgentEventRef which has closure/stale-ref issues.
+  const sessionIdRef2 = useRef(session?.id);
+  sessionIdRef2.current = session?.id;
   useEffect(() => {
-    handleAgentEventRef.current = (event) => {
+    const unsubscribe = agentEventBus.subscribe((event) => {
       if (event.type === "agent_start") {
-        const id = session?.id;
+        const id = sessionIdRef2.current;
         if (id) {
           setChangedFilesBySession((prev) => ({ ...prev, [id]: [] }));
         }
@@ -255,9 +261,87 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, onAgentEnd, on
       if (event.type === "agent_end" && soundEnabledRef.current) {
         playDoneSoundRef.current();
       }
-      origHandler?.(event);
-    };
-  }, [origHandler, handleAgentEventRef]);
+    });
+    return unsubscribe;
+  }, []);
+
+  // Forward agent events to the log store (independent of useAgentSession handler).
+  // Track per-block content lengths to correctly handle multiple blocks per message.
+  const logContentLenRef = useRef<{ thinking: number[]; text: number[] }>({ thinking: [], text: [] });
+  useEffect(() => {
+    const unsubscribe = agentEventBus.subscribe((event) => {
+      const logGroupKey = `session-${sessionIdRef2.current ?? "new"}`;
+      switch (event.type) {
+        case "agent_start": {
+          logContentLenRef.current = { thinking: [], text: [] };
+          logEventStore.push({ type: "system", content: "Agent 启动", groupKey: logGroupKey });
+          break;
+        }
+        case "agent_end":
+          logEventStore.finalizeBlock();
+          break;
+        case "message_start":
+        case "message_update": {
+          const msg = event.message as { role?: string; content?: unknown } | undefined;
+          if (msg?.role === "assistant" && Array.isArray(msg.content)) {
+            const blocks = msg.content as Array<{ type?: string; text?: string; thinking?: string }>;
+            let thinkingIdx = 0;
+            let textIdx = 0;
+            for (const block of blocks) {
+              if (block.type === "thinking" && block.thinking) {
+                const idx = thinkingIdx++;
+                const prevLen = logContentLenRef.current.thinking[idx] ?? 0;
+                const newLen = block.thinking.length;
+                if (newLen > prevLen) {
+                  logEventStore.push({ type: "thinking", content: block.thinking.slice(prevLen), groupKey: logGroupKey });
+                  logContentLenRef.current.thinking[idx] = newLen;
+                }
+              } else if (block.type === "text" && block.text) {
+                const idx = textIdx++;
+                const prevLen = logContentLenRef.current.text[idx] ?? 0;
+                const newLen = block.text.length;
+                if (newLen > prevLen) {
+                  logEventStore.push({ type: "text", content: block.text.slice(prevLen), groupKey: logGroupKey });
+                  logContentLenRef.current.text[idx] = newLen;
+                }
+              }
+            }
+          }
+          break;
+        }
+        case "tool_execution_start": {
+          const toolName = (event.toolName ?? event.name ?? "unknown") as string;
+          const toolCallId = (event.toolCallId ?? "") as string;
+          logEventStore.push({ type: "tool_start", content: `开始执行: ${toolName}`, toolName, toolCallId, groupKey: logGroupKey });
+          break;
+        }
+        case "tool_execution_end": {
+          const toolName = (event.toolName ?? event.name ?? "unknown") as string;
+          const toolCallId = (event.toolCallId ?? "") as string;
+          const result = typeof event.result === "string" ? event.result : "";
+          logEventStore.push({ type: "tool_end", content: result ? `完成: ${result.slice(0, 200)}` : "完成", toolName, toolCallId, groupKey: logGroupKey });
+          break;
+        }
+        case "auto_retry_start":
+          logEventStore.push({ type: "error", content: `自动重试 (第 ${event.attempt}/${event.maxAttempts} 次): ${event.errorMessage ?? ""}`, groupKey: logGroupKey });
+          break;
+        case "auto_retry_end":
+          if ((event as { success?: boolean }).success === false) {
+            logEventStore.push({ type: "error", content: `重试失败: ${(event as { finalError?: string }).finalError ?? ""}`, groupKey: logGroupKey });
+          }
+          break;
+        case "auto_compaction_start":
+        case "compaction_start":
+          logEventStore.push({ type: "info", content: "上下文压缩开始", groupKey: logGroupKey });
+          break;
+        case "auto_compaction_end":
+        case "compaction_end":
+          logEventStore.push({ type: "info", content: "上下文压缩完成", groupKey: logGroupKey });
+          break;
+      }
+    });
+    return unsubscribe;
+  }, []);
 
   // Push session stats up to AppShell for the top bar.
   // Compare scalar fields to avoid loops from new object identity each render.
@@ -447,6 +531,11 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, onAgentEnd, on
       onRoleChange={handleRoleChange}
       onRolesLoaded={setRoles}
       onOpenRoleConfig={onOpenRoleConfig}
+      stallLevel={stallLevel}
+      autoRecoveryMode={autoRecoveryMode}
+      onAutoRecover={handleAutoRecover}
+      onDismissStall={handleDismissStall}
+      onAutoRecoveryModeChange={handleAutoRecoveryModeChange}
     />
     </>
   );

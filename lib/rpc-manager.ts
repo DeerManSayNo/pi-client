@@ -88,7 +88,7 @@ function setEffectiveSystemPrompt(session: AgentSessionLike, prompt: string): vo
 }
 
 const MIN_AUTO_RETRY_DELAY_MS = 5000;
-const AUTO_RETRY_SETTLE_MS = 5000;
+const AUTO_RETRY_SETTLE_MS = 1000;
 const PREMATURE_STREAM_ERROR_RE = /connection.?lost|websocket.?closed|websocket.?error|other side closed|ended without|stream ended before message_stop|http2 request did not get a response|terminated/i;
 
 type AssistantLike = {
@@ -220,6 +220,10 @@ export class AgentSessionWrapper {
   private eventCount = 0;
   private runStartedAt = 0;
   private lastContentLength = 0;
+  /** Tracks whether an agent turn is actively running (agent_start → agent_end).
+   *  Unlike isStreaming, this stays true during gaps between tool execution
+   *  and the next model response, and during auto-retry backoff. */
+  private _isRunning = false;
 
   constructor(public readonly inner: AgentSessionLike, roleId?: string | null) {
     this.roleId = roleId ?? null;
@@ -296,9 +300,18 @@ export class AgentSessionWrapper {
     this.resetIdleTimer();
   }
 
+  // Idle timeout: 10 min normally, but extended to 30 min during active tool
+  // execution to avoid killing the session mid-build / mid-install.
+  private static readonly IDLE_TIMEOUT_MS = 10 * 60 * 1000;
+  private static readonly TOOL_EXEC_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
+
   private resetIdleTimer(): void {
     if (this.idleTimer) clearTimeout(this.idleTimer);
-    this.idleTimer = setTimeout(() => this.destroy(), 10 * 60 * 1000);
+    const hasActiveTools = this.pendingToolEvents.size > 0;
+    const timeout = hasActiveTools
+      ? AgentSessionWrapper.TOOL_EXEC_IDLE_TIMEOUT_MS
+      : AgentSessionWrapper.IDLE_TIMEOUT_MS;
+    this.idleTimer = setTimeout(() => this.destroy(), timeout);
   }
 
   private recordEventStatus(event: AgentEvent): void {
@@ -312,6 +325,25 @@ export class AgentSessionWrapper {
     this.eventCount += 1;
     this.lastEventType = event.type;
     this.lastEventAt = now;
+
+    // Track active turn state (agent_start → agent_end).
+    // Auto-retry keeps the turn alive: SDK emits agent_end with willRetry=true,
+    // then either agent_start (retry success) or auto_retry_end with success=false.
+    if (event.type === "agent_start") {
+      this._isRunning = true;
+    }
+    if (event.type === "agent_end") {
+      const willRetry = (event as { willRetry?: boolean }).willRetry ?? false;
+      if (!willRetry) {
+        this._isRunning = false;
+      }
+    }
+    if (event.type === "auto_retry_end") {
+      const success = (event as { success?: boolean }).success ?? true;
+      if (!success) {
+        this._isRunning = false;
+      }
+    }
 
     const nextContentLength = getEventContentLength(event);
     if (nextContentLength !== null && nextContentLength !== this.lastContentLength) {
@@ -332,6 +364,7 @@ export class AgentSessionWrapper {
       eventRate: runningForMs > 0 ? this.eventCount / (runningForMs / 1000) : 0,
       eventIdleMs: this.lastEventAt ? now - this.lastEventAt : null,
       contentIdleMs: this.lastContentAt ? now - this.lastContentAt : null,
+      isRunning: this._isRunning,
     };
   }
 
@@ -361,9 +394,11 @@ export class AgentSessionWrapper {
           getLiveIslandClient().recordPrompt(this.inner.sessionId, command.message as string);
         }
         // Fire and forget — events come via subscribe.
-        // But if prompt() rejects immediately (e.g. session destroyed), emit error to listeners.
+        // But if prompt() rejects immediately (e.g. session destroyed), emit error to listeners
+        // and reset running state so the watchdog doesn't get stuck.
         const promptImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
         this.inner.prompt(command.message as string, promptImages?.length ? { images: promptImages } : undefined).catch((err: unknown) => {
+          this._isRunning = false;
           const msg = err instanceof Error ? err.message : String(err);
           for (const l of this.listeners) l({ type: "agent_end", messages: [], willRetry: false, error: msg });
         });
@@ -416,6 +451,7 @@ export class AgentSessionWrapper {
             : null,
           systemPrompt: this.inner.agent.state?.systemPrompt ?? "",
           thinkingLevel: this.inner.agent.state?.thinkingLevel ?? "off",
+          isRunning: this._isRunning,
         };
       }
 
@@ -564,6 +600,11 @@ export class AgentSessionWrapper {
     this._alive = false;
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.unsubscribe?.();
+    // Abort any ongoing agent turn (streaming, tools, retries) so underlying
+    // WebSocket connections and child processes are released promptly.
+    // Fire-and-forget: destroy() is called synchronously from idle timeout,
+    // fork, and DELETE handler; blocking would delay those callers.
+    this.inner.abort().catch(() => {});
     this.onDestroyCallback?.();
   }
 }
