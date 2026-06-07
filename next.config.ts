@@ -12,6 +12,12 @@ try {
 const nextConfig: NextConfig = {
   output: "standalone",
   outputFileTracingRoot: __dirname,
+  // Image prompts are sent as base64 in JSON. Next's default request clone
+  // limit is too small for normal screenshots/photos, causing /api/agent/*
+  // POSTs to fail before our route handler sees them.
+  experimental: {
+    proxyClientMaxBodySize: 25 * 1024 * 1024,
+  },
   serverExternalPackages: [
     "@earendil-works/pi-coding-agent",
     "@earendil-works/pi-agent-core",

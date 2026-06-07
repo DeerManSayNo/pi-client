@@ -72,8 +72,12 @@ export function syncSkillsFromPiToDeerhux(home: string, opts: { cwd?: string; is
 }
 
 /**
- * One-time (plus incremental sessions/skills) migration from ~/.pi/agent to ~/.deerhux/agent.
+ * One-time (plus incremental sessions) migration from ~/.pi/agent to ~/.deerhux/agent.
  * Config JSON files are only copied on the first run when the destination file is missing.
+ *
+ * Important: skills are no longer silently synced during startup/read flows.
+ * The skills install API still calls syncSkillsFromPiToDeerhux() explicitly because
+ * the upstream skills CLI currently installs to .pi when using --agent pi.
  */
 export function migratePiAgentDir(home: string): void {
   const oldDir = join(home, ".pi", "agent");
@@ -84,40 +88,30 @@ export function migratePiAgentDir(home: string): void {
   const firstRun = !existsSync(join(newDir, MIGRATION_MARKER));
 
   let sessionsCopied = 0;
-  let skillsSynced = 0;
   let configsCopied = 0;
 
   sessionsCopied += mergeSessionFiles(
     join(oldDir, "sessions"),
     join(newDir, "sessions"),
   );
-  skillsSynced += syncSkillDir(
-    join(oldDir, "skills"),
-    join(newDir, "skills"),
-  );
 
   if (firstRun) {
     for (const entry of readdirSync(oldDir, { withFileTypes: true })) {
       if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+      // MCP is now read as a separate compatible source by the extension facade;
+      // do not silently copy it into DeerHux and change precedence.
+      if (entry.name === "mcp.json") continue;
       if (copyFileIfMissing(join(oldDir, entry.name), join(newDir, entry.name))) {
         configsCopied++;
-      }
-    }
-    // Also migrate subdirs like extensions, indexes, themes on first run
-    for (const name of ["extensions", "indexes", "themes", "prompts", "tools", "bin"]) {
-      const src = join(oldDir, name);
-      const dest = join(newDir, name);
-      if (existsSync(src) && !existsSync(dest)) {
-        cpSync(src, dest, { recursive: true });
       }
     }
     writeFileSync(join(newDir, MIGRATION_MARKER), new Date().toISOString(), "utf8");
   }
 
-  if (sessionsCopied > 0 || skillsSynced > 0 || configsCopied > 0) {
+  if (sessionsCopied > 0 || configsCopied > 0) {
     console.log(
       `[init] Migrated legacy ~/.pi/agent → ~/.deerhux/agent`
-      + ` (sessions: ${sessionsCopied}, skills: ${skillsSynced}, configs: ${configsCopied})`,
+      + ` (sessions: ${sessionsCopied}, configs: ${configsCopied})`,
     );
   } else if (firstRun) {
     console.log("[init] Recorded ~/.pi/agent migration marker (no new files to copy)");
@@ -126,7 +120,11 @@ export function migratePiAgentDir(home: string): void {
 
 /**
  * Migrate legacy project-level `.agents/` config into `.deerhux/`.
- * Safe to call on every read — only copies missing files.
+ * Safe to call on every read — only copies missing role files.
+ *
+ * Skills are intentionally not copied here anymore. They should be displayed as
+ * compatible/import-only sources by the extensions facade instead of being
+ * silently duplicated into .deerhux during read flows.
  */
 export function migrateProjectAgentsDir(cwd: string): { rolesCopied: boolean; skillsSynced: number } {
   const trimmed = cwd.trim();
@@ -142,15 +140,12 @@ export function migrateProjectAgentsDir(cwd: string): { rolesCopied: boolean; sk
     join(agentsDir, "roles.json"),
     join(deerhuxDir, "roles.json"),
   );
-  const skillsSynced = syncSkillDir(
-    join(agentsDir, "skills"),
-    join(deerhuxDir, "skills"),
-  );
+  const skillsSynced = 0;
 
-  if (rolesCopied || skillsSynced > 0) {
+  if (rolesCopied) {
     console.log(
       `[init] Migrated legacy ${trimmed}/.agents → .deerhux`
-      + ` (roles: ${rolesCopied ? 1 : 0}, skills: ${skillsSynced})`,
+      + ` (roles: ${rolesCopied ? 1 : 0})`,
     );
   }
 

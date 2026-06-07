@@ -2,8 +2,8 @@ import { NextResponse } from "next/server";
 import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { completeSimple, type AssistantMessage, type UserMessage } from "@earendil-works/pi-ai";
-import { AuthStorage, ModelRegistry } from "@earendil-works/pi-coding-agent";
+import type { AssistantMessage, ImageContent } from "@earendil-works/pi-ai";
+import { AuthStorage, createAgentSession, getAgentDir, ModelRegistry, SessionManager } from "@earendil-works/pi-coding-agent";
 
 export const dynamic = "force-dynamic";
 
@@ -60,8 +60,8 @@ function generateSolidColorPng(color: readonly [number, number, number]): string
   while (offset < rawData.length) {
     const blockSize = Math.min(rawData.length - offset, 0xffff);
     const isFinal = offset + blockSize >= rawData.length;
-    deflateData.push(isFinal ? 1 : 0); // BFINAL
-    deflateData.push(0x00, 0x00); // BTYPE=0 (no compression)
+    // BFINAL + BTYPE=00, followed by LEN/NLEN for an uncompressed deflate block.
+    deflateData.push(isFinal ? 1 : 0);
     deflateData.push(blockSize & 0xff, (blockSize >> 8) & 0xff);
     deflateData.push((~blockSize) & 0xff, ((~blockSize) >> 8) & 0xff);
     for (let i = offset; i < offset + blockSize; i++) {
@@ -109,6 +109,34 @@ function getAssistantText(message: AssistantMessage): string {
     .join("");
 }
 
+function isAssistantMessage(message: unknown): message is AssistantMessage {
+  return isRecord(message)
+    && message.role === "assistant"
+    && Array.isArray(message.content);
+}
+
+function latestAssistantMessage(messages: unknown[]): AssistantMessage | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (isAssistantMessage(message)) return message;
+  }
+  return null;
+}
+
+async function runWithTimeout<T>(task: Promise<T>, timeoutMs: number): Promise<{ value?: T; timedOut: boolean }> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      task.then((value) => ({ value, timedOut: false })),
+      new Promise<{ timedOut: true }>((resolve) => {
+        timeout = setTimeout(() => resolve({ timedOut: true }), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
 export async function POST(req: Request) {
   let tempDir: string | undefined;
 
@@ -144,73 +172,86 @@ export async function POST(req: Request) {
     if (!auth.ok) return NextResponse.json({ ok: false, error: auth.error });
     if (!auth.apiKey) return NextResponse.json({ ok: false, error: `No API key found for "${providerName}"` });
 
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), TEST_TIMEOUT_MS);
-    let status: number | undefined;
     const startedAt = Date.now();
+    let session: Awaited<ReturnType<typeof createAgentSession>>["session"] | undefined;
 
     try {
       const testMode = typeof body.testMode === "string" ? body.testMode : "text";
       const isImageTest = testMode === "image";
 
-      // Build user message for text or image test
-      let userContent: UserMessage["content"] = "Reply with OK only.";
+      const colorName = isImageTest ? ["red", "blue", "green"][Math.floor(Math.random() * 3)] : "red";
+      const colors: Record<string, readonly [number, number, number]> = {
+        red: [220, 50, 50],
+        blue: [50, 100, 220],
+        green: [50, 180, 80],
+      };
+      const pngBase64 = generateSolidColorPng(colors[colorName]);
 
-      if (isImageTest) {
-        const colorName = ["red", "blue", "green"][Math.floor(Math.random() * 3)];
-        const colors: Record<string, readonly [number, number, number]> = {
-          red: [220, 50, 50],
-          blue: [50, 100, 220],
-          green: [50, 180, 80],
-        };
-        const pngBase64 = generateSolidColorPng(colors[colorName]);
-        userContent = [
-          { type: "text", text: `What color is this image? Reply with just the color name in English (one word).` },
-          {
-            type: "image",
-            data: pngBase64,
-            mimeType: "image/png",
-          },
-        ];
+      const result = await createAgentSession({
+        cwd: process.cwd(),
+        agentDir: getAgentDir(),
+        model,
+        modelRegistry: registry,
+        sessionManager: SessionManager.inMemory(process.cwd()),
+        tools: [],
+      });
+      session = result.session;
+
+      const prompt = isImageTest
+        ? "What color is this image? Reply with just the color name in English (one word)."
+        : "Reply with OK only.";
+      const images: ImageContent[] | undefined = isImageTest
+        ? [{ type: "image", data: pngBase64, mimeType: "image/png" }]
+        : undefined;
+
+      const run = await runWithTimeout(
+        session.prompt(prompt, {
+          images,
+          expandPromptTemplates: false,
+          source: "interactive",
+        }),
+        TEST_TIMEOUT_MS
+      );
+      const latencyMs = Date.now() - startedAt;
+
+      if (run.timedOut) {
+        await session.abort().catch(() => {});
+        return NextResponse.json({
+          ok: false,
+          error: "Test timed out",
+          latencyMs,
+          testMode,
+        });
       }
 
-      const userMessage: UserMessage = {
-        role: "user",
-        content: userContent,
-        timestamp: Date.now(),
-      };
+      const message = latestAssistantMessage(session.messages);
+      if (!message) {
+        return NextResponse.json({
+          ok: false,
+          error: "Model returned no assistant message",
+          latencyMs,
+          testMode,
+        });
+      }
 
-      const message = await completeSimple(model, {
-        messages: [userMessage],
-      }, {
-        apiKey: auth.apiKey,
-        headers: auth.headers,
-        maxTokens: 16,
-        timeoutMs: TEST_TIMEOUT_MS,
-        maxRetries: 0,
-        cacheRetention: "none",
-        signal: controller.signal,
-        onResponse: (response) => { status = response.status; },
-      });
-
-      const latencyMs = Date.now() - startedAt;
       if (message.stopReason === "error" || message.stopReason === "aborted") {
         return NextResponse.json({
           ok: false,
-          error: message.errorMessage ?? (controller.signal.aborted ? "Test timed out" : "Model returned an error"),
+          error: message.errorMessage ?? "Model returned an error",
           latencyMs,
-          status,
+          testMode,
         });
       }
 
       return NextResponse.json({
         ok: true,
         latencyMs,
-        status,
         responseText: getAssistantText(message).slice(0, 300),
+        testMode,
       });
     } finally {
-      clearTimeout(timeout);
+      if (session?.isStreaming) await session.abort().catch(() => {});
+      session?.dispose();
     }
   } catch (error) {
     return NextResponse.json({ ok: false, error: errorMessage(error) }, { status: 500 });

@@ -5,6 +5,7 @@ import { getLocalStorageItem } from "@/lib/client-storage";
 import { useEffect, useState, useCallback, useRef, useMemo, type CSSProperties } from "react";
 import type { SessionInfo } from "@/lib/types";
 import { FileExplorer } from "./FileExplorer";
+import { SchedulerRunsBlock } from "./SchedulerRunsBlock";
 
 type RunningSessionStatus = {
   sessionId: string;
@@ -761,33 +762,54 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       {/* 全部项目 — collapse entire project list */}
       {projects.length > 0 && (
         <div
-          onClick={() => setAllProjectsState((prev) => prev === "expanded" ? "compact" : prev === "compact" ? "collapsed" : "expanded")}
           style={{
-            padding: compact ? "5px 0" : "2px 14px 4px",
-            fontSize: 12,
-            color: "var(--text-muted)",
-            cursor: "pointer",
-            userSelect: "none",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: compact ? "center" : undefined,
-            gap: compact ? 0 : 6,
+            borderTop: "1px solid var(--border)",
+            borderBottom: "1px solid var(--border)",
+            background: "var(--bg-subtle)",
             flexShrink: 0,
           }}
-          onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
-          onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-muted)"; }}
-          title={compact ? (allProjectsState === "expanded" ? "收起" : allProjectsState === "compact" ? "折叠" : "展开全部") : undefined}
         >
-          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            {allProjectsState === "expanded" ? (
-              <polyline points="6 9 12 15 18 9" />
-            ) : allProjectsState === "compact" ? (
-              <><line x1="8" y1="12" x2="16" y2="12" /></>
-            ) : (
-              <polyline points="18 15 12 9 6 15" />
-            )}
-          </svg>
-          {!compact && "全部项目"}
+          <button
+            onClick={() => setAllProjectsState((prev) => prev === "expanded" ? "compact" : prev === "compact" ? "collapsed" : "expanded")}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: compact ? "center" : undefined,
+              gap: compact ? 0 : 6,
+              width: "100%",
+              padding: compact ? "6px 0" : "6px 10px",
+              background: "none",
+              border: "none",
+              color: "var(--text-muted)",
+              cursor: "pointer",
+              fontSize: 11,
+              fontWeight: 600,
+              letterSpacing: compact ? 0 : "0.05em",
+              textTransform: compact ? "none" : "uppercase",
+              textAlign: "left",
+              userSelect: "none",
+            }}
+            onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
+            onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-muted)"; }}
+            title={compact ? (allProjectsState === "expanded" ? "收起" : allProjectsState === "compact" ? "折叠" : "展开全部") : undefined}
+          >
+            <svg
+              width="9" height="9" viewBox="0 0 10 10" fill="none"
+              stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"
+              style={{
+                transform: allProjectsState === "expanded" ? "rotate(90deg)" : "none",
+                transition: "transform 0.15s",
+                flexShrink: 0,
+              }}
+            >
+              {allProjectsState === "compact" ? (
+                <line x1="3" y1="5" x2="7" y2="5" />
+              ) : (
+                <polyline points="3 2 7 5 3 8" />
+              )}
+            </svg>
+            {!compact && "全部项目"}
+          </button>
         </div>
       )}
 
@@ -952,6 +974,9 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
           onMouseLeave={() => setIsHoveringSplitter(false)}
         />
       )}
+
+      {/* Scheduler executions section */}
+      {!compact && (selectedCwdProp || selectedCwd) && <SchedulerRunsBlock />}
 
       {/* File Explorer section */}
       {!compact && (selectedCwdProp || selectedCwd) && (

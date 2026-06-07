@@ -13,6 +13,7 @@ interface ModelOption {
   provider: string;
   modelId: string;
   name: string;
+  input?: ("text" | "image")[];
 }
 
 interface SkillOption {
@@ -45,7 +46,7 @@ interface Props {
   isStreaming: boolean;
   model?: { provider: string; modelId: string } | null;
   modelNames?: Record<string, string>;
-  modelList?: { id: string; name: string; provider: string }[];
+  modelList?: { id: string; name: string; provider: string; input?: ("text" | "image")[] }[];
   onModelChange?: (provider: string, modelId: string) => void;
   onCompact?: () => void;
   onAbortCompaction?: () => void;
@@ -53,7 +54,7 @@ interface Props {
   compactError?: string | null;
   lastModelError?: string | null;
   onClearModelError?: () => void;
-  toolPreset?: "none" | "default" | "full";
+  toolPreset?: "none" | "default" | "full" | "custom";
   onToolPresetChange?: (preset: "none" | "default" | "full") => void;
   thinkingLevel?: "auto" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
   onThinkingLevelChange?: (level: "auto" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh") => void;
@@ -539,21 +540,10 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
   }, [cancelPendingEnterSend]);
 
-  const handlePaste = useCallback((e: React.ClipboardEvent) => {
-    const items = Array.from(e.clipboardData?.items ?? []);
-    const imageItems = items.filter((item) => item.type.startsWith("image/"));
-    if (!imageItems.length) return;
-    e.preventDefault();
-    const files = imageItems.map((item) => item.getAsFile()).filter((f): f is File => f !== null);
-    processImageFiles(files);
-  }, [processImageFiles]);
-
-
-
   // Build model options: prefer modelList (has provider info), fallback to modelNames
   const modelOptions: ModelOption[] = (() => {
     if (modelList && modelList.length > 0) {
-      return modelList.map((m) => ({ provider: m.provider, modelId: m.id, name: m.name }));
+      return modelList.map((m) => ({ provider: m.provider, modelId: m.id, name: m.name, input: m.input }));
     }
     return Object.entries(modelNames ?? {}).map(([modelId, name]) => ({
       provider: model?.provider ?? "unknown",
@@ -573,6 +563,24 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const currentName = model
     ? (modelOptions.find((o) => o.modelId === model.modelId && o.provider === model.provider)?.name ?? model.modelId)
     : modelOptions.length > 0 ? modelOptions[0].name : null;
+
+  // Check whether the currently-selected model supports image input
+  const modelSupportsImages = model
+    ? (modelOptions.find((o) => o.modelId === model.modelId && o.provider === model.provider)?.input?.includes("image") ?? true)
+    : true; // unknown model → assume support
+
+  const handlePaste = useCallback((e: React.ClipboardEvent) => {
+    // Skip image paste when model doesn't support it
+    if (!modelSupportsImages) return;
+    const items = Array.from(e.clipboardData?.items ?? []);
+    const imageItems = items.filter((item) => item.type.startsWith("image/"));
+    if (!imageItems.length) return;
+    e.preventDefault();
+    const files = imageItems.map((item) => item.getAsFile()).filter((f): f is File => f !== null);
+    processImageFiles(files);
+  }, [processImageFiles, modelSupportsImages]);
+
+
 
   // Keep the textarea's first line indented by the visual skill chip.
   // The textarea itself stays full-width, so wrapped/new lines can flow underneath the chip.
@@ -1237,20 +1245,20 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
           <div style={{ flex: "0 0 auto", display: "flex", alignItems: "center", gap: 2 }}>
             <button
               onClick={() => fileInputRef.current?.click()}
-              disabled={isStreaming}
-              title="附加图片"
+              disabled={isStreaming || !modelSupportsImages}
+              title={modelSupportsImages ? "附加图片" : "当前模型不支持图片输入"}
               style={{
                 flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center",
                 width: 32, height: 32, padding: 0,
                 background: "none", border: "none",
                 borderRadius: 9,
                 color: attachedImages.length ? "var(--accent)" : "var(--text-muted)",
-                cursor: isStreaming ? "not-allowed" : "pointer",
-                opacity: isStreaming ? 0.5 : 1,
+                cursor: isStreaming || !modelSupportsImages ? "not-allowed" : "pointer",
+                opacity: isStreaming || !modelSupportsImages ? 0.5 : 1,
                 transition: "background 0.12s, color 0.12s",
               }}
               onMouseEnter={(e) => {
-                if (isStreaming) return;
+                if (isStreaming || !modelSupportsImages) return;
                 e.currentTarget.style.background = "var(--bg-hover)";
                 e.currentTarget.style.color = attachedImages.length ? "var(--accent)" : "var(--text)";
               }}
@@ -1578,7 +1586,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
                   </svg>
-                  <span>{Object.entries(TOOL_PRESET_MAP).find(([, v]) => v === (toolPreset ?? "default"))?.[0] ?? "default"}</span>
+                  <span>{toolPreset === "custom" ? "custom" : Object.entries(TOOL_PRESET_MAP).find(([, v]) => v === (toolPreset ?? "default"))?.[0] ?? "default"}</span>
                 </button>
                 {toolDropdownOpen && (
                   <div style={{

@@ -735,6 +735,7 @@ export function SkillsConfig({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           filePath: skill.filePath,
+          cwd,
           disableModelInvocation: next,
         }),
       });
@@ -766,7 +767,7 @@ export function SkillsConfig({
     setSaveError(null);
     try {
       const res = await fetch(
-        `/api/skills?filePath=${encodeURIComponent(skill.filePath)}`,
+        `/api/skills?cwd=${encodeURIComponent(cwd)}&filePath=${encodeURIComponent(skill.filePath)}`,
         { method: "DELETE" },
       );
       const d = (await res.json()) as { success?: boolean; error?: string };

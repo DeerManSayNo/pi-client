@@ -8,17 +8,20 @@ export interface ToolEntry {
   active: boolean;
 }
 
-export type ToolPreset = "none" | "default" | "full";
+export type ToolPreset = "none" | "default" | "full" | "custom";
 export const PRESET_NONE: string[] = [];
 export const PRESET_DEFAULT: string[] = ["read", "bash", "edit", "write"];
-export const PRESET_FULL: string[] = ["bash", "read", "edit", "write", "grep", "find", "ls", "code_search"];
+export const PRESET_FULL: string[] = ["bash", "read", "edit", "write", "grep", "find", "ls", "code_search", "codegraph_status", "codegraph_search", "codegraph_callers", "codegraph_callees", "codegraph_impact"];
 
 export function getPresetFromTools(tools: ToolEntry[]): ToolPreset {
   const active = tools.filter(t => t.active).map(t => t.name).sort().join(",");
+  const available = new Set(tools.map(t => t.name));
+  const defaultTools = PRESET_DEFAULT.filter(name => available.has(name));
+  const fullTools = PRESET_FULL.filter(name => available.has(name));
   if (active === "") return "none";
-  if (active === [...PRESET_DEFAULT].sort().join(",")) return "default";
-  if (active === [...PRESET_FULL].sort().join(",")) return "full";
-  return "default"; // closest match
+  if (active === [...defaultTools].sort().join(",")) return "default";
+  if (active === [...fullTools].sort().join(",")) return "full";
+  return "custom";
 }
 
 interface Props {
@@ -27,10 +30,10 @@ interface Props {
   onClose: () => void;
 }
 
-const PRESETS: { id: ToolPreset; label: string; desc: string; tools: string[] }[] = [
+const PRESETS: { id: Exclude<ToolPreset, "custom">; label: string; desc: string; tools: string[] }[] = [
   { id: "none",    label: "关闭",  desc: "无工具",                                  tools: PRESET_NONE },
   { id: "default", label: "低",    desc: "read · bash · edit · write",              tools: PRESET_DEFAULT },
-  { id: "full",    label: "高",    desc: "read · bash · edit · write · grep · find · ls · code_search", tools: PRESET_FULL },
+  { id: "full",    label: "高",    desc: "read · bash · edit · write · grep · find · ls · code/codegraph search", tools: PRESET_FULL },
 ];
 
 export function ToolPanel({ tools, onPreset, onClose }: Props) {
@@ -47,7 +50,7 @@ export function ToolPanel({ tools, onPreset, onClose }: Props) {
     return () => document.removeEventListener("mousedown", handler);
   }, [onClose]);
 
-  const currentIndex = PRESETS.findIndex(p => p.id === current);
+  const currentIndex = current === "custom" ? PRESETS.length - 1 : PRESETS.findIndex(p => p.id === current);
 
   return (
     <div
@@ -104,7 +107,7 @@ export function ToolPanel({ tools, onPreset, onClose }: Props) {
 
       {/* Description of current selection */}
       <div style={{ fontSize: 11, color: "var(--text-dim)", lineHeight: 1.5 }}>
-        {currentIndex >= 0 ? PRESETS[currentIndex].desc || "未启用任何工具" : ""}
+        {current === "custom" ? "自定义工具组合" : currentIndex >= 0 ? PRESETS[currentIndex].desc || "未启用任何工具" : ""}
         {current === "none" && <span> — Agent 将不使用任何工具</span>}
       </div>
 
@@ -115,7 +118,7 @@ export function ToolPanel({ tools, onPreset, onClose }: Props) {
             key={i}
             style={{
               flex: 1, height: 3, borderRadius: 2,
-              background: i <= currentIndex ? "var(--accent)" : "var(--border)",
+              background: current !== "custom" && i <= currentIndex ? "var(--accent)" : "var(--border)",
               transition: "background 0.15s",
             }}
           />

@@ -125,7 +125,7 @@ type ModelTestState =
   | { phase: "idle" }
   | { phase: "testing" }
   | { phase: "success"; latencyMs?: number; status?: number; responseText?: string; testMode?: string }
-  | { phase: "error"; message: string; latencyMs?: number; status?: number; testMode?: string };
+  | { phase: "error"; message: string; latencyMs?: number; status?: number; testMode?: string; debugPayload?: string };
 
 type Selection =
   | { type: "provider"; name: string }
@@ -518,7 +518,15 @@ function ModelDetail({
     if (testState.phase === "success") {
       return ["连接成功", modeLabel || null, ...meta, testState.responseText || null].filter(Boolean).join(" · ");
     }
-    return ["连接失败", modeLabel || null, ...meta, testState.message].filter(Boolean).join(" · ");
+    if (testState.phase === "error") {
+      const parts = ["连接失败", modeLabel || null, ...meta, testState.message].filter(Boolean);
+      // Image test failed with 400 → model likely doesn't support images
+      if (testState.testMode === "image" && testState.status === 400) {
+        parts.push("该模型可能不支持图片输入，请检查模型配置");
+      }
+      return parts.join(" · ");
+    }
+    return null;
   })();
 
   useEffect(() => {
@@ -540,6 +548,7 @@ function ModelDetail({
         latencyMs?: number;
         status?: number;
         responseText?: string;
+        debugPayload?: string;
       };
       if (!res.ok || !d.ok) {
         setTestState({
@@ -548,6 +557,7 @@ function ModelDetail({
           latencyMs: d.latencyMs,
           status: d.status,
           testMode,
+          debugPayload: d.debugPayload,
         });
         return;
       }
@@ -682,7 +692,12 @@ function ModelDetail({
           </button>
         </div>
       </div>
-
+      {testState.phase === "error" && testState.debugPayload && (
+        <details style={{ fontSize: 10, opacity: 0.65, marginTop: 2 }}>
+          <summary style={{ cursor: "pointer", color: "var(--text-dim)" }}>调试：API 请求体</summary>
+          <pre style={{ margin: 0, marginTop: 4, padding: 6, background: "var(--bg-hover)", borderRadius: 4, whiteSpace: "pre-wrap", wordBreak: "break-all", maxHeight: 120, overflow: "auto" }}>{testState.debugPayload}</pre>
+        </details>
+      )}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
         <Field label="模型 ID *"><TextInput value={model.id} onChange={(v) => set("id", v)} placeholder="model-id" mono /></Field>
         <Field label="显示名称"><TextInput value={model.name ?? ""} onChange={(v) => set("name", v || undefined)} placeholder="Display name" /></Field>

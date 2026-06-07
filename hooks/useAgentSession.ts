@@ -8,6 +8,9 @@ import { agentEventBus } from "@/lib/agent-event-bus";
 import { sendAgentCommand } from "@/lib/agent-client";
 import type { ToolEntry } from "@/components/ToolPanel";
 
+type ToolPreset = "none" | "default" | "full" | "custom";
+const AUTO_CONTINUE_MESSAGE = "请从刚才中断的位置继续，不要重复已经完成的内容。如果上一步有未完成的工具调用或代码修改，请继续完成。";
+
 /**
  * Compress expanded skill content back to /skill:name form for display.
  * The DeerHux SDK's _expandSkillCommand replaces /skill:name args with the full
@@ -97,7 +100,7 @@ interface AgentEvent {
 
 interface ModelsResponse {
   models: Record<string, string>;
-  modelList?: { id: string; name: string; provider: string }[];
+  modelList?: { id: string; name: string; provider: string; input?: ("text" | "image")[] }[];
   defaultModel?: { provider: string; modelId: string } | null;
   thinkingLevels?: Record<string, string[]>;
   thinkingLevelMaps?: Record<string, Record<string, string | null>>;
@@ -133,7 +136,7 @@ export interface UseAgentSessionOptions {
   chatInputRef?: React.RefObject<ChatInputHandle | null>;
   onSystemPromptChange?: (prompt: string | null) => void;
   setNewSessionModel?: (model: { provider: string; modelId: string } | null) => void;
-  setToolPreset?: (preset: "none" | "default" | "full") => void;
+  setToolPreset?: (preset: ToolPreset) => void;
 }
 
 export type ThinkingLevelOption = "auto" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
@@ -211,6 +214,7 @@ type AgentStatus = {
   isStreaming?: boolean;
   isCompacting?: boolean;
   isRunning?: boolean;
+  lastEventType?: string;
   eventIdleMs?: number | null;
   contentIdleMs?: number | null;
 };
@@ -232,11 +236,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [streamState, dispatch] = useReducer(streamReducer, { isStreaming: false, streamingMessage: null });
   const [agentRunning, setAgentRunning] = useState(false);
   const [modelNames, setModelNames] = useState<Record<string, string>>({});
-  const [modelList, setModelList] = useState<{ id: string; name: string; provider: string }[]>([]);
+  const [modelList, setModelList] = useState<{ id: string; name: string; provider: string; input?: ("text" | "image")[] }[]>([]);
   const [modelThinkingLevels, setModelThinkingLevels] = useState<Record<string, string[]>>({});
   const [modelThinkingLevelMaps, setModelThinkingLevelMaps] = useState<Record<string, Record<string, string | null>>>({});
   const [newSessionModel, setNewSessionModelState] = useState<{ provider: string; modelId: string } | null>(null);
-  const [toolPreset, setToolPreset] = useState<"none" | "default" | "full">("default");
+  const [toolPreset, setToolPreset] = useState<ToolPreset>("default");
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevelOption>("auto");
   const [retryInfo, setRetryInfo] = useState<{ attempt: number; maxAttempts: number; errorMessage?: string } | null>(null);
   const [contextUsage, setContextUsage] = useState<{ percent: number | null; contextWindow: number; tokens: number | null } | null>(null);
@@ -261,7 +265,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [stallLevel, setStallLevel] = useState<StallLevel>(null);
   const stallDismissedRef = useRef(false);
   const stallRecoveriesRef = useRef(0);
-  const AUTO_CONTINUE_MESSAGE = "请从刚才中断的位置继续，不要重复已经完成的内容。如果上一步有未完成的工具调用或代码修改，请继续完成。";
 
   const eventSourceRef = useRef<EventSource | null>(null);
   const sseReconnectAttemptRef = useRef(0);
@@ -732,7 +735,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             ...(roleId ? { roleId } : {}),
           }),
         });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        if (!res.ok) {
+          const detail = await res.text().catch(() => "");
+          throw new Error(`HTTP ${res.status}${detail ? `: ${detail.slice(0, 300)}` : ""}`);
+        }
         const result = await res.json() as { sessionId: string };
         const realId = result.sessionId;
         sessionIdRef.current = realId;
@@ -759,6 +765,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } catch (e) {
       if (optimisticNewSession) onSessionStarted?.(null);
       console.error("Failed to send message:", e);
+      const errorMessage = e instanceof Error ? e.message : String(e);
+      // 400 with images → likely model doesn't support image input
+      if (piImages?.length && /400/.test(errorMessage)) {
+        lastModelErrorRef.current = errorMessage + " — 该模型可能不支持图片输入，请检查模型配置";
+        setLastModelError(lastModelErrorRef.current);
+      } else {
+        lastModelErrorRef.current = errorMessage;
+        setLastModelError(errorMessage);
+      }
       // Remove the optimistically-inserted user message so the UI doesn't
       // show a dangling message with no reply.
       setMessages((prev) => prev.filter((m) => m !== userMsg));
@@ -1074,6 +1089,21 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           return;
         }
 
+        // If the last backend event is a completed assistant message, the model
+        // is done and the UI is only missing the final agent_end bookkeeping.
+        // Do not auto-send "continue" here: the assistant may be waiting for the
+        // user to confirm the proposed next step.
+        if (
+          receivedAssistantMessageRef.current
+          && status?.lastEventType === "message_end"
+          && d.state?.isStreaming !== true
+          && status?.isStreaming !== true
+        ) {
+          console.log('[Watchdog] Assistant message completed without agent_end, stopping locally');
+          await recoverStop(sid);
+          return;
+        }
+
         // Backend still streaming — check tiered actions
         stallRecoveriesRef.current += 1;
 
@@ -1168,7 +1198,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [thinkingLevel]);
 
-  const handleToolPresetChange = useCallback(async (preset: "none" | "default" | "full") => {
+  const handleToolPresetChange = useCallback(async (preset: Exclude<ToolPreset, "custom">) => {
     const { PRESET_NONE, PRESET_DEFAULT, PRESET_FULL } = await import("@/components/ToolPanel");
     const toolNames = preset === "none" ? PRESET_NONE : preset === "default" ? PRESET_DEFAULT : PRESET_FULL;
     const previousPreset = toolPreset;

@@ -8,6 +8,7 @@ import { applyRolePromptToSystemPrompt } from "./roles";
 import { applyRolePromptConfigToPrompt, isRoleSystemPromptSectionEnabled } from "./system-prompt-decomposer";
 import { indexExists } from "./code-index/database";
 import { searchIndex } from "./code-index/search";
+import { createCodeGraphTools } from "./codegraph/tools";
 
 // ============================================================================
 // Types
@@ -224,6 +225,9 @@ export class AgentSessionWrapper {
    *  Unlike isStreaming, this stays true during gaps between tool execution
    *  and the next model response, and during auto-retry backoff. */
   private _isRunning = false;
+  private activeTurnId = 0;
+  private activeTurnPromise: Promise<void> | null = null;
+  private sawAssistantEventInTurn = false;
 
   constructor(public readonly inner: AgentSessionLike, roleId?: string | null) {
     this.roleId = roleId ?? null;
@@ -331,6 +335,7 @@ export class AgentSessionWrapper {
     // then either agent_start (retry success) or auto_retry_end with success=false.
     if (event.type === "agent_start") {
       this._isRunning = true;
+      this.sawAssistantEventInTurn = false;
     }
     if (event.type === "agent_end") {
       const willRetry = (event as { willRetry?: boolean }).willRetry ?? false;
@@ -349,6 +354,13 @@ export class AgentSessionWrapper {
     if (nextContentLength !== null && nextContentLength !== this.lastContentLength) {
       this.lastContentLength = nextContentLength;
       this.lastContentAt = now;
+    }
+    if (
+      (event.type === "message_start" || event.type === "message_update" || event.type === "message_end")
+      && isRecord(event.message)
+      && event.message.role === "assistant"
+    ) {
+      this.sawAssistantEventInTurn = true;
     }
   }
 
@@ -380,6 +392,49 @@ export class AgentSessionWrapper {
     this.onDestroyCallback = cb;
   }
 
+  private trackTurn(promise: Promise<void>): void {
+    const turnId = ++this.activeTurnId;
+    this.activeTurnPromise = promise;
+
+    promise.catch((err: unknown) => {
+      // If a recovery follow_up has already started, this rejection belongs to
+      // the aborted old turn and must not mark the new turn as failed.
+      if (!this._alive || this.activeTurnId !== turnId) return;
+      this._isRunning = false;
+      const msg = err instanceof Error ? err.message : String(err);
+      for (const l of this.listeners) l({ type: "agent_end", messages: [], willRetry: false, error: msg });
+    }).finally(() => {
+      if (this.activeTurnId !== turnId) return;
+      this.activeTurnPromise = null;
+      if (this._isRunning && !this.inner.isStreaming && this.sawAssistantEventInTurn) {
+        this._isRunning = false;
+        for (const l of this.listeners) l({ type: "agent_end", messages: [], willRetry: false });
+      }
+    });
+  }
+
+  private async waitForCurrentTurnToStop(timeoutMs: number): Promise<void> {
+    const start = Date.now();
+    while ((this._isRunning || this.inner.isStreaming) && Date.now() - start < timeoutMs) {
+      await sleepMs(50);
+    }
+  }
+
+  private async abortAndSettleCurrentTurn(): Promise<void> {
+    const turnPromise = this.activeTurnPromise;
+    const turnId = this.activeTurnId;
+
+    await this.inner.abort();
+    await this.waitForCurrentTurnToStop(8_000);
+
+    if (turnPromise && this.activeTurnId === turnId) {
+      await Promise.race([
+        turnPromise.catch(() => {}),
+        sleepMs(2_000),
+      ]);
+    }
+  }
+
   async send(command: Record<string, unknown>): Promise<unknown> {
     this.resetIdleTimer();
     const type = command.type as string;
@@ -393,15 +448,10 @@ export class AgentSessionWrapper {
         if (command.message) {
           getLiveIslandClient().recordPrompt(this.inner.sessionId, command.message as string);
         }
-        // Fire and forget — events come via subscribe.
-        // But if prompt() rejects immediately (e.g. session destroyed), emit error to listeners
-        // and reset running state so the watchdog doesn't get stuck.
+        // Fire and forget — events come via subscribe. Track the promise so an
+        // abort + follow_up recovery can wait for the old turn to settle.
         const promptImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
-        this.inner.prompt(command.message as string, promptImages?.length ? { images: promptImages } : undefined).catch((err: unknown) => {
-          this._isRunning = false;
-          const msg = err instanceof Error ? err.message : String(err);
-          for (const l of this.listeners) l({ type: "agent_end", messages: [], willRetry: false, error: msg });
-        });
+        this.trackTurn(this.inner.prompt(command.message as string, promptImages?.length ? { images: promptImages } : undefined));
         return null;
       }
 
@@ -430,7 +480,7 @@ export class AgentSessionWrapper {
       }
 
       case "abort":
-        await this.inner.abort();
+        await this.abortAndSettleCurrentTurn();
         return null;
 
       case "get_state": {
@@ -560,7 +610,10 @@ export class AgentSessionWrapper {
 
       case "follow_up": {
         const followImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
-        await this.inner.followUp(command.message as string, followImages?.length ? followImages : undefined);
+        await this.waitForCurrentTurnToStop(8_000);
+        const followPromise = this.inner.followUp(command.message as string, followImages?.length ? followImages : undefined);
+        this.trackTurn(followPromise);
+        await followPromise;
         return null;
       }
 
@@ -702,7 +755,13 @@ export async function startRpcSession(
         return { content: [{ type: "text" as const, text }], details: undefined };
       },
     }) : null;
-    const availableToolNames = codeSearchTool ? [...allCodingToolNames, "code_search"] : allCodingToolNames;
+    const codeGraphTools = await createCodeGraphTools(cwd);
+    const customTools = [...(codeSearchTool ? [codeSearchTool] : []), ...codeGraphTools];
+    const availableToolNames = [
+      ...allCodingToolNames,
+      ...(codeSearchTool ? ["code_search"] : []),
+      ...codeGraphTools.map(tool => tool.name),
+    ];
     let toolsOption: string[] | undefined;
     if (toolNames !== undefined) {
       toolsOption = toolNames.length === 0 ? [] : availableToolNames;
@@ -713,7 +772,7 @@ export async function startRpcSession(
       agentDir,
       sessionManager,
       ...(toolsOption !== undefined ? { tools: toolsOption } : {}),
-      ...(codeSearchTool ? { customTools: [codeSearchTool] } : {}),
+      ...(customTools.length > 0 ? { customTools } : {}),
     });
 
     configureToolExecutionModes(inner);

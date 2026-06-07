@@ -4,6 +4,7 @@ import { DefaultResourceLoader, getAgentDir, parseFrontmatter } from "@earendil-
 import path from "path";
 import { readdirSync } from "fs";
 import { migrateProjectAgentsDir } from "@/lib/legacy-migration";
+import { isManagedDeerHuxSkillFile } from "@/lib/extensions/config";
 
 export const dynamic = "force-dynamic";
 
@@ -47,7 +48,7 @@ export async function GET(req: Request) {
           source: skill.sourceInfo?.source,
           scope: skill.sourceInfo?.scope,
         },
-        canDelete: true,
+        canDelete: isManagedDeerHuxSkillFile(skill.filePath, cwd),
       };
     });
 
@@ -61,6 +62,7 @@ export async function GET(req: Request) {
 export async function DELETE(req: Request) {
   try {
     const { searchParams } = new URL(req.url);
+    const cwd = searchParams.get("cwd");
     const filePath = searchParams.get("filePath");
     if (!filePath) {
       return NextResponse.json({ error: "filePath required" }, { status: 400 });
@@ -69,9 +71,9 @@ export async function DELETE(req: Request) {
       return NextResponse.json({ error: "file not found" }, { status: 404 });
     }
 
-    // Safety: ensure it's a SKILL.md file
-    if (!filePath.endsWith("SKILL.md")) {
-      return NextResponse.json({ error: "only SKILL.md files can be deleted" }, { status: 400 });
+    // Safety: only allow deleting SKILL.md files managed by DeerHux.
+    if (!isManagedDeerHuxSkillFile(filePath, cwd)) {
+      return NextResponse.json({ error: "only DeerHux-managed SKILL.md files can be deleted" }, { status: 400 });
     }
 
     // Delete the SKILL.md file
@@ -97,10 +99,14 @@ export async function DELETE(req: Request) {
 // PATCH /api/skills — toggle disable-model-invocation on a SKILL.md file
 export async function PATCH(req: Request) {
   try {
-    const body = await req.json() as { filePath: string; disableModelInvocation: boolean };
-    const { filePath, disableModelInvocation } = body;
+    const body = await req.json() as { filePath: string; disableModelInvocation: boolean; cwd?: string | null };
+    const { filePath, disableModelInvocation, cwd } = body;
     if (!filePath) return NextResponse.json({ error: "filePath required" }, { status: 400 });
     if (!existsSync(filePath)) return NextResponse.json({ error: "file not found" }, { status: 404 });
+
+    if (!isManagedDeerHuxSkillFile(filePath, cwd)) {
+      return NextResponse.json({ error: "only DeerHux-managed SKILL.md files can be modified" }, { status: 400 });
+    }
 
     const content = readFileSync(filePath, "utf8");
     const key = "disable-model-invocation";

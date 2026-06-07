@@ -12,6 +12,7 @@ import { SchedulerPanel } from "./SchedulerPanel";
 import { RoleConfig } from "./RoleConfig";
 import { MemoryConfig } from "./MemoryConfig";
 import { McpConfig } from "./McpConfig";
+import { ExtensionsConfig } from "./ExtensionsConfig";
 import { LogPanel } from "./LogPanel";
 import { getLocalStorageItem } from "@/lib/client-storage";
 import { useTheme } from "@/hooks/useTheme";
@@ -77,6 +78,7 @@ export function AppShell() {
   const [modelsConfigOpen, setModelsConfigOpen] = useState(false);
   const [modelsRefreshKey, setModelsRefreshKey] = useState(0);
   const [skillsConfigOpen, setSkillsConfigOpen] = useState(false);
+  const [extensionsConfigOpen, setExtensionsConfigOpen] = useState(false);
   const [quickConfigOpen, setQuickConfigOpen] = useState<"memory" | "mcp" | "role" | null>(null);
   const [schedulerPanelOpen, setSchedulerPanelOpen] = useState(false);
   const [runningSessionStatuses, setRunningSessionStatuses] = useState<Map<string, RunningSessionStatus>>(new Map());
@@ -843,6 +845,17 @@ export function AppShell() {
                   <line x1="9" y1="20" x2="9" y2="23" /><line x1="15" y1="20" x2="15" y2="23" />
                   <line x1="20" y1="9" x2="23" y2="9" /><line x1="20" y1="14" x2="23" y2="14" />
                   <line x1="1" y1="9" x2="4" y2="9" /><line x1="1" y1="14" x2="4" y2="14" />
+                </svg>
+              ),
+            },
+            {
+              label: "扩展总览",
+              disabled: !activeCwd && !selectedSession?.cwd && !newSessionCwd,
+              onClick: () => { setSettingsMenuOpen(false); setExtensionsConfigOpen(true); },
+              icon: (
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M12 2v6" /><path d="M12 16v6" /><path d="M4.93 4.93l4.24 4.24" /><path d="M14.83 14.83l4.24 4.24" />
+                  <path d="M2 12h6" /><path d="M16 12h6" /><path d="M4.93 19.07l4.24-4.24" /><path d="M14.83 9.17l4.24-4.24" />
                 </svg>
               ),
             },
@@ -1747,6 +1760,9 @@ export function AppShell() {
     {modelsConfigOpen && <ModelsConfig onClose={() => { setModelsConfigOpen(false); setModelsRefreshKey((k) => k + 1); }} onSaved={() => setModelsRefreshKey((k) => k + 1)} />}
     {skillsConfigOpen && (activeCwd ?? selectedSession?.cwd ?? newSessionCwd) && (
       <SkillsConfig cwd={(activeCwd ?? selectedSession?.cwd ?? newSessionCwd)!} onClose={() => setSkillsConfigOpen(false)} />
+    )}
+    {extensionsConfigOpen && (activeCwd ?? selectedSession?.cwd ?? newSessionCwd) && (
+      <ExtensionsConfig cwd={(activeCwd ?? selectedSession?.cwd ?? newSessionCwd)!} onClose={() => setExtensionsConfigOpen(false)} />
     )}
     {schedulerPanelOpen && (
       <SchedulerPanel onClose={() => setSchedulerPanelOpen(false)} cwd={activeCwd ?? selectedSession?.cwd ?? newSessionCwd ?? undefined} />

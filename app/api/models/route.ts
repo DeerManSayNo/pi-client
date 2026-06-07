@@ -11,6 +11,7 @@ interface ConfiguredModel {
   provider: string;
   reasoning?: boolean;
   thinkingLevelMap?: Record<string, string | null>;
+  input?: ("text" | "image")[];
 }
 
 function getConfiguredModels(agentDir: string): Map<string, ConfiguredModel> {
@@ -82,6 +83,7 @@ export async function GET() {
       id: m.id,
       name: m.name,
       provider: m.provider,
+      input: (m as { input?: ("text" | "image")[] }).input ?? ["text"],
     }));
 
     const settings = SettingsManager.create(process.cwd(), agentDir);
@@ -93,4 +95,18 @@ export async function GET() {
   } catch { /* return empty */ }
 
   return Response.json({ models: Object.fromEntries(nameMap), modelList, defaultModel, thinkingLevels, thinkingLevelMaps });
+}
+
+// 新增：独立接口返回模型 input 能力（纯 UI 使用，轻量）
+export async function POST(req: Request) {
+  try {
+    const { provider, modelId } = await req.json() as { provider?: string; modelId?: string };
+    if (!provider || !modelId) return Response.json({ error: "provider and modelId required" }, { status: 400 });
+    const authStorage = AuthStorage.create();
+    const registry = ModelRegistry.create(authStorage);
+    const model = registry.find(provider, modelId);
+    return Response.json({ input: (model as { input?: ("text" | "image")[] } | undefined)?.input ?? ["text"] });
+  } catch (error) {
+    return Response.json({ error: String(error) }, { status: 500 });
+  }
 }
