@@ -1,12 +1,12 @@
-# pi-agent
+# DeerHux
 
-[pi 编程智能体](https://github.com/badlogic/pi-mono) 的 **Tauri 桌面客户端**。在原生桌面应用中浏览会话、与智能体对话、分叉对话、切换消息分支。
+[DeerHux](https://github.com/DeerManSayNo/DeerHux) 的 **Tauri 桌面客户端**。在原生桌面应用中浏览会话、与智能体对话、分叉对话、切换消息分支。
 
 ## 快速开始
 
 ```bash
-git clone https://github.com/DeerManSayNo/pi-client.git
-cd pi-client
+git clone https://github.com/DeerManSayNo/DeerHux.git
+cd DeerHux
 npm install
 
 # 桌面端开发（启动 Tauri 窗口）
@@ -16,7 +16,7 @@ npm run tauri dev
 npm run dev
 ```
 
-> 本仓库项目名为 `pi-agent`，仓库地址为 `pi-client`。
+> 本仓库项目名为 `DeerHux`，仓库地址为 `DeerHux`。
 
 ## 构建桌面应用
 
@@ -67,7 +67,7 @@ npm run tauri:build
 
 ## 功能介绍
 
-- **会话浏览器** — 按工作目录分组展示所有 pi 会话，支持重命名和删除
+- **会话浏览器** — 按工作目录分组展示所有 DeerHux 会话，支持重命名和删除
 - **实时对话** — 通过 SSE 流式输出与智能体实时交互，支持 Markdown 渲染和代码高亮
 - **会话分叉** — 从任意用户消息创建独立的新会话分支
 - **会话内分支** — 回退到任意节点继续对话，在同一文件内创建分支
@@ -93,7 +93,7 @@ npm run tauri:build
 
 ## 注意事项
 
-- **数据目录** — 默认读取 `~/.pi/agent/sessions` 下的会话文件。可通过环境变量 `PI_CODING_AGENT_DIR` 指定其他目录。
+- **数据目录** — 默认读取 `~/.deerhux/agent/sessions` 下的会话文件。可通过环境变量 `DEERHUX_CODING_AGENT_DIR` 指定其他目录。
 - **模型配置** — 从智能体数据目录下的 `models.json` 读取可用模型，可在侧边栏的「模型配置」面板中编辑。
 - **技能配置** — 从 `skills.sh` 搜索并安装技能，可在侧边栏的「技能配置」面板中管理。
 
@@ -119,18 +119,18 @@ lib/
   agent-client.ts    # Agent 客户端通信
   normalize.ts       # 规范化 toolCall 字段名
   file-paths.ts      # 跨平台文件路径处理
-  pi-types.ts        # pi 类型定义
+  deerhux-types.ts   # DeerHux 类型定义
   npx.ts             # npx 运行工具
   types.ts           # UI 类型定义
 src-tauri/          # Tauri 桌面壳（Rust 后端）
 bin/                # 启动脚本
 ```
 
-会话文件存储路径：`~/.pi/agent/sessions/<编码后的工作目录>/<时间戳>_<uuid>.jsonl`
+会话文件存储路径：`~/.deerhux/agent/sessions/<编码后的工作目录>/<时间戳>_<uuid>.jsonl`
 
 ## 中文界面
 
-pi-agent 的界面已全面中文化，所有 UI 文本直接内联在组件中，无需额外配置或语言包。
+DeerHux 的界面已全面中文化，所有 UI 文本直接内联在组件中，无需额外配置或语言包。
 
 ### 实现方式
 

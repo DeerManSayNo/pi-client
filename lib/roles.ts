@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import path from "path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { migrateProjectAgentsDir } from "./legacy-migration";
 
 export const ROLE_BLOCKS = ["Identity", "Soul", "Rules", "User", "Tools", "Memory"] as const;
 export type RoleBlock = typeof ROLE_BLOCKS[number];
@@ -130,7 +131,7 @@ export function rolesFilePath(): string {
 }
 
 export function projectRolesFilePath(cwd: string): string {
-  return path.join(cwd, ".agents", "roles.json");
+  return path.join(cwd, ".deerhux", "roles.json");
 }
 
 function readRolesFromFile(file: string, scope: "user" | "project"): AgentRole[] {
@@ -152,7 +153,12 @@ function fileForScope(scope: "user" | "project", cwd?: string | null): string {
 
 function writeRolesToFile(file: string, roles: AgentRole[]): void {
   mkdirSync(path.dirname(file), { recursive: true });
-  const persisted = roles.map(({ sourceInfo: _sourceInfo, canDelete: _canDelete, ...role }) => role);
+  const persisted = roles.map((role) => {
+    const { sourceInfo, canDelete, ...persistedRole } = role;
+    void sourceInfo;
+    void canDelete;
+    return persistedRole;
+  });
   writeFileSync(file, JSON.stringify({ version: 1, roles: persisted }, null, 2));
 }
 
@@ -178,6 +184,7 @@ function normalizeRole(raw: Partial<AgentRole>): AgentRole | null {
 }
 
 export function readRoles(cwd?: string | null): AgentRole[] {
+  if (cwd?.trim()) migrateProjectAgentsDir(cwd);
   const globalCustom = readRolesFromFile(rolesFilePath(), "user");
   const projectCustom = cwd?.trim() ? readRolesFromFile(projectRolesFilePath(cwd), "project") : [];
 
@@ -204,6 +211,7 @@ export function writeRoles(roles: AgentRole[], cwd?: string | null, scope: "user
 }
 
 function findEditableRoleFile(roleId: string, cwd?: string | null): { file: string; roles: AgentRole[]; index: number; scope: "user" | "project" } | null {
+  if (cwd?.trim()) migrateProjectAgentsDir(cwd);
   const candidates: Array<{ file: string; scope: "user" | "project" }> = [];
   if (cwd?.trim()) candidates.push({ file: projectRolesFilePath(cwd), scope: "project" });
   candidates.push({ file: rolesFilePath(), scope: "user" });
@@ -222,6 +230,7 @@ export function getRole(roleId?: string | null, cwd?: string | null): AgentRole 
 
 export function createRole(input: { name: string; description?: string; basePrompt?: string; scope?: "user" | "project"; cwd?: string | null }): AgentRole {
   const scope = input.scope === "project" && input.cwd?.trim() ? "project" : "user";
+  if (scope === "project" && input.cwd?.trim()) migrateProjectAgentsDir(input.cwd);
   const file = scope === "project" ? projectRolesFilePath(input.cwd!) : rolesFilePath();
   const roles = readRolesFromFile(file, scope);
   const role: AgentRole = {

@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Pi Agent Web 架构图</title>
+  <title>DeerHux 架构图</title>
   <style>
     :root {
       --bg: #0b1020;
@@ -151,21 +151,21 @@
   <main class="page">
     <header class="hero">
       <div>
-        <h1>Pi Agent Web 架构图</h1>
+        <h1>DeerHux 架构图</h1>
         <p class="subtitle">
           基于当前项目目录与 <code>AGENTS.md</code> 梳理：前端 React/Next.js UI、API Route、进程内 AgentSession、会话文件读取、SSE 流、配置/索引/并行任务/定时任务等模块的关系。
         </p>
       </div>
       <div class="meta">
-        <b>项目：</b>pi-agent<br />
+        <b>项目：</b>deerhux<br />
         <b>栈：</b>Next.js 16 · React 19 · Tauri 2<br />
         <b>运行：</b><span class="mono">npm run dev</span> · port 30141
       </div>
     </header>
 
-    <section class="canvas" aria-label="Pi Agent Web SVG architecture diagram">
+    <section class="canvas" aria-label="DeerHux SVG architecture diagram">
       <svg viewBox="0 0 1440 1080" role="img" aria-labelledby="svgTitle svgDesc" xmlns="http://www.w3.org/2000/svg">
-        <title id="svgTitle">Pi Agent Web architecture diagram</title>
+        <title id="svgTitle">DeerHux architecture diagram</title>
         <desc id="svgDesc">Browser and Tauri client call Next.js API routes. API routes read session files or start in-process AgentSession wrappers. Agent sessions stream events by SSE and persist jsonl files under the user home directory.</desc>
 
         <defs>
@@ -192,7 +192,7 @@
         <circle cx="1320" cy="142" r="150" fill="#a78bfa" opacity=".10" />
         <circle cx="790" cy="1020" r="180" fill="#22d3ee" opacity=".07" />
 
-        <text x="52" y="58" class="title">Pi Agent Web — 分层架构与数据流</text>
+        <text x="52" y="58" class="title">DeerHux — 分层架构与数据流</text>
         <text x="52" y="84" class="small">重点链路：Session 浏览直读 JSONL；发送消息创建/复用 AgentSession；SSE 订阅实时事件；配置、索引、并行与定时任务通过独立 API 模块接入。</text>
 
         <!-- Client layer -->
@@ -259,7 +259,7 @@
         <text x="470" y="662" class="small mono">/api/models · /api/models-config</text>
         <text x="470" y="682" class="small mono">/api/skills · /api/mcp-config · /api/memory</text>
         <text x="470" y="702" class="small mono">/api/roles · /api/system-prompt · /api/auth</text>
-        <text x="470" y="722" class="tiny">读写 ~/.pi/agent 配置，测试 provider/API key</text>
+        <text x="470" y="722" class="tiny">读写 ~/.deerhux/agent 配置，测试 provider/API key</text>
 
         <rect x="450" y="766" width="170" height="106" rx="18" class="box box-amber" />
         <text x="470" y="794" class="label">调度任务 API</text>
@@ -281,7 +281,7 @@
         <rect x="930" y="214" width="340" height="142" rx="18" class="box box-cyan" />
         <text x="950" y="242" class="label">rpc-manager.ts</text>
         <text x="950" y="266" class="small">AgentSessionWrapper 注册表</text>
-        <text x="950" y="286" class="small">globalThis.__piSessions / __piStartLocks</text>
+        <text x="950" y="286" class="small">globalThis.__deerhuxSessions / __deerhuxStartLocks</text>
         <text x="950" y="306" class="small">idle timeout、事件订阅、fork 后销毁 wrapper</text>
         <text x="950" y="328" class="tiny mono">lib/rpc-manager.ts</text>
 
@@ -322,11 +322,11 @@
 
         <rect x="108" y="1030" width="210" height="34" rx="14" class="pill" />
         <circle cx="128" cy="1047" r="5" class="dot-green" />
-        <text x="144" y="1051" class="small mono">~/.pi/agent/sessions/*.jsonl</text>
+        <text x="144" y="1051" class="small mono">~/.deerhux/agent/sessions/*.jsonl</text>
 
         <rect x="382" y="1030" width="216" height="34" rx="14" class="pill" />
         <circle cx="402" cy="1047" r="5" class="dot-violet" />
-        <text x="418" y="1051" class="small mono">~/.pi/agent/*.json</text>
+        <text x="418" y="1051" class="small mono">~/.deerhux/agent/*.json</text>
 
         <rect x="660" y="1030" width="170" height="34" rx="14" class="pill" />
         <circle cx="680" cy="1047" r="5" class="dot-blue" />
@@ -406,9 +406,9 @@
     </section>
 
     <section class="legend" aria-label="diagram notes">
-      <div class="legend-card"><b>绿色链路：会话浏览</b><br />直接读取 <code>~/.pi/agent/sessions</code> 下 JSONL，不创建 AgentSession。</div>
+      <div class="legend-card"><b>绿色链路：会话浏览</b><br />直接读取 <code>~/.deerhux/agent/sessions</code> 下 JSONL，不创建 AgentSession。</div>
       <div class="legend-card"><b>青色链路：实时对话</b><br />POST 命令进入 <code>rpc-manager</code>，创建/复用进程内 AgentSession，并通过 SSE 回推事件。</div>
-      <div class="legend-card"><b>紫色链路：配置能力</b><br />模型、角色、系统提示词、MCP、Memory、Skills 等面板对应独立 API 与 <code>~/.pi/agent</code> 配置文件。</div>
+      <div class="legend-card"><b>紫色链路：配置能力</b><br />模型、角色、系统提示词、MCP、Memory、Skills 等面板对应独立 API 与 <code>~/.deerhux/agent</code> 配置文件。</div>
       <div class="legend-card"><b>琥珀/玫瑰链路：任务扩展</b><br />Scheduler 使用 node-cron；parallel/isolated runs 使用 orchestrator、worker session 与 worktree 执行。</div>
     </section>
   </main>

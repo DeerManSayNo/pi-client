@@ -1,6 +1,8 @@
 // ============================================================================
 // Next.js Instrumentation — runs once at server startup
-// - Ensures default skills are installed to ~/.pi/agent/skills/
+// - Migrates legacy ~/.pi/agent data into ~/.deerhux/agent on first startup
+// - Sets DeerHux agent dir to ~/.deerhux/agent so the runtime uses DeerHux paths
+// - Ensures default skills are installed to ~/.deerhux/agent/skills/
 // - Registers the scheduler engine for cron-based task execution
 // ============================================================================
 
@@ -12,7 +14,20 @@ export async function register() {
 
     const home = process.env.HOME || process.env.USERPROFILE;
     if (home) {
-      const targetDir = path.join(home, ".pi", "agent", "skills");
+      const { migratePiAgentDir } = await import("./lib/legacy-migration");
+      migratePiAgentDir(home);
+
+      // Set agent directory to DeerHux path before any pi-coding-agent module calls getAgentDir()
+      const deerhuxAgentDir = path.join(home, ".deerhux", "agent");
+      if (!process.env.DEERHUX_CODING_AGENT_DIR) {
+        process.env.DEERHUX_CODING_AGENT_DIR = deerhuxAgentDir;
+      }
+      // Backward-compatible fallback for unpatched @earendil-works/pi-coding-agent builds.
+      if (!process.env.PI_CODING_AGENT_DIR) {
+        process.env.PI_CODING_AGENT_DIR = deerhuxAgentDir;
+      }
+
+      const targetDir = path.join(home, ".deerhux", "agent", "skills");
       fs.mkdirSync(targetDir, { recursive: true });
 
       // Resolve the bundled skills directory.

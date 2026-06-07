@@ -29,9 +29,9 @@ class AgentEventBus {
   }
 }
 
-const globalForBus = globalThis as unknown as { __piAgentEventBus?: AgentEventBus };
-if (!globalForBus.__piAgentEventBus) {
-  globalForBus.__piAgentEventBus = new AgentEventBus();
+const globalForBus = globalThis as unknown as { __deerhuxAgentEventBus?: AgentEventBus };
+if (!globalForBus.__deerhuxAgentEventBus) {
+  globalForBus.__deerhuxAgentEventBus = new AgentEventBus();
 }
 
-export const agentEventBus = globalForBus.__piAgentEventBus;
+export const agentEventBus = globalForBus.__deerhuxAgentEventBus;

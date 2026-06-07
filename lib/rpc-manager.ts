@@ -1,8 +1,8 @@
 import path from "path";
 import { createAgentSession, defineTool, SessionManager } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { cacheSessionPath } from "./session-reader";
-import type { AgentSessionLike, ToolInfo } from "./pi-types";
+import { cacheSessionPath, invalidateSessionListCache } from "./session-reader";
+import type { AgentSessionLike, ToolInfo } from "./deerhux-types";
 import { getLiveIslandClient } from "./live-island-client";
 import { applyRolePromptToSystemPrompt } from "./roles";
 import { applyRolePromptConfigToPrompt, isRoleSystemPromptSectionEnabled } from "./system-prompt-decomposer";
@@ -80,7 +80,7 @@ function resolveChangedFilePath(filePath: string, cwd: string): string | null {
 function setEffectiveSystemPrompt(session: AgentSessionLike, prompt: string): void {
   if (session.agent.state) session.agent.state.systemPrompt = prompt;
 
-  // pi's AgentSession.prompt() resets agent.state.systemPrompt back to its
+  // DeerHux's AgentSession.prompt() resets agent.state.systemPrompt back to its
   // private _baseSystemPrompt before every turn. If we only mutate state here,
   // the UI preview looks correct but the next new prompt silently uses the old
   // built-in prompt again. Keep the base prompt in sync as well.
@@ -461,7 +461,7 @@ export class AgentSessionWrapper {
         let model = registry.find(provider, modelId);
 
         // Existing AgentSession instances keep the ModelRegistry they were
-        // created with. If ~/.pi/agent/models.json was edited while this
+        // created with. If ~/.deerhux/agent/models.json was edited while this
         // wrapper is alive, the UI may already show the new model (loaded via
         // /api/models) but the stale in-memory registry cannot find it. Try a
         // fresh registry before failing so newly-saved models are selectable
@@ -505,6 +505,7 @@ export class AgentSessionWrapper {
 
         const newSessionId = SessionManager.open(newSessionFile, sessionDir).getSessionId();
         cacheSessionPath(newSessionId, newSessionFile);
+        invalidateSessionListCache();
         this.destroy();
         return { cancelled: false, newSessionId };
       }
@@ -527,7 +528,7 @@ export class AgentSessionWrapper {
       }
 
       case "compact": {
-        // pi's compact() does not guard against empty messagesToSummarize — use findCutPoint
+        // DeerHux's compact() does not guard against empty messagesToSummarize — use findCutPoint
         // to pre-check and throw a clean error instead of generating a useless empty summary.
         const { findCutPoint, DEFAULT_COMPACTION_SETTINGS } = await import("@earendil-works/pi-coding-agent");
         const pathEntries = this.inner.sessionManager.getBranch() as Array<{ type: string }>;
@@ -614,24 +615,24 @@ export class AgentSessionWrapper {
 // ============================================================================
 
 declare global {
-  var __piSessions: Map<string, AgentSessionWrapper> | undefined;
-  var __piStartLocks: Map<string, Promise<{ session: AgentSessionWrapper; realSessionId: string }>> | undefined;
+  var __deerhuxSessions: Map<string, AgentSessionWrapper> | undefined;
+  var __deerhuxStartLocks: Map<string, Promise<{ session: AgentSessionWrapper; realSessionId: string }>> | undefined;
 }
 
 function getRegistry(): Map<string, AgentSessionWrapper> {
-  if (!globalThis.__piSessions) {
-    globalThis.__piSessions = new Map();
-    const cleanup = () => globalThis.__piSessions?.forEach((s) => s.destroy());
+  if (!globalThis.__deerhuxSessions) {
+    globalThis.__deerhuxSessions = new Map();
+    const cleanup = () => globalThis.__deerhuxSessions?.forEach((s) => s.destroy());
     process.once("exit", cleanup);
     process.once("SIGINT", cleanup);
     process.once("SIGTERM", cleanup);
   }
-  return globalThis.__piSessions;
+  return globalThis.__deerhuxSessions;
 }
 
 function getLocks(): Map<string, Promise<{ session: AgentSessionWrapper; realSessionId: string }>> {
-  if (!globalThis.__piStartLocks) globalThis.__piStartLocks = new Map();
-  return globalThis.__piStartLocks;
+  if (!globalThis.__deerhuxStartLocks) globalThis.__deerhuxStartLocks = new Map();
+  return globalThis.__deerhuxStartLocks;
 }
 
 export function getRpcSession(sessionId: string): AgentSessionWrapper | undefined {
@@ -646,7 +647,7 @@ export function listRpcSessionStates(): Array<{ sessionId: string; isStreaming: 
 
 /**
  * Get or create an AgentSession for the given session.
- * For new sessions (sessionFile === ""), pi generates its own id.
+ * For new sessions (sessionFile === ""), DeerHux generates its own id.
  * Pass toolNames to pre-configure active tools (empty array = all tools disabled).
  */
 export async function startRpcSession(
@@ -725,7 +726,7 @@ export async function startRpcSession(
     }
 
     // When all tools are disabled, clear the system prompt entirely.
-    // pi's buildSystemPrompt always produces a non-empty prompt even with no tools;
+    // DeerHux's buildSystemPrompt always produces a non-empty prompt even with no tools;
     // the only way to truly clear it is to call agent.setSystemPrompt directly.
     if (toolNames?.length === 0) {
       setEffectiveSystemPrompt(inner, "");
@@ -737,6 +738,7 @@ export async function startRpcSession(
     const realSessionId = inner.sessionId as string;
     const realSessionFile = inner.sessionFile as string | undefined;
     if (realSessionFile) cacheSessionPath(realSessionId, realSessionFile);
+    if (!sessionFile) invalidateSessionListCache();
 
     wrapper.onDestroy(() => registry.delete(realSessionId));
     registry.set(realSessionId, wrapper);

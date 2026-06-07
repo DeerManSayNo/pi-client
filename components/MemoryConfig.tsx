@@ -36,8 +36,8 @@ export function MemoryConfig({ onClose, cwd }: { onClose: () => void; cwd?: stri
 
   useEffect(() => {
     const handler = () => { load(); };
-    window.addEventListener("pi-agent.roles-updated", handler);
-    return () => window.removeEventListener("pi-agent.roles-updated", handler);
+    window.addEventListener("deerhux.roles-updated", handler);
+    return () => window.removeEventListener("deerhux.roles-updated", handler);
   }, [load]);
 
   const scopes = useMemo<MemoryScope[]>(() => [
@@ -66,7 +66,7 @@ export function MemoryConfig({ onClose, cwd }: { onClose: () => void; cwd?: stri
         const res = await fetch(roleUrl(selected.role.id, requestCwd), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ blocks }) });
         if (res.ok) await load();
       }
-      window.dispatchEvent(new Event("pi-agent.roles-updated"));
+      window.dispatchEvent(new Event("deerhux.roles-updated"));
     } finally { setSaving(false); }
   }, [draft, load, selected, cwd]);
 

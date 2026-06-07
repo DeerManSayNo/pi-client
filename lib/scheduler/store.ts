@@ -1,16 +1,16 @@
 // ============================================================================
-// Task store — JSON file persistence at ~/.pi/agent/scheduled-tasks.json
+// Task store — JSON file persistence at ~/.deerhux/agent/scheduled-tasks.json
 // ============================================================================
 
 import fs from "fs";
 import path from "path";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { ScheduledTask, TaskLog, TaskStore } from "./types";
 
 const MAX_LOGS_PER_TASK = 50;
 
 function getStorePath(): string {
-  const home = process.env.HOME || process.env.USERPROFILE || "/tmp";
-  const dir = path.join(home, ".pi", "agent");
+  const dir = getAgentDir();
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }

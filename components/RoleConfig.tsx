@@ -54,7 +54,7 @@ function cloneBlocks(blocks: Record<string, RoleSetting[]>): Record<string, Role
 }
 
 function notifyRolesUpdated() {
-  window.dispatchEvent(new Event("pi-agent.roles-updated"));
+  window.dispatchEvent(new Event("deerhux.roles-updated"));
 }
 
 function ProjectList({ projects, selectedCwd, onSelect }: { projects: { cwd: string; displayName: string }[]; selectedCwd: string; onSelect: (cwd: string) => void }) {
@@ -195,8 +195,8 @@ export function RoleConfig({ onClose, cwd, projects = [] }: { onClose: () => voi
 
   useEffect(() => {
     const handler = () => { loadRoles(); };
-    window.addEventListener("pi-agent.roles-updated", handler);
-    return () => window.removeEventListener("pi-agent.roles-updated", handler);
+    window.addEventListener("deerhux.roles-updated", handler);
+    return () => window.removeEventListener("deerhux.roles-updated", handler);
   }, [loadRoles]);
 
   useEffect(() => {

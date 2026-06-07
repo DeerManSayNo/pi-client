@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useCallback, useRef, useEffect, useReducer, useMemo } from "react";
+import { getLocalStorageItem } from "@/lib/client-storage";
 import type { AgentMessage, SessionInfo } from "@/lib/types";
 import { normalizeCompletedMessage, normalizeCompletedMessages, normalizeToolCalls } from "@/lib/normalize";
 import { agentEventBus } from "@/lib/agent-event-bus";
@@ -9,7 +10,7 @@ import type { ToolEntry } from "@/components/ToolPanel";
 
 /**
  * Compress expanded skill content back to /skill:name form for display.
- * The pi SDK's _expandSkillCommand replaces /skill:name args with the full
+ * The DeerHux SDK's _expandSkillCommand replaces /skill:name args with the full
  * skill file content when saving to .jsonl. This reverses that expansion
  * purely for display purposes — the model still receives the full content.
  *
@@ -102,24 +103,15 @@ interface ModelsResponse {
   thinkingLevelMaps?: Record<string, Record<string, string | null>>;
 }
 
-let modelsCache: ModelsResponse | null = null;
-let modelsCacheKey: string | null = null;
 let modelsPromise: Promise<ModelsResponse> | null = null;
 
-function fetchModelsCached(cacheKey: string): Promise<ModelsResponse> {
-  if (modelsCache && modelsCacheKey === cacheKey) return Promise.resolve(modelsCache);
-  if (modelsPromise && modelsCacheKey === cacheKey) return modelsPromise;
+function fetchModels(): Promise<ModelsResponse> {
+  if (modelsPromise) return modelsPromise;
 
-  const requestedKey = cacheKey;
-  modelsCacheKey = requestedKey;
-  modelsPromise = fetch("/api/models")
+  modelsPromise = fetch("/api/models", { cache: "no-store" })
     .then((r) => r.json() as Promise<ModelsResponse>)
-    .then((data) => {
-      if (modelsCacheKey === requestedKey) modelsCache = data;
-      return data;
-    })
     .finally(() => {
-      if (modelsCacheKey === requestedKey) modelsPromise = null;
+      modelsPromise = null;
     });
   return modelsPromise;
 }
@@ -258,11 +250,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [watchdogInfo, setWatchdogInfo] = useState<WatchdogInfo | null>(null);
   const [lastModelError, setLastModelError] = useState<string | null>(null);
   const lastModelErrorRef = useRef<string | null>(null);
+  const [modelsConfigVersion, bumpModelsConfigVersion] = useReducer((v: number) => v + 1, 0);
 
   // Auto-recovery mode persisted in localStorage
   const [autoRecoveryMode, setAutoRecoveryModeState] = useState<AutoRecoveryMode>(() => {
     if (typeof window === "undefined") return "conservative";
-    const stored = window.localStorage.getItem("pi-agent.auto-recovery-mode");
+    const stored = getLocalStorageItem("deerhux.auto-recovery-mode");
     return (stored === "off" || stored === "aggressive") ? stored : "conservative";
   });
   const [stallLevel, setStallLevel] = useState<StallLevel>(null);
@@ -498,7 +491,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         dispatch({ type: "start" });
         break;
       case "agent_end": {
-        const currentTurn = turnIdRef.current;
         // If the stale-event protection gate is still open (set by a
         // watchdog recovery cycle that sent abort), and abortCompletedRef
         // has NOT been set yet, this agent_end is from the aborted old
@@ -597,7 +589,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           const normalized = normalizeCompletedMessage(completed);
           setMessages((prev) => {
             // We optimistically append the user's prompt in handleSend/handleFollowUp.
-            // pi may later emit a message_end for that same user message; don't append it again.
+            // DeerHux may later emit a message_end for that same user message; don't append it again.
             if (normalized.role === "user") {
               const completedKey = userContentKey(normalized);
               const lastUser = [...prev].reverse().find((m) => m.role === "user");
@@ -888,11 +880,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // Watchdog thresholds - can be configured via environment variables
   const WATCHDOG_STALE_EVENT_MS = parseInt(process.env.NEXT_PUBLIC_WATCHDOG_STALE_EVENT_MS || '', 10) || 60_000;  // 60 seconds (was 30s)
   const WATCHDOG_STALE_CONTENT_MS = parseInt(process.env.NEXT_PUBLIC_WATCHDOG_STALE_CONTENT_MS || '', 10) || 90_000;  // 90 seconds (was 45s)
-  const WATCHDOG_CHECK_INTERVAL_MS = 5_000;
 
   // Shared recovery flow: abort stuck turn, reload session, send follow_up.
   // Used by both the automatic watchdog (tiered) and the manual "中断并继续" button.
-  const executeRecovery = async (sid: string) => {
+  const executeRecovery = useCallback(async (sid: string) => {
     if (autoContinueSentRef.current) return;
     autoContinueSentRef.current = true;
     setStallLevel("recovering");
@@ -952,7 +943,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setStallLevel(null);
       dispatch({ type: "end" });
     }
-  };
+  }, [connectEvents, loadSession]);
 
   // Keep a lightweight UI-facing counter so users can see when the watchdog is
   // getting close to intervening.
@@ -974,7 +965,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     update();
     const id = setInterval(update, 1000);
     return () => clearInterval(id);
-  }, [agentRunning]);
+  }, [agentRunning, WATCHDOG_STALE_CONTENT_MS, WATCHDOG_STALE_EVENT_MS]);
 
   // Tiered business watchdog: detects stalled model turns and provides
   // configurable auto-recovery (off / conservative / aggressive).
@@ -1085,7 +1076,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
         // Backend still streaming — check tiered actions
         stallRecoveriesRef.current += 1;
-        const iteration = stallRecoveriesRef.current;
 
         // Phase 1: Show warning banner (first detection)
         if (contentIdleMs >= warningMs && stallLevel !== "warning" && stallLevel !== "recovering") {
@@ -1125,7 +1115,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }, CHECK_INTERVAL_MS);
 
     return () => clearInterval(id);
-  }, [agentRunning, autoRecoveryMode, thinkingLevel, connectEvents, loadSession, retryInfo, stallLevel]);
+  }, [agentRunning, autoRecoveryMode, thinkingLevel, connectEvents, loadSession, retryInfo, stallLevel, executeRecovery]);
 
   // Manual recovery trigger — user clicks "中断并继续" when stall warning shown
   const handleAutoRecover = useCallback(async () => {
@@ -1136,7 +1126,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // is actively engaged and the watchdog should get a fresh allowance.
     autoRecoveryAttemptsRef.current = 0;
     await executeRecovery(sid);
-  }, []);
+  }, [executeRecovery]);
 
   // User dismissed the stall warning — suppress further escalation this turn
   const handleDismissStall = useCallback(() => {
@@ -1148,7 +1138,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const handleAutoRecoveryModeChange = useCallback((mode: AutoRecoveryMode) => {
     setAutoRecoveryModeState(mode);
     if (typeof window !== "undefined") {
-      window.localStorage.setItem("pi-agent.auto-recovery-mode", mode);
+      window.localStorage.setItem("deerhux.auto-recovery-mode", mode);
     }
   }, []);
 
@@ -1165,7 +1155,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const handleThinkingLevelChange = useCallback(async (level: ThinkingLevelOption) => {
     const previousLevel = thinkingLevel;
     setThinkingLevel(level);
-    if (level === "auto") return; // "auto" leaves pi's current setting untouched
+    if (level === "auto") return; // "auto" leaves DeerHux's current setting untouched
     const sid = sessionIdRef.current;
     if (!sid) return;
     try {
@@ -1206,14 +1196,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     container.scrollTo({ top: elAbsTop - 16, behavior: "smooth" });
   }, []);
 
+  const activeSessionId = session?.id;
+
   // Load or reset session when the active tab changes. Previously AppShell
   // forced a full ChatWindow remount via key={sessionKey}; responding to prop
   // changes here keeps the component tree alive and makes tab switches cheaper.
   useEffect(() => {
+    const sessionId = activeSessionId;
     // If a brand-new session just received its real id, handleSend has already
     // connected SSE and populated optimistic messages. Do not tear it down just
     // because AppShell replaced the placeholder tab with the real session tab.
-    if (session?.id && session.id === sessionIdRef.current) return;
+    if (sessionId && sessionId === sessionIdRef.current) return;
 
     let cancelled = false;
 
@@ -1250,7 +1243,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setWatchdogInfo(null);
     dispatch({ type: "reset" });
 
-    if (!session) {
+    if (!sessionId) {
       sessionIdRef.current = null;
       setData(null);
       setMessages([]);
@@ -1263,7 +1256,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       return () => { cancelled = true; };
     }
 
-    sessionIdRef.current = session.id;
+    sessionIdRef.current = sessionId;
     setData(null);
     setMessages([]);
     setEntryIds([]);
@@ -1272,10 +1265,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setAgentRunning(false);
     setError(null);
 
-    loadSession(session.id, true, true).then((agentState) => {
-      if (cancelled || sessionIdRef.current !== session.id) return;
+    loadSession(sessionId, true, true).then((agentState) => {
+      if (cancelled || sessionIdRef.current !== sessionId) return;
       if (agentState?.running) {
-        loadTools(session.id);
+        loadTools(sessionId);
         // Reconnect SSE whenever a turn is active — isRunning stays true
         // across gaps (waiting-for-model, between tool batches, auto-retry
         // backoff) where isStreaming is temporarily false.
@@ -1284,7 +1277,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           agentRunningRef.current = true;
           setAgentRunning(true);
           setAgentPhase({ kind: "waiting_model" });
-          connectEvents(session.id);
+          connectEvents(sessionId);
         }
       }
       if (agentState?.state) {
@@ -1300,7 +1293,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       eventSourceRef.current?.close();
       eventSourceRef.current = null;
     };
-  }, [connectEvents, loadSession, loadTools, activeTabId, newSessionCwd, session?.id]);
+  }, [connectEvents, loadSession, loadTools, activeTabId, newSessionCwd, activeSessionId]);
 
   useEffect(() => {
     onSystemPromptChange?.(systemPrompt);
@@ -1321,10 +1314,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [messages.length, agentRunning, scrollToBottom, scrollUserMsgToTop]);
 
-  // Load model list (cached across ChatWindow tab switches)
+  // Load the configured model list fresh so ChatInput tracks ModelsConfig.
   useEffect(() => {
     let cancelled = false;
-    fetchModelsCached(String(modelsRefreshKey ?? 0)).then((d) => {
+    fetchModels().then((d) => {
       if (cancelled) return;
       setModelNames(d.models);
       if (d.thinkingLevels) setModelThinkingLevels(d.thinkingLevels);
@@ -1342,7 +1335,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
     }).catch(() => {});
     return () => { cancelled = true; };
-  }, [isNew, modelsRefreshKey, setNewSessionModel]);
+  }, [isNew, modelsRefreshKey, modelsConfigVersion, setNewSessionModel]);
+
+  useEffect(() => {
+    window.addEventListener("deerhux.models-updated", bumpModelsConfigVersion);
+    return () => window.removeEventListener("deerhux.models-updated", bumpModelsConfigVersion);
+  }, []);
 
   // Compact error auto-dismiss
   useEffect(() => {

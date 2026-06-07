@@ -1,6 +1,6 @@
-# Pi Agent 并发搜索与编辑改造方案
+# DeerHux 并发搜索与编辑改造方案
 
-> 基于当前 `pi-agent` Web 项目与 `@earendil-works/pi-coding-agent` SDK 的可落地方案。
+> 基于当前 `DeerHux` Web 项目与 `@earendil-works/pi-coding-agent` SDK 的可落地方案。
 >
 > 并行化分四个阶段推进：代码索引 → SDK 只读并行 → 只读并行 Agent → 隔离编辑 Agent。每个阶段独立可交付。
 
@@ -109,7 +109,7 @@ Phase 4 额外：
 ### 索引存储
 
 ```txt
-~/.pi/agent/indexes/<cwd-hash>.sqlite
+~/.deerhux/agent/indexes/<cwd-hash>.sqlite
 ```
 
 不放项目目录内，避免污染用户仓库。`cwd-hash` 用 `crypto.createHash("sha256").update(cwd).digest("hex").slice(0, 12)` 生成。
@@ -326,7 +326,7 @@ SDK 并行执行时会发出多个 `tool_execution_start` / `tool_execution_end`
 
 每个 worker 必须是独立 session，不能复用 `AgentSessionWrapper`。
 
-原因：`AgentSessionWrapper` 是 one-per-session-id 设计，`globalThis.__piSessions` 维护长生命周期 wrapper。多 worker 共用会破坏状态和事件流。
+原因：`AgentSessionWrapper` 是 one-per-session-id 设计，`globalThis.__deerhuxSessions` 维护长生命周期 wrapper。多 worker 共用会破坏状态和事件流。
 
 ```ts
 // lib/parallel-agent/worker-session.ts
@@ -470,14 +470,14 @@ lib/parallel-agent/
 优先使用 git worktree：
 
 ```txt
-git worktree add /tmp/pi-agent-runs/<run-id>/worker-1 HEAD
-git worktree add /tmp/pi-agent-runs/<run-id>/worker-2 HEAD
+git worktree add /tmp/deerhux-runs/<run-id>/worker-1 HEAD
+git worktree add /tmp/deerhux-runs/<run-id>/worker-2 HEAD
 ```
 
 非 git 项目回退到临时目录复制。
 
 ```txt
-/tmp/pi-agent-runs/<run-id>/
+/tmp/deerhux-runs/<run-id>/
   worker-1/    # git worktree 或复制的仓库
   worker-2/
   worker-3/
@@ -603,7 +603,7 @@ UI 需要支持：
 
 ### 3. 并行 worker 占用 registry
 
-**风险**：worker 完成后不销毁，占用 `globalThis.__piSessions` 直到 10 分钟 idle timeout。
+**风险**：worker 完成后不销毁，占用 `globalThis.__deerhuxSessions` 直到 10 分钟 idle timeout。
 
 **对策**：worker 完成后立即调用 `wrapper.destroy()`，orchestrator 在 `finally` 块中保证清理。
 
@@ -611,7 +611,7 @@ UI 需要支持：
 
 **风险**：索引文件误放项目目录。
 
-**对策**：统一放 `~/.pi/agent/indexes/<cwd-hash>.sqlite`，代码中硬编码路径规则。
+**对策**：统一放 `~/.deerhux/agent/indexes/<cwd-hash>.sqlite`，代码中硬编码路径规则。
 
 ### 5. 并行编辑覆盖用户改动
 

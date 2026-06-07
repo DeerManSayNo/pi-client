@@ -4,9 +4,9 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { composeGlobalMemoryPrompt } from "./memory";
 
 /**
- * Decompose pi's built-in system prompt into structured, configurable sections.
+ * Decompose DeerHux's built-in system prompt into structured, configurable sections.
  *
- * pi's buildSystemPrompt() produces a well-known format with these section
+ * DeerHux's buildSystemPrompt() produces a well-known format with these section
  * boundaries. This module parses that format back into sections and can
  * re-compose a custom prompt from a subset of sections.
  */
@@ -70,12 +70,6 @@ const SECTION_SPECS: Omit<SystemPromptSection, "content" | "enabled">[] = [
     editable: true,
   },
   {
-    id: "pi_docs",
-    label: "Pi 文档指引",
-    description: "pi 相关文档的路径和查阅指引",
-    editable: true,
-  },
-  {
     id: "project_context",
     label: "项目上下文",
     description: "来自 AGENTS.md 等项目文件的项目级指令",
@@ -108,10 +102,9 @@ const SECTION_SPECS: Omit<SystemPromptSection, "content" | "enabled">[] = [
 ];
 
 const DEFAULT_SECTION_CONTENT: Record<string, string> = {
-  identity: "You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.",
+  identity: "You are an expert coding assistant operating inside DeerHux, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.",
   tools: "Available tools:\n[自动生成：根据当前会话启用的工具生成工具列表]",
   guidelines: "Guidelines:\n- Be concise in your responses\n- Show file paths clearly when working with files",
-  pi_docs: "Pi documentation (read only when the user asks about pi itself, its SDK, extensions, themes, skills, or TUI):\n[自动生成：pi 文档路径和相关查阅规则]",
   project_context: "<project_context>\n[自动生成：来自 AGENTS.md 等项目上下文文件]\n</project_context>",
   skills: "<available_skills>\n[自动生成：当前可用 skills 列表]\n</available_skills>",
   date_cwd: "Current date: [自动生成]\nCurrent working directory: [自动生成]",
@@ -151,7 +144,7 @@ function extractBetweenTags(text: string, tag: string): string | null {
 }
 
 /**
- * Check if text contains the pi role profile markers.
+ * Check if text contains the DeerHux role profile markers.
  */
 function hasRoleProfile(text: string): boolean {
   return text.includes("<!-- PI_ROLE_PROFILE_START -->");
@@ -161,7 +154,7 @@ function hasRoleProfile(text: string): boolean {
 
 /**
  * Decompose a full system prompt string into its sections.
- * Parses based on pi's known buildSystemPrompt output format.
+ * Parses based on DeerHux's known buildSystemPrompt output format.
  * Sections that aren't found in the prompt get empty content and disabled=false.
  */
 export function decomposeSystemPrompt(fullPrompt: string): SystemPromptSection[] {
@@ -214,22 +207,10 @@ export function decomposeSystemPrompt(fullPrompt: string): SystemPromptSection[]
 
       case "guidelines": {
         // Guidelines section: "Guidelines:" to next major section
-        // After guidelines comes: blank line + "Pi documentation" or blank line + "---" or project_context or skills
-        const glMatch = remaining.match(/Guidelines:\n([\s\S]*?)(?=\n\nPi documentation|\n\n<project_context>|\n\n<available_skills>|\n\nCurrent date:|\n\n<!-- PI_ROLE|$)/);
+        const glMatch = remaining.match(/Guidelines:\n([\s\S]*?)(?=\n\n<project_context>|\n\n<available_skills>|\n\nCurrent date:|\n\n<!-- PI_ROLE|$)/);
         if (glMatch) {
           content = `Guidelines:\n${glMatch[1].trim()}`;
           remaining = remaining.slice(glMatch[0].length);
-          found = true;
-        }
-        break;
-      }
-
-      case "pi_docs": {
-        // Pi documentation: starts with "Pi documentation" and goes until next section
-        const piMatch = remaining.match(/(Pi documentation[\s\S]*?)(?=\n\n<project_context>|\n\n<available_skills>|\n\nCurrent date:|\n\n<!-- PI_ROLE|$)/);
-        if (piMatch) {
-          content = piMatch[1].trim();
-          remaining = remaining.slice(piMatch[0].length);
           found = true;
         }
         break;
@@ -591,7 +572,9 @@ export function isRoleSystemPromptSectionEnabled(roleId: string | null | undefin
 
 export function applyRolePromptConfigToPrompt(prompt: string, roleId?: string | null): string {
   const config = readRoleSystemPromptConfig(roleId);
-  let result = prompt;
+  // Strip DeerHux's internal documentation section from the raw prompt permanently.
+  // This section tells the LLM where DeerHux's docs are — unnecessary token waste for users.
+  let result = prompt.replace(/\n\nPi documentation[\s\S]*?(?=\n\n<project_context>|\n\n<available_skills>|\n\nCurrent date:|\n\n<!-- PI_ROLE|$)/, "");
   if (config.sections.length > 0) {
     const live = decomposeSystemPrompt(prompt);
     const merged = applySectionOverrides(live, config.sections);

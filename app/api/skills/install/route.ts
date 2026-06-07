@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
+import { homedir } from "os";
 import { runNpx } from "@/lib/npx";
+import { syncSkillsFromPiToDeerhux } from "@/lib/legacy-migration";
 
 export const dynamic = "force-dynamic";
 
@@ -12,6 +14,7 @@ export async function POST(req: Request) {
     if (!pkg?.trim()) return NextResponse.json({ error: "package required" }, { status: 400 });
 
     const isGlobal = scope !== "project";
+    // skills CLI only knows the legacy "pi" agent id; installs land under .pi paths.
     const args = ["skills", "add", pkg.trim(), "-y", "--agent", "pi"];
     if (isGlobal) args.push("-g");
 
@@ -27,7 +30,16 @@ export async function POST(req: Request) {
     if (!success) {
       return NextResponse.json({ error: output.slice(-300) || "Install failed" }, { status: 500 });
     }
-    return NextResponse.json({ success: true, output });
+
+    const synced = syncSkillsFromPiToDeerhux(homedir(), {
+      isGlobal,
+      cwd: !isGlobal && cwd ? cwd : undefined,
+    });
+    if (synced > 0) {
+      console.log(`[skills/install] relocated ${synced} skill(s) from .pi → .deerhux`);
+    }
+
+    return NextResponse.json({ success: true, output, synced });
   } catch (e: unknown) {
     const err = e as { stdout?: string; stderr?: string; message?: string };
     const output = ((err.stdout ?? "") + (err.stderr ?? "")).replace(ANSI_RE, "");

@@ -1,8 +1,8 @@
 /**
- * Live Island bridge client for pi-agent.
+ * Live Island bridge client for DeerHux.
  *
  * Connects to AIControls' Live Island TCP listener (127.0.0.1:38971) and
- * reports agent session events so pi-agent sessions appear in the macOS
+ * reports agent session events so DeerHux sessions appear in the macOS
  * 灵动岛 alongside Claude Code sessions.
  *
  * Protocol: same JSON-line format as AIControls' live-island-bridge.mjs.
@@ -24,9 +24,9 @@ const RECONNECT_DELAY_MS = 2000;
 const DONE_RETRACT_MS = 5_000;
 const MAX_DETAIL_LENGTH = 56;
 
-const PI_AGENT_BUNDLE_ID = "com.deermansayno.pi-agent";
-const PI_AGENT_APP_NAME = "pi-agent";
-const AICONTROLS_PI_AGENT_EXTENSION = `${homedir()}/.pi/agent/extensions/aicontrols-bridge.js`;
+const DEERHUX_BUNDLE_ID = "com.deermansayno.deerhux";
+const DEERHUX_APP_NAME = "DeerHux";
+const AICONTROLS_DEERHUX_EXTENSION = `${homedir()}/.deerhux/agent/extensions/aicontrols-bridge.js`;
 
 // ---------------------------------------------------------------------------
 // Types (matching AIControls live_island.rs LiveIslandEvent)
@@ -90,7 +90,7 @@ function nowMs(): number {
 }
 
 function projectNameFromCwd(cwd: string): string {
-  if (!cwd) return "pi-agent";
+  if (!cwd) return "DeerHux";
   const name = basename(cwd.replace(/\/+$/, ""));
   const metaDirs = new Set([
     ".claude", ".cursor", ".codex", ".hermes", ".openclaw",
@@ -102,12 +102,12 @@ function projectNameFromCwd(cwd: string): string {
       if (parts[i] && !metaDirs.has(parts[i])) return parts[i];
     }
   }
-  return name || "pi-agent";
+  return name || "DeerHux";
 }
 
-function hasAIControlsPiAgentExtension(): boolean {
-  if (process.env.PI_AGENT_LIVE_ISLAND_FORCE === "1") return false;
-  return existsSync(AICONTROLS_PI_AGENT_EXTENSION);
+function hasAIControlsDeerHuxExtension(): boolean {
+  if (process.env.DEERHUX_LIVE_ISLAND_FORCE === "1") return false;
+  return existsSync(AICONTROLS_DEERHUX_EXTENSION);
 }
 
 // ---------------------------------------------------------------------------
@@ -120,7 +120,7 @@ function toolToStatus(toolName: string, input: Record<string, unknown> = {}): { 
     ? name.split("__").filter(Boolean).slice(1).join(" · ")
     : name;
 
-  // Normalize known pi-agent tool names (pi SDK uses lowercase with optional prefixes)
+  // Normalize known deerhux tool names (DeerHux SDK uses lowercase with optional prefixes)
   if (name === "read" || name.endsWith("_read")) {
     return { status: "reading", detail: truncate(`Read · ${basename(String(input.file_path ?? input.path ?? "")) || "file"}`, MAX_DETAIL_LENGTH) };
   }
@@ -157,17 +157,17 @@ class LiveIslandClient {
   private pendingRemovals = new Map<string, ReturnType<typeof setTimeout>>();
   private disposed = false;
   private disabled = false;
-  private logPrefix = "[pi-agent-live-island]";
+  private logPrefix = "[deerhux-live-island]";
 
   private log(msg: string): void {
     console.error(`${this.logPrefix} ${msg}`);
   }
 
   start(): void {
-    if (hasAIControlsPiAgentExtension()) {
+    if (hasAIControlsDeerHuxExtension()) {
       this.disabled = true;
       this.disposed = true;
-      this.log(`bridge disabled; AIControls pi-agent extension is installed at ${AICONTROLS_PI_AGENT_EXTENSION}`);
+      this.log(`bridge disabled; AIControls deerhux extension is installed at ${AICONTROLS_DEERHUX_EXTENSION}`);
       return;
     }
     this.disabled = false;
@@ -186,7 +186,7 @@ class LiveIslandClient {
     this.pendingRemovals.clear();
   }
 
-  /** Register a pi-agent session. Called by AgentSessionWrapper.start(). */
+  /** Register a deerhux session. Called by AgentSessionWrapper.start(). */
   trackSession(sessionId: string, cwd: string): void {
     if (this.disabled) return;
     if (this.sessions.has(sessionId)) return;
@@ -220,7 +220,7 @@ class LiveIslandClient {
     }
   }
 
-  /** Handle a pi-agent event for a session. */
+  /** Handle a deerhux event for a session. */
   handleEvent(sessionId: string, cwd: string, event: AgentEvent): void {
     if (this.disabled) return;
     if (this.disposed) return;
@@ -321,8 +321,8 @@ class LiveIslandClient {
       frozenElapsed: session.finished ? (session.frozenElapsed ?? nowMs() - session.startedAt) : null,
       frozenDetailElapsed: session.finished ? (session.frozenDetailElapsed ?? nowMs() - session.detailStartedAt) : null,
       cwd: session.cwd,
-      appBundleId: PI_AGENT_BUNDLE_ID,
-      appName: PI_AGENT_APP_NAME,
+      appBundleId: DEERHUX_BUNDLE_ID,
+      appName: DEERHUX_APP_NAME,
       appPid: null,
     };
   }
@@ -345,7 +345,7 @@ class LiveIslandClient {
     session.startedAt = nowMs();
     session.detailStartedAt = session.startedAt;
     session.islandStatus = "thinking";
-    session.islandDetail = "Thinking · pi-agent";
+    session.islandDetail = "Thinking · DeerHux";
 
     this.log(`agent_start: ${session.id.substring(0, 8)} project=${session.project}`);
     this.write(this.buildUpdate(session));

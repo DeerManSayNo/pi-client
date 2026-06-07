@@ -1,5 +1,5 @@
 #![cfg_attr(all(not(debug_assertions), target_os = "windows"), windows_subsystem = "windows")]
 
 fn main() {
-    pi_agent_lib::run()
+    deerhux_lib::run()
 }

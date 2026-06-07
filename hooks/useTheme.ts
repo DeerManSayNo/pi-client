@@ -45,7 +45,7 @@ export function useTheme() {
         document.documentElement.classList.remove("dark");
       }
       try {
-        localStorage.setItem("pi-theme", next);
+        localStorage.setItem("deerhux-theme", next);
       } catch {
         // ignore storage errors (private mode, quota, etc.)
       }

@@ -3,6 +3,7 @@ import { existsSync, readFileSync, writeFileSync, rmdirSync, unlinkSync } from "
 import { DefaultResourceLoader, getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import path from "path";
 import { readdirSync } from "fs";
+import { migrateProjectAgentsDir } from "@/lib/legacy-migration";
 
 export const dynamic = "force-dynamic";
 
@@ -21,13 +22,14 @@ interface SkillWithMeta {
 
 // GET /api/skills?cwd=<path>
 // Uses DefaultResourceLoader (same logic as AgentSession startup) so settings.json
-// skill paths, package skills, and .agents/skills directories are all included.
+// skill paths, package skills, and .deerhux/skills directories are all included.
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
   const cwd = searchParams.get("cwd");
   if (!cwd) return NextResponse.json({ error: "cwd required" }, { status: 400 });
 
   try {
+    migrateProjectAgentsDir(cwd);
     const loader = new DefaultResourceLoader({ cwd, agentDir: getAgentDir() });
     await loader.reload();
     const { skills, diagnostics } = loader.getSkills();

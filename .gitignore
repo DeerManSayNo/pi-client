@@ -40,9 +40,16 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 .factory
+__pycache__/
+*.py[cod]
+
+# local agent/runtime state
+/.codegraph/daemon.pid
+/.deerhux/.deerhux/
+/.deerhux/legacy-config/
 
 # tauri
 /src-tauri/target/
 /src-tauri/binaries/
 placeholder-dist/
-/.pi-build-home/
+/.deerhux-build-home/

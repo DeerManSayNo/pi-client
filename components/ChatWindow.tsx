@@ -167,7 +167,7 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, onAgentEnd, on
     if (!data) return;
     const loadedRoleId = data.context.roleId || "default";
     setCurrentRoleId(loadedRoleId);
-    localStorage.setItem("pi-agent.current-role", loadedRoleId);
+    localStorage.setItem("deerhux.current-role", loadedRoleId);
     if (data.context.roleId) void applyRoleToSession(loadedRoleId);
   }, [data, applyRoleToSession]);
 
@@ -175,13 +175,13 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, onAgentEnd, on
     const handler = () => {
       void applyRoleToSession(currentRoleId);
     };
-    window.addEventListener("pi-agent.roles-updated", handler);
-    return () => window.removeEventListener("pi-agent.roles-updated", handler);
+    window.addEventListener("deerhux.roles-updated", handler);
+    return () => window.removeEventListener("deerhux.roles-updated", handler);
   }, [applyRoleToSession, currentRoleId]);
 
   const handleRoleChange = useCallback((roleId: string) => {
     setCurrentRoleId(roleId);
-    localStorage.setItem("pi-agent.current-role", roleId);
+    localStorage.setItem("deerhux.current-role", roleId);
     void applyRoleToSession(roleId);
   }, [applyRoleToSession]);
 
@@ -613,7 +613,7 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, onAgentEnd, on
             >
               <div style={{ display: "flex", alignItems: "baseline", gap: 10, minWidth: 0, flex: 1, lineHeight: 1.4 }}>
                 <span style={{ fontSize: 28, fontWeight: 700, letterSpacing: "-0.02em", color: "var(--text)" }}>π</span>
-                <span style={{ fontSize: 22, color: "var(--text)", fontWeight: 700, letterSpacing: "-0.01em" }}>Pi Client</span>
+                <span style={{ fontSize: 22, color: "var(--text)", fontWeight: 700, letterSpacing: "-0.01em" }}>DeerHux</span>
                 <span style={{ fontSize: 14, minWidth: 0, overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis" }}>
                   <Typewriter phrases={TYPEWRITER_PHRASES} />
                 </span>
@@ -623,7 +623,7 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, onAgentEnd, on
                   web <span style={{ color: "var(--text)" }}>v{process.env.NEXT_PUBLIC_APP_VERSION ?? "0.0.0"}</span>
                 </span>
                 <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
-                  pi <span style={{ color: "var(--text)" }}>v{process.env.NEXT_PUBLIC_PI_VERSION ?? "0.0.0"}</span>
+                  core <span style={{ color: "var(--text)" }}>v{process.env.NEXT_PUBLIC_CORE_VERSION ?? "0.0.0"}</span>
                 </span>
               </div>
             </div>

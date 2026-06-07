@@ -53,9 +53,9 @@ function subGroupDisplay(key: string): string {
   if (key.startsWith("/") || key.startsWith("~")) {
     // Extract the last meaningful directory name
     const parts = key.replace(/\/+$/, "").split("/");
-    // e.g. ~/.pi/agent/skills → "pi/agent/skills", ~/.agents → ".agents"
+    // e.g. ~/.deerhux/agent/skills → "deerhux/agent/skills", ~/.deerhux → ".deerhux"
     // Show last 1-2 segments that help distinguish
-    const homeIdx = parts.findIndex((p) => p === "~" || p === ".pi" || p === ".agents");
+    const homeIdx = parts.findIndex((p) => p === "~" || p === ".deerhux");
     if (homeIdx >= 0) {
       return parts.slice(homeIdx).join("/");
     }
@@ -437,8 +437,8 @@ function AddSkillPanel({
 
   const installPath =
     scope === "global"
-      ? "~/.pi/agent/skills/"
-      : `${shortenPath(cwd)}/.pi/agent/skills/`;
+      ? "~/.deerhux/agent/skills/"
+      : `${shortenPath(cwd)}/.deerhux/skills/`;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>

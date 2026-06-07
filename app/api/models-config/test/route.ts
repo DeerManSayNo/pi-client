@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { completeSimple, type AssistantMessage } from "@earendil-works/pi-ai";
+import { completeSimple, type AssistantMessage, type UserMessage } from "@earendil-works/pi-ai";
 import { AuthStorage, ModelRegistry } from "@earendil-works/pi-coding-agent";
 
 export const dynamic = "force-dynamic";
@@ -122,7 +122,7 @@ export async function POST(req: Request) {
     const modelId = typeof body.model.id === "string" ? body.model.id.trim() : "";
     if (!modelId) return NextResponse.json({ ok: false, error: "Model ID is required" }, { status: 400 });
 
-    tempDir = mkdtempSync(join(tmpdir(), "pi-agent-model-test-"));
+    tempDir = mkdtempSync(join(tmpdir(), "deerhux-model-test-"));
     const modelsPath = join(tempDir, "models.json");
     writeFileSync(modelsPath, JSON.stringify({
       providers: {
@@ -154,7 +154,7 @@ export async function POST(req: Request) {
       const isImageTest = testMode === "image";
 
       // Build user message for text or image test
-      let userContent: string | { type: string; text?: string; source?: unknown }[] = "Reply with OK only.";
+      let userContent: UserMessage["content"] = "Reply with OK only.";
 
       if (isImageTest) {
         const colorName = ["red", "blue", "green"][Math.floor(Math.random() * 3)];
@@ -168,22 +168,20 @@ export async function POST(req: Request) {
           { type: "text", text: `What color is this image? Reply with just the color name in English (one word).` },
           {
             type: "image",
-            source: {
-              type: "base64",
-              media_type: "image/png",
-              data: pngBase64,
-            },
+            data: pngBase64,
+            mimeType: "image/png",
           },
         ];
       }
 
+      const userMessage: UserMessage = {
+        role: "user",
+        content: userContent,
+        timestamp: Date.now(),
+      };
+
       const message = await completeSimple(model, {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        messages: [{
-          role: "user",
-          content: userContent,
-          timestamp: Date.now(),
-        } as any],
+        messages: [userMessage],
       }, {
         apiKey: auth.apiKey,
         headers: auth.headers,

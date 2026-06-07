@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useRef, useState, useCallback, useEffect, useLayoutEffect, useImperativeHandle, forwardRef, KeyboardEvent } from "react";
+import React, { useRef, useState, useCallback, useEffect, useLayoutEffect, useImperativeHandle, useMemo, forwardRef, KeyboardEvent } from "react";
 import type { AutoRecoveryMode, StallLevel } from "@/hooks/useAgentSession";
 
 export interface AttachedImage {
@@ -85,7 +85,7 @@ const TOOL_PRESET_MAP: Record<"off" | "default" | "full", "none" | "default" | "
 
 const THINKING_LEVELS = ["auto", "off", "minimal", "low", "medium", "high", "xhigh"] as const;
 const THINKING_LEVEL_DESC: Record<typeof THINKING_LEVELS[number], string> = {
-  auto: "沿用 pi 默认设置",
+  auto: "沿用 DeerHux 默认设置",
   off: "关闭推理",
   minimal: "最少推理",
   low: "低强度推理",
@@ -400,25 +400,26 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   }, [cancelPendingEnterSend, runSendAction]);
 
   // Filtered skills for the picker
-  const skillPickerFilter = (() => {
+  const skillPickerFilter = useMemo(() => {
     if (!value.startsWith("/") || value.startsWith("/skill:")) return "";
     return value.slice(1).toLowerCase();
-  })();
+  }, [value]);
 
-  const filteredSkills = (() => {
+  const filteredSkills = useMemo(() => {
     if (!skillPickerFilter) return skills;
     const q = skillPickerFilter;
     return skills.filter(
       (s) => s.name.toLowerCase().includes(q) || s.description.toLowerCase().includes(q)
     );
-  })();
+  }, [skillPickerFilter, skills]);
 
-  const globalSkills = filteredSkills.filter((s) => skillScope(s) === "global");
-  const projectSkills = filteredSkills.filter((s) => skillScope(s) === "project");
-  const visibleSkillPickerSkills = [...globalSkills, ...projectSkills];
-  const commonProjectSkills = skills
+  const globalSkills = useMemo(() => filteredSkills.filter((s) => skillScope(s) === "global"), [filteredSkills]);
+  const projectSkills = useMemo(() => filteredSkills.filter((s) => skillScope(s) === "project"), [filteredSkills]);
+  const visibleSkillPickerSkills = useMemo(() => [...globalSkills, ...projectSkills], [globalSkills, projectSkills]);
+
+  const commonProjectSkills = useMemo(() => skills
     .filter((s) => skillScope(s) === "project" && !s.disableModelInvocation)
-    .slice(0, 8);
+    .slice(0, 8), [skills]);
 
   useEffect(() => {
     if (!cwd) {
@@ -527,7 +528,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         }
       }
     },
-    [cancelPendingEnterSend, scheduleEnterSend, skillPickerOpen, handleSkillPickerKeyDown]
+    [cancelPendingEnterSend, scheduleEnterSend, skillPickerOpen, handleSkillPickerKeyDown, selectedSkill]
   );
 
   const handleInput = useCallback(() => {
@@ -639,8 +640,8 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   useEffect(() => {
     loadRoles();
     const handler = () => loadRoles();
-    window.addEventListener("pi-agent.roles-updated", handler);
-    return () => window.removeEventListener("pi-agent.roles-updated", handler);
+    window.addEventListener("deerhux.roles-updated", handler);
+    return () => window.removeEventListener("deerhux.roles-updated", handler);
   }, [loadRoles]);
 
   const selectedRole = roles.find((r) => r.id === currentRoleId) ?? roles.find((r) => r.id === "default");

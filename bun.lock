@@ -2,7 +2,7 @@
   "lockfileVersion": 1,
   "workspaces": {
     "": {
-      "name": "pi-agent",
+      "name": "deerhux",
       "dependencies": {
         "@earendil-works/pi-ai": "^0.75.5",
         "@earendil-works/pi-coding-agent": "^0.75.5",

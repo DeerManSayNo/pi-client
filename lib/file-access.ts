@@ -1,15 +1,20 @@
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { listAllSessions } from "@/lib/session-reader";
 
 const ALLOWED_ROOTS_TTL_MS = 5_000;
 const WINDOWS_ABSOLUTE_RE = /^[a-zA-Z]:[\\/]/;
 
 declare global {
-  var __piAllowedRootsCache: { roots: Set<string>; expiresAt: number } | undefined;
-  var __piAllowedExtraRoots: Set<string> | undefined;
+  var __deerhuxAllowedRootsCache: {
+    roots: Set<string>;
+    expiresAt: number;
+    inflight?: Promise<Set<string>>;
+  } | undefined;
+  var __deerhuxAllowedExtraRoots: Set<string> | undefined;
 }
+
+const LEGACY_DEFAULT_CWD_RE = /^(?:deerhux-cwd|pi-cwd)(?:-\d{8})?$/;
 
 function normalizeSlashes(filePath: string): string {
   return filePath.replace(/\\/g, "/");
@@ -40,23 +45,20 @@ export function filePathFromSegments(segments: string[]): string {
 export function addAllowedRoot(root: string | null | undefined): void {
   if (!root) return;
   const normalized = normalizeRoot(root);
-  if (!globalThis.__piAllowedExtraRoots) globalThis.__piAllowedExtraRoots = new Set();
-  globalThis.__piAllowedExtraRoots.add(normalized);
-  globalThis.__piAllowedRootsCache?.roots.add(normalized);
+  if (!globalThis.__deerhuxAllowedExtraRoots) globalThis.__deerhuxAllowedExtraRoots = new Set();
+  globalThis.__deerhuxAllowedExtraRoots.add(normalized);
+  globalThis.__deerhuxAllowedRootsCache?.roots.add(normalized);
 }
 
-export async function getAllowedRoots(): Promise<Set<string>> {
-  const now = Date.now();
-  const cached = globalThis.__piAllowedRootsCache;
-  if (cached && cached.expiresAt > now) return cached.roots;
-
+async function buildAllowedRoots(): Promise<Set<string>> {
+  const { listAllSessions } = await import("@/lib/session-reader");
   const sessions = await listAllSessions();
   const roots = new Set<string>();
   for (const s of sessions) {
     if (s.cwd) roots.add(normalizeRoot(s.cwd));
   }
 
-  for (const root of globalThis.__piAllowedExtraRoots ?? []) {
+  for (const root of globalThis.__deerhuxAllowedExtraRoots ?? []) {
     roots.add(normalizeRoot(root));
   }
 
@@ -64,10 +66,12 @@ export async function getAllowedRoots(): Promise<Set<string>> {
     const home = os.homedir();
     // Skip scanning home on Windows to avoid EPERM on junction points
     if (process.platform === "win32") {
-      roots.add(normalizeRoot(path.join(home, "pi-cwd")));
+      for (const name of ["deerhux-cwd", "pi-cwd"]) {
+        roots.add(normalizeRoot(path.join(home, name)));
+      }
     } else {
       for (const name of fs.readdirSync(home)) {
-        if (/^pi-cwd-\d{8}$/.test(name)) {
+        if (LEGACY_DEFAULT_CWD_RE.test(name)) {
           roots.add(normalizeRoot(path.join(home, name)));
         }
       }
@@ -76,8 +80,34 @@ export async function getAllowedRoots(): Promise<Set<string>> {
     // ignore if home is unreadable
   }
 
-  globalThis.__piAllowedRootsCache = { roots, expiresAt: now + ALLOWED_ROOTS_TTL_MS };
   return roots;
+}
+
+export async function getAllowedRoots(): Promise<Set<string>> {
+  const now = Date.now();
+  const cached = globalThis.__deerhuxAllowedRootsCache;
+  if (cached && cached.expiresAt > now) return cached.roots;
+  if (cached?.inflight) return cached.inflight;
+
+  const inflight = buildAllowedRoots().then((roots) => {
+    globalThis.__deerhuxAllowedRootsCache = {
+      roots,
+      expiresAt: Date.now() + ALLOWED_ROOTS_TTL_MS,
+    };
+    return roots;
+  }).finally(() => {
+    const current = globalThis.__deerhuxAllowedRootsCache;
+    if (current?.inflight === inflight) {
+      delete current.inflight;
+    }
+  });
+
+  globalThis.__deerhuxAllowedRootsCache = {
+    roots: cached?.roots ?? new Set(),
+    expiresAt: 0,
+    inflight,
+  };
+  return inflight;
 }
 
 export function isPathAllowed(target: string, allowedRoots: Set<string>): boolean {

@@ -206,9 +206,9 @@ class LogEventStore {
 }
 
 // Singleton
-const globalForLog = globalThis as unknown as { __piLogStore?: LogEventStore };
-if (!globalForLog.__piLogStore) {
-  globalForLog.__piLogStore = new LogEventStore();
+const globalForLog = globalThis as unknown as { __deerhuxLogStore?: LogEventStore };
+if (!globalForLog.__deerhuxLogStore) {
+  globalForLog.__deerhuxLogStore = new LogEventStore();
 }
 
-export const logEventStore = globalForLog.__piLogStore;
+export const logEventStore = globalForLog.__deerhuxLogStore;

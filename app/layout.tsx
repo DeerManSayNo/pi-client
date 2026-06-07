@@ -9,8 +9,8 @@ const notoSansMono = Noto_Sans_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Pi Client",
-  description: "Pi 编程智能体网页界面",
+  title: "DeerHux",
+  description: "DeerHux网页界面",
 };
 
 export default function RootLayout({
@@ -23,7 +23,7 @@ export default function RootLayout({
       <head>
         <script
           dangerouslySetInnerHTML={{
-            __html: `(function(){try{var t=localStorage.getItem("pi-theme");if(t==="dark")document.documentElement.classList.add("dark")}catch(e){}})();`,
+            __html: `(function(){try{var k="deerhux-theme",l="pi-theme",t=localStorage.getItem(k);if(t===null){t=localStorage.getItem(l);if(t!==null)localStorage.setItem(k,t)}if(t==="dark")document.documentElement.classList.add("dark")}catch(e){}})();`,
           }}
         />
       </head>

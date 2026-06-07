@@ -9,12 +9,12 @@ interface StoredRun {
 }
 
 declare global {
-  var __piParallelRuns: Map<string, StoredRun> | undefined;
+  var __deerhuxParallelRuns: Map<string, StoredRun> | undefined;
 }
 
 function runs(): Map<string, StoredRun> {
-  if (!globalThis.__piParallelRuns) globalThis.__piParallelRuns = new Map();
-  return globalThis.__piParallelRuns;
+  if (!globalThis.__deerhuxParallelRuns) globalThis.__deerhuxParallelRuns = new Map();
+  return globalThis.__deerhuxParallelRuns;
 }
 
 export function createRun(state: ParallelRunState): void {

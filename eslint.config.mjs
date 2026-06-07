@@ -3,7 +3,13 @@ import typescript from "eslint-config-next/typescript";
 
 const eslintConfig = [
   {
-    ignores: ["src-tauri/target/**", "src-tauri/resources/**"],
+    ignores: [
+      ".codegraph/**",
+      ".deerhux/**",
+      ".deerhux-build-home/**",
+      "src-tauri/target/**",
+      "src-tauri/resources/**",
+    ],
   },
   ...coreWebVitals,
   ...typescript,
@@ -12,6 +18,12 @@ const eslintConfig = [
       "react-hooks/immutability": "off",
       "react-hooks/refs": "off",
       "react-hooks/set-state-in-effect": "off",
+    },
+  },
+  {
+    files: ["bin/**/*.js", "scripts/**/*.js"],
+    rules: {
+      "@typescript-eslint/no-require-imports": "off",
     },
   },
 ];

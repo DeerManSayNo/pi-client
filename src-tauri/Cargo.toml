@@ -1,12 +1,12 @@
 [package]
-name = "pi-agent"
+name = "deerhux"
 version = "0.6.12"
-description = "Desktop app for the pi coding agent web UI"
-authors = ["pi-agent contributors"]
+description = "Desktop app for the DeerHux web UI"
+authors = ["DeerHux contributors"]
 edition = "2021"
 
 [lib]
-name = "pi_agent_lib"
+name = "deerhux_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

@@ -3,7 +3,7 @@ import fs from "fs";
 import path from "path";
 import os from "os";
 
-const RUNS_BASE_DIR = path.join(os.tmpdir(), "pi-agent-runs");
+const RUNS_BASE_DIR = path.join(os.tmpdir(), "deerhux-runs");
 
 export interface WorktreeResult {
   worktreePath: string;
@@ -70,7 +70,7 @@ export function createTempCopy(cwd: string, workerName: string, runDir: string):
 export function removeWorktree(worktreePath: string, gitRoot: string): void {
   try {
     execSync(`git worktree remove "${worktreePath}" --force`, { cwd: gitRoot, stdio: "pipe" });
-  } catch (e) {
+  } catch {
     // Clean up manually if worktree remove fails
     try {
       const lockFile = path.join(gitRoot, ".git", "worktrees", path.basename(worktreePath), "locked");

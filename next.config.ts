@@ -3,10 +3,10 @@ import { readFileSync } from "fs";
 import { join } from "path";
 
 const { version } = JSON.parse(readFileSync(join(__dirname, "package.json"), "utf8")) as { version: string };
-let piVersion = "unknown";
+let coreVersion = "unknown";
 try {
-  const piPkgPath = join(__dirname, "node_modules/@earendil-works/pi-coding-agent/package.json");
-  piVersion = (JSON.parse(readFileSync(piPkgPath, "utf8")) as { version: string }).version;
+  const corePkgPath = join(__dirname, "node_modules/@earendil-works/pi-coding-agent/package.json");
+  coreVersion = (JSON.parse(readFileSync(corePkgPath, "utf8")) as { version: string }).version;
 } catch { /* package not found, use default */ }
 
 const nextConfig: NextConfig = {
@@ -33,7 +33,7 @@ const nextConfig: NextConfig = {
   devIndicators: false,
   env: {
     NEXT_PUBLIC_APP_VERSION: version,
-    NEXT_PUBLIC_PI_VERSION: piVersion,
+    NEXT_PUBLIC_CORE_VERSION: coreVersion,
   },
 };
 

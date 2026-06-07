@@ -1,11 +1,12 @@
 "use client";
 
 import { useState, useRef, useCallback, useEffect } from "react";
+import { getLocalStorageItem } from "@/lib/client-storage";
 
 export function useAudio() {
   const [enabled, setEnabled] = useState<boolean>(() => {
     if (typeof window === "undefined") return true;
-    const stored = localStorage.getItem("pi-sound-enabled");
+    const stored = getLocalStorageItem("deerhux-sound-enabled");
     return stored === null ? true : stored === "true";
   });
 
@@ -15,7 +16,7 @@ export function useAudio() {
   const toggle = useCallback(() => {
     setEnabled((prev) => {
       const next = !prev;
-      localStorage.setItem("pi-sound-enabled", String(next));
+      localStorage.setItem("deerhux-sound-enabled", String(next));
       return next;
     });
   }, []);

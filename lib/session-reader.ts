@@ -3,13 +3,23 @@ import type { SessionEntry, SessionInfo, SessionContext, AssistantMessage } from
 import type { SessionEntry as PiSessionEntry, SessionInfo as PiSessionInfo } from "@earendil-works/pi-coding-agent";
 import { normalizeToolCalls } from "./normalize";
 
+const SESSION_LIST_TTL_MS = 5_000;
+
 export { getAgentDir };
 
 export function getSessionsDir(): string {
   return `${getAgentDir()}/sessions`;
 }
 
-export async function listAllSessions(): Promise<SessionInfo[]> {
+declare global {
+  var __deerhuxSessionListCache: {
+    sessions: SessionInfo[];
+    expiresAt: number;
+    inflight?: Promise<SessionInfo[]>;
+  } | undefined;
+}
+
+async function listAllSessionsUncached(): Promise<SessionInfo[]> {
   const piSessions: PiSessionInfo[] = await SessionManager.listAll();
   const pathToId = new Map<string, string>();
   for (const s of piSessions) pathToId.set(s.path, s.id);
@@ -32,17 +42,48 @@ export async function listAllSessions(): Promise<SessionInfo[]> {
   });
 }
 
+export async function listAllSessions(): Promise<SessionInfo[]> {
+  const now = Date.now();
+  const cached = globalThis.__deerhuxSessionListCache;
+  if (cached && cached.expiresAt > now) return cached.sessions;
+  if (cached?.inflight) return cached.inflight;
+
+  const inflight = listAllSessionsUncached().then((sessions) => {
+    globalThis.__deerhuxSessionListCache = {
+      sessions,
+      expiresAt: Date.now() + SESSION_LIST_TTL_MS,
+    };
+    return sessions;
+  }).finally(() => {
+    const current = globalThis.__deerhuxSessionListCache;
+    if (current?.inflight === inflight) {
+      delete current.inflight;
+    }
+  });
+
+  globalThis.__deerhuxSessionListCache = {
+    sessions: cached?.sessions ?? [],
+    expiresAt: 0,
+    inflight,
+  };
+  return inflight;
+}
+
+export function invalidateSessionListCache(): void {
+  globalThis.__deerhuxSessionListCache = undefined;
+}
+
 // ============================================================================
 // Session path cache: sessionId → absolute file path
 // Stored in globalThis for hot-reload safety
 // ============================================================================
 declare global {
-  var __piSessionPathCache: Map<string, string> | undefined;
+  var __deerhuxSessionPathCache: Map<string, string> | undefined;
 }
 
 function getPathCache(): Map<string, string> {
-  if (!globalThis.__piSessionPathCache) globalThis.__piSessionPathCache = new Map();
-  return globalThis.__piSessionPathCache;
+  if (!globalThis.__deerhuxSessionPathCache) globalThis.__deerhuxSessionPathCache = new Map();
+  return globalThis.__deerhuxSessionPathCache;
 }
 
 export async function resolveSessionPath(sessionId: string): Promise<string | null> {
@@ -60,6 +101,7 @@ export function cacheSessionPath(sessionId: string, filePath: string): void {
 
 export function invalidateSessionPathCache(sessionId: string): void {
   getPathCache().delete(sessionId);
+  invalidateSessionListCache();
 }
 
 export function getSessionEntries(filePath: string): SessionEntry[] {
@@ -102,7 +144,7 @@ export function buildSessionContext(entries: SessionEntry[], leafId?: string | n
     }
   }
 
-  // Find the last compaction on path (mirrors pi's buildSessionContext logic)
+  // Find the last compaction on path (mirrors DeerHux's buildSessionContext logic)
   let compactionId: string | undefined;
   let firstKeptEntryId: string | undefined;
   for (const e of path) {
@@ -133,7 +175,7 @@ export function buildSessionContext(entries: SessionEntry[], leafId?: string | n
     }
   }
 
-  // pi injects compaction summary as {role:"compactionSummary", summary, tokensBefore}.
+  // DeerHux injects compaction summary as {role:"compactionSummary", summary, tokensBefore}.
   // Convert to {role:"user"} so MessageView can render it the same as before.
   const messages = (piCtx.messages as AssistantMessage[]).map((msg) => {
     const raw = msg as unknown as Record<string, unknown>;

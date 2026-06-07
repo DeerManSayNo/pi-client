@@ -2,7 +2,7 @@ import path from "path";
 import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
 import type { AgentEvent } from "@/lib/rpc-manager";
 import { configureToolExecutionModes } from "@/lib/rpc-manager";
-import type { AgentSessionLike } from "@/lib/pi-types";
+import type { AgentSessionLike } from "@/lib/deerhux-types";
 import type {
   IsolatedRunState,
   IsolatedWorkerSpec,
@@ -33,12 +33,12 @@ interface StoredIsolatedRun {
 }
 
 declare global {
-  var __piIsolatedRuns: Map<string, StoredIsolatedRun> | undefined;
+  var __deerhuxIsolatedRuns: Map<string, StoredIsolatedRun> | undefined;
 }
 
 function runs(): Map<string, StoredIsolatedRun> {
-  if (!globalThis.__piIsolatedRuns) globalThis.__piIsolatedRuns = new Map();
-  return globalThis.__piIsolatedRuns;
+  if (!globalThis.__deerhuxIsolatedRuns) globalThis.__deerhuxIsolatedRuns = new Map();
+  return globalThis.__deerhuxIsolatedRuns;
 }
 
 export function getIsolatedRun(runId: string): IsolatedRunState | undefined {
@@ -226,7 +226,7 @@ async function executeIsolatedRun(
     if (aborted) return;
 
     // Step 2: Run all workers in parallel
-    await Promise.all(workers.map(async (worker, _index) => {
+    await Promise.all(workers.map(async (worker) => {
       if (aborted) return;
 
       const workerState = state.workers.find(w => w.name === worker.name)!;

@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "pi-agent",
+  "productName": "DeerHux",
   "version": "0.6.12",
-  "identifier": "com.deermansayno.pi-agent",
+  "identifier": "com.deermansayno.deerhux",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:30141",
@@ -21,7 +21,7 @@
       "binaries/node"
     ],
     "resources": {
-      "resources/pi-agent-server.js": "pi-agent-server.js",
+      "resources/deerhux-server.js": "deerhux-server.js",
       "../.next/standalone": "app/standalone",
       "../.next/static": "app/standalone/.next/static",
       "../public": "app/standalone/public",

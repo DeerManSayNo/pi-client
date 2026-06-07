@@ -13,6 +13,7 @@ import { RoleConfig } from "./RoleConfig";
 import { MemoryConfig } from "./MemoryConfig";
 import { McpConfig } from "./McpConfig";
 import { LogPanel } from "./LogPanel";
+import { getLocalStorageItem } from "@/lib/client-storage";
 import { useTheme } from "@/hooks/useTheme";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { SessionInfo } from "@/lib/types";
@@ -49,21 +50,16 @@ function getProjectName(cwd: string): string {
   return parts.at(-1) ?? cwd;
 }
 
-const CUSTOM_CWDS_STORAGE_KEY = "pi-agent.custom-cwds";
+const CUSTOM_CWDS_STORAGE_KEY = "deerhux.custom-cwds";
 
 function readCustomCwds(): string[] {
   if (typeof window === "undefined") return [];
   try {
-    const parsed = JSON.parse(window.localStorage.getItem(CUSTOM_CWDS_STORAGE_KEY) ?? "[]") as unknown;
+    const parsed = JSON.parse(getLocalStorageItem(CUSTOM_CWDS_STORAGE_KEY) ?? "[]") as unknown;
     return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === "string" && v.trim().length > 0) : [];
   } catch {
     return [];
   }
-}
-
-function writeCustomCwds(cwds: string[]) {
-  if (typeof window === "undefined") return;
-  window.localStorage.setItem(CUSTOM_CWDS_STORAGE_KEY, JSON.stringify([...new Set(cwds)]));
 }
 
 export function AppShell() {
@@ -104,7 +100,6 @@ export function AppShell() {
 
   // Platform detection — only show custom window controls on Windows
   const isWindowsPlatform = typeof navigator !== 'undefined' && /windows/i.test(navigator.userAgent);
-  const winCtrlShift = isWindowsPlatform ? 86 : 0;
   const handleWindowAction = useCallback((action: 'minimize' | 'maximize' | 'close') => {
     try {
       const win = getCurrentWindow();
@@ -144,17 +139,6 @@ export function AppShell() {
     setProjectOptions(projects);
   }, []);
 
-  // Window control callbacks (Windows only)
-  const handleWindowMinimize = useCallback(() => {
-    try { getCurrentWindow().minimize(); } catch { /* not in Tauri */ }
-  }, []);
-  const handleWindowMaximize = useCallback(() => {
-    try { getCurrentWindow().toggleMaximize(); } catch { /* not in Tauri */ }
-  }, []);
-  const handleWindowClose = useCallback(() => {
-    try { getCurrentWindow().close(); } catch { /* not in Tauri */ }
-  }, []);
-
   const [initialSessionId] = useState<string | null>(() => searchParams.get("session"));
   const [activeCwd, setActiveCwd] = useState<string | null>(null);
   const [defaultCwd, setDefaultCwd] = useState<string | null>(null);
@@ -163,7 +147,6 @@ export function AppShell() {
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
   const [settingsMenuOpen, setSettingsMenuOpen] = useState(false);
   const effectiveProjectCwd = selectedSession?.cwd ?? newSessionCwd ?? activeCwd ?? defaultCwd;
-  const projectLocked = selectedSession !== null || pendingSession !== null;
   // True once the initial ?session= URL param has been resolved (or confirmed absent)
   const [initialSessionRestored, setInitialSessionRestored] = useState<boolean>(() => !searchParams.get("session"));
   // Suppresses extra cwd handling during the initial URL restore
@@ -171,7 +154,7 @@ export function AppShell() {
 
   // Sync client-only localStorage state after mount to avoid hydration mismatch
   useEffect(() => {
-    const storedWidth = window.localStorage.getItem("pi-agent.sidebar-width");
+    const storedWidth = getLocalStorageItem("deerhux.sidebar-width");
     if (storedWidth) {
       const parsed = parseInt(storedWidth, 10);
       if (Number.isFinite(parsed)) setSidebarWidth(Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, parsed)));
@@ -283,7 +266,7 @@ export function AppShell() {
 
   const handleSelectSession = useCallback((session: SessionInfo, isRestore = false) => {
     // Do not clear pendingSession here: a newly-created session is not written
-    // to disk by pi until the first assistant message exists. If the user
+    // to disk by DeerHux until the first assistant message exists. If the user
     // switches away while that first response is still running, /api/sessions
     // cannot list it yet, so the sidebar must keep showing the optimistic row.
     // Only placeholder tabs (created by top bar "+") show the new-session UI.
@@ -390,13 +373,13 @@ export function AppShell() {
     setRefreshKey((k) => k + 1);
   }, [setSessionRunning]);
 
-  // Called by ChatWindow when a new session gets its real id from pi
+  // Called by ChatWindow when a new session gets its real id from DeerHux
   const handleSessionCreated = useCallback((session: SessionInfo) => {
     setSessionRunning(pendingSessionIdRef.current, false);
     pendingSessionIdRef.current = null;
     setSessionRunning(session.id, true);
     // Keep an optimistic entry with the real id until SessionManager.listAll()
-    // can see the file. For brand-new sessions pi delays writing the jsonl
+    // can see the file. For brand-new sessions DeerHux delays writing the jsonl
     // until an assistant message is persisted, so clearing this immediately
     // makes the session disappear from the sidebar when switching away mid-run.
     setPendingSession(session);
@@ -449,7 +432,7 @@ export function AppShell() {
     const handleUp = () => {
       setIsResizing(false);
       setSidebarWidth((w) => {
-        if (typeof window !== "undefined") window.localStorage.setItem("pi-agent.sidebar-width", String(w));
+        if (typeof window !== "undefined") window.localStorage.setItem("deerhux.sidebar-width", String(w));
         return w;
       });
     };
@@ -719,7 +702,7 @@ export function AppShell() {
         WebkitAppRegion: "drag",
       } as DraggableStyle}
     >
-      <div data-tauri-drag-region style={{ fontSize: 13, fontWeight: 700, color: "var(--text)", opacity: 0.85, pointerEvents: "none" }}>pi-agent</div>
+      <div data-tauri-drag-region style={{ fontSize: 13, fontWeight: 700, color: "var(--text)", opacity: 0.85, pointerEvents: "none" }}>DeerHux</div>
       <button
         data-tauri-drag-region="false"
         onClick={() => setSidebarMode((mode) => mode === "open" ? "compact" : mode === "compact" ? "closed" : "open")}
@@ -1392,7 +1375,7 @@ export function AppShell() {
                   userSelect: "none",
                 }}
               >
-                PI Agent
+                DeerHux
               </div>
             </div>
           )}
@@ -1750,7 +1733,7 @@ export function AppShell() {
         {/* Content: log panel or file viewer */}
         <div style={{ flex: 1, overflow: "hidden", position: "relative" }}>
           {activeFileTabId === "__log__" ? (
-            <LogPanel sessionId={selectedSession?.id} />
+            <LogPanel />
           ) : activeFileTab?.filePath ? (
             <FileViewer filePath={activeFileTab.filePath} cwd={activeCwd ?? undefined} />
           ) : (

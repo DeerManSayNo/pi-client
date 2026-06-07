@@ -1,6 +1,7 @@
 "use client";
 
 import { open } from "@tauri-apps/plugin-dialog";
+import { getLocalStorageItem } from "@/lib/client-storage";
 import { useEffect, useState, useCallback, useRef, useMemo, type CSSProperties } from "react";
 import type { SessionInfo } from "@/lib/types";
 import { FileExplorer } from "./FileExplorer";
@@ -69,8 +70,8 @@ interface ProjectGroup {
   pinned?: boolean;
 }
 
-const PROJECT_META_STORAGE_KEY = "pi-agent.project-meta";
-const CUSTOM_CWDS_STORAGE_KEY = "pi-agent.custom-cwds";
+const PROJECT_META_STORAGE_KEY = "deerhux.project-meta";
+const CUSTOM_CWDS_STORAGE_KEY = "deerhux.custom-cwds";
 
 interface ProjectMeta {
   hiddenCwds: string[];
@@ -82,7 +83,7 @@ interface ProjectMeta {
 function readJson<T>(key: string, fallback: T): T {
   if (typeof window === "undefined") return fallback;
   try {
-    const parsed = JSON.parse(window.localStorage.getItem(key) ?? "null") as unknown;
+    const parsed = JSON.parse(getLocalStorageItem(key) ?? "null") as unknown;
     return parsed && typeof parsed === "object" ? parsed as T : fallback;
   } catch {
     return fallback;
@@ -204,7 +205,6 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const [defaultCwd, setDefaultCwd] = useState<string | null>(null);
   const [customCwds, setCustomCwds] = useState<string[]>([]);
   const [projectMeta, setProjectMeta] = useState<ProjectMeta>({ hiddenCwds: [], pinnedCwds: [], notes: {}, defaultPinInitializedCwds: [] });
-  const [clientReady, setClientReady] = useState(false);
   const [projectMenu, setProjectMenu] = useState<{ cwd: string; x: number; y: number } | null>(null);
   const [expandedCwds, setExpandedCwds] = useState<Set<string>>(new Set());
   const [allProjectsState, setAllProjectsState] = useState<"expanded" | "compact" | "collapsed">("expanded");
@@ -219,12 +219,9 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   useEffect(() => {
     setCustomCwds(readCustomCwds());
     setProjectMeta(readProjectMeta());
-    setClientReady(true);
   }, []);
 
-  const [sessionRefreshDone, setSessionRefreshDone] = useState(false);
   const [explorerRefreshDone, setExplorerRefreshDone] = useState(false);
-  const sessionRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const explorerRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const sidebarRef = useRef<HTMLDivElement>(null);
   const headerRef = useRef<HTMLDivElement>(null);
@@ -235,7 +232,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const [splitPercent, setSplitPercent] = useState(() => {
     if (typeof window === "undefined") return 50;
     try {
-      const stored = localStorage.getItem("pi-agent.sidebar-split-percent");
+      const stored = getLocalStorageItem("deerhux.sidebar-split-percent");
       if (stored) {
         const n = Number(stored);
         if (n >= 10 && n <= 90) return n;
@@ -256,11 +253,6 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       const data = await res.json() as { sessions: SessionInfo[] };
       setAllSessions(data.sessions);
       setError(null);
-      if (!showLoading) {
-        setSessionRefreshDone(true);
-        if (sessionRefreshTimerRef.current) clearTimeout(sessionRefreshTimerRef.current);
-        sessionRefreshTimerRef.current = setTimeout(() => setSessionRefreshDone(false), 2000);
-      }
     } catch (e) {
       setError(e instanceof DOMException && e.name === "AbortError" ? "加载会话超时" : String(e));
     } finally {
@@ -306,7 +298,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       document.body.style.userSelect = '';
       setIsDraggingSplitter(false);
       try {
-        localStorage.setItem("pi-agent.sidebar-split-percent", String(splitPercentRef.current));
+        localStorage.setItem("deerhux.sidebar-split-percent", String(splitPercentRef.current));
       } catch { /* ignore */ }
     };
 
@@ -408,7 +400,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     const cwd = selectedCwdProp ?? selectedCwd ?? recentCwd ?? await ensureDefaultCwd();
     if (!cwd) return;
     // Generate a temporary UUID client-side — no backend call needed.
-    // Pi will be spawned lazily when the user sends the first message.
+    // DeerHux will be spawned lazily when the user sends the first message.
     const tempId = typeof crypto.randomUUID === "function"
       ? crypto.randomUUID()
       : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
@@ -818,7 +810,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         )}
         {!loading && !error && (
           <>
-            {(normalizedSearchQuery || allProjectsState !== "collapsed") && (allProjectsState === "compact" && !normalizedSearchQuery ? projects.slice(0, 2) : projects).map((project, i) => (
+            {(normalizedSearchQuery || allProjectsState !== "collapsed") && (allProjectsState === "compact" && !normalizedSearchQuery ? projects.slice(0, 2) : projects).map((project) => (
           <ProjectSection
             key={project.cwd}
             project={project}

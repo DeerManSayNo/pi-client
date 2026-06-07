@@ -19,7 +19,7 @@ if (!command) {
 }
 
 const root = path.join(__dirname, "..");
-const buildHome = path.join(root, ".pi-build-home");
+const buildHome = path.join(root, ".deerhux-build-home");
 fs.mkdirSync(buildHome, { recursive: true });
 
 const child = spawn(command, args, {

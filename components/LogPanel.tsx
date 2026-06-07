@@ -1,11 +1,8 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback, type CSSProperties } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
+import { getLocalStorageItem } from "@/lib/client-storage";
 import { logEventStore, type LogEntry, type ThinkingBlock } from "@/lib/log-event-store";
-
-interface Props {
-  sessionId?: string | null;
-}
 
 /** Format timestamp to HH:MM:SS.mmm */
 function formatTime(ts: number): string {
@@ -25,7 +22,6 @@ function truncate(text: string, max: number): string {
 
 /** Strip ANSI codes */
 function stripAnsi(text: string): string {
-  // eslint-disable-next-line no-control-regex
   return text.replace(/\x1b\[[0-9;]*m/g, "");
 }
 
@@ -136,7 +132,7 @@ function cloneThinkingBlock(block: ThinkingBlock | null): ThinkingBlock | null {
   };
 }
 
-export function LogPanel({ sessionId }: Props) {
+export function LogPanel() {
   const [entries, setEntries] = useState<LogEntry[]>([]);
   const [blocks, setBlocks] = useState<ThinkingBlock[]>([]);
   const [currentBlock, setCurrentBlock] = useState<ThinkingBlock | null>(null);
@@ -144,7 +140,7 @@ export function LogPanel({ sessionId }: Props) {
   const [splitPercent, setSplitPercent] = useState(() => {
     if (typeof window === "undefined") return 55;
     try {
-      const stored = localStorage.getItem("pi-agent.log-split-percent");
+      const stored = getLocalStorageItem("deerhux.log-split-percent");
       if (stored) {
         const n = Number(stored);
         if (n >= 20 && n <= 80) return n;
@@ -244,7 +240,7 @@ export function LogPanel({ sessionId }: Props) {
       document.body.style.userSelect = "";
       setIsDragging(false);
       try {
-        localStorage.setItem("pi-agent.log-split-percent", String(splitPercentRef.current));
+        localStorage.setItem("deerhux.log-split-percent", String(splitPercentRef.current));
       } catch { /* ignore */ }
     };
 

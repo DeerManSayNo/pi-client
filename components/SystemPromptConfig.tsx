@@ -132,7 +132,7 @@ export function SystemPromptConfig({ onClose, roleId, roleName, cwd }: Props) {
       });
       if (res.ok) {
         setSaved(true);
-        window.dispatchEvent(new Event("pi-agent.roles-updated"));
+        window.dispatchEvent(new Event("deerhux.roles-updated"));
       }
     } finally {
       setSavingGlobal(false);
@@ -160,7 +160,7 @@ export function SystemPromptConfig({ onClose, roleId, roleName, cwd }: Props) {
       if (!res.ok) return;
       setSaveName(""); setSaveDesc(""); setSaveOpen(false);
       await load();
-      window.dispatchEvent(new Event("pi-agent.roles-updated"));
+      window.dispatchEvent(new Event("deerhux.roles-updated"));
     } catch { /* ignore */ }
   }, [saveName, saveDesc, sections, load, roleId]);
 

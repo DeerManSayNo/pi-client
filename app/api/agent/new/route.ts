@@ -2,10 +2,11 @@ import { NextResponse } from "next/server";
 import { existsSync } from "fs";
 import { addAllowedRoot } from "@/lib/file-access";
 import { startRpcSession } from "@/lib/rpc-manager";
+import { invalidateSessionListCache } from "@/lib/session-reader";
 
 // POST /api/agent/new  body: { cwd: string; type: string; message: string; ... }
-// Spawns a brand-new pi session and immediately sends the first command.
-// Returns { sessionId, data } where sessionId is pi's real session id.
+// Spawns a brand-new DeerHux session and immediately sends the first command.
+// Returns { sessionId, data } where sessionId is DeerHux's real session id.
 export async function POST(req: Request) {
   try {
     const body = await req.json() as { cwd?: string; [key: string]: unknown };
@@ -42,6 +43,7 @@ export async function POST(req: Request) {
     }
 
     const result = await session.send(promptCommand);
+    invalidateSessionListCache();
 
     return NextResponse.json({ success: true, sessionId: realSessionId, data: result });
   } catch (error) {

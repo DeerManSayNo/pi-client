@@ -63,14 +63,14 @@ pub fn run() {
                         .and_then(|p| p.parent().map(|d| d.to_path_buf()))
                         .unwrap_or_else(|| resource_dir.clone());
                     let bundle_node = exe_dir.join("node");
-                    let server_js = resource_dir.join("pi-agent-server.js");
+                    let server_js = resource_dir.join("deerhux-server.js");
 
                     // On macOS, executables inside Contents/MacOS/ trigger a Dock
                     // icon when launched. Copy the node binary to a temp location
                     // outside the app bundle so macOS treats it as a plain daemon.
                     #[cfg(target_os = "macos")]
                     let spawn_node = {
-                        let tmp = std::env::temp_dir().join("pi-agent-node");
+                        let tmp = std::env::temp_dir().join("deerhux-node");
                         std::fs::create_dir_all(&tmp).ok();
                         let dest = tmp.join("node");
                         // Only copy if not already present (avoids repeated I/O on restart)
@@ -86,7 +86,7 @@ pub fn run() {
 
                     let mut cmd = std::process::Command::new(&spawn_node);
                     cmd.arg(&server_js)
-                        .env("PI_AGENT_RESOURCE_DIR", &resource_dir)
+                        .env("DEERHUX_RESOURCE_DIR", &resource_dir)
                         .env("PORT", port.to_string())
                         .stdin(Stdio::null())
                         .stdout(Stdio::null())
@@ -109,7 +109,7 @@ pub fn run() {
                 "main",
                 WebviewUrl::External(webview_url.parse()?),
             )
-            .title("pi-agent")
+            .title("DeerHux")
             .inner_size(1280.0, 800.0)
             .min_inner_size(960.0, 640.0);
 
