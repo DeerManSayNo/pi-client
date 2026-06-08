@@ -4,8 +4,9 @@
 
 import type { ScheduledTask, PromptTaskConfig, TaskLog } from "./types";
 import { updateTask, appendTaskLog } from "./store";
+import { cacheSessionPath, invalidateSessionListCache } from "../session-reader";
 
-function recordResult(taskId: string, result: "success" | "error", output?: string, error?: string, durationMs?: number): void {
+function recordResult(taskId: string, result: "success" | "error", output?: string, error?: string, durationMs?: number, sessionId?: string, sessionFile?: string): void {
   updateTask(taskId, {
     lastRunAt: new Date().toISOString(),
     lastResult: result,
@@ -19,6 +20,8 @@ function recordResult(taskId: string, result: "success" | "error", output?: stri
     error,
     output: output?.slice(0, 500),
     durationMs: durationMs ?? 0,
+    sessionId,
+    sessionFile,
   };
   appendTaskLog(taskId, log);
 }
@@ -26,6 +29,8 @@ function recordResult(taskId: string, result: "success" | "error", output?: stri
 async function runPromptTask(task: ScheduledTask, config: PromptTaskConfig): Promise<void> {
   const startTime = Date.now();
   let capturedOutput: string | undefined;
+  let scheduledSessionId: string | undefined;
+  let scheduledSessionFile: string | undefined;
 
   try {
     const { createAgentSession, SessionManager, getAgentDir } = await import("@earendil-works/pi-coding-agent");
@@ -47,6 +52,10 @@ async function runPromptTask(task: ScheduledTask, config: PromptTaskConfig): Pro
       sessionManager,
       tools: toolNames,
     });
+    scheduledSessionId = session.sessionId;
+    scheduledSessionFile = session.sessionFile;
+    if (scheduledSessionId && scheduledSessionFile) cacheSessionPath(scheduledSessionId, scheduledSessionFile);
+    invalidateSessionListCache();
 
     if (config.model) {
       try {
@@ -122,17 +131,17 @@ async function runPromptTask(task: ScheduledTask, config: PromptTaskConfig): Pro
     const durationMs = Date.now() - startTime;
 
     if (agentError) {
-      recordResult(task.id, "error", capturedOutput, agentError, durationMs);
+      recordResult(task.id, "error", capturedOutput, agentError, durationMs, scheduledSessionId, scheduledSessionFile);
       console.error(`[scheduler] Prompt task "${task.name}" failed: ${agentError}`);
       return;
     }
 
-    recordResult(task.id, "success", capturedOutput, undefined, durationMs);
+    recordResult(task.id, "success", capturedOutput, undefined, durationMs, scheduledSessionId, scheduledSessionFile);
     console.log(`[scheduler] Prompt task "${task.name}" completed successfully (${durationMs}ms)`);
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     const durationMs = Date.now() - startTime;
-    recordResult(task.id, "error", capturedOutput, message, durationMs);
+    recordResult(task.id, "error", capturedOutput, message, durationMs, scheduledSessionId, scheduledSessionFile);
     console.error(`[scheduler] Prompt task "${task.name}" failed: ${message}`);
   }
 }

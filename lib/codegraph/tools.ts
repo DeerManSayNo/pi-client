@@ -1,7 +1,7 @@
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { runCodeGraphJson } from "./cli";
-import { getCodeGraphStatus } from "./detect";
+import { ensureCodeGraphInitialized } from "./detect";
 
 function pretty(value: unknown): string {
   return JSON.stringify(value, null, 2);
@@ -13,7 +13,7 @@ function limit(value: number | undefined, fallback: number, max: number): number
 }
 
 export async function createCodeGraphTools(cwd: string): Promise<ToolDefinition[]> {
-  const status = await getCodeGraphStatus(cwd);
+  const status = await ensureCodeGraphInitialized(cwd);
   if (!status?.initialized) return [];
 
   return [

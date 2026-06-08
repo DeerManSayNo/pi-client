@@ -832,7 +832,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         )}
         {!loading && !error && (
           <>
-            {(normalizedSearchQuery || allProjectsState !== "collapsed") && (allProjectsState === "compact" && !normalizedSearchQuery ? projects.slice(0, 2) : projects).map((project) => (
+            {(normalizedSearchQuery || allProjectsState !== "collapsed") && (allProjectsState === "compact" && !normalizedSearchQuery ? projects.filter((project) => project.pinned) : projects).map((project) => (
           <ProjectSection
             key={project.cwd}
             project={project}
@@ -976,7 +976,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       )}
 
       {/* Scheduler executions section */}
-      {!compact && (selectedCwdProp || selectedCwd) && <SchedulerRunsBlock />}
+      {!compact && (selectedCwdProp || selectedCwd) && <SchedulerRunsBlock selectedSessionId={selectedSessionId} onSelectSession={onSelectSession} />}
 
       {/* File Explorer section */}
       {!compact && (selectedCwdProp || selectedCwd) && (

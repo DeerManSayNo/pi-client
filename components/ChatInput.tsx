@@ -1110,14 +1110,16 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 lineHeight: "22px",
                 fontFamily: "inherit",
                 padding: 0,
-                paddingLeft: selectedSkillIndent,
+                paddingLeft: 0,
                 margin: 0,
                 display: "block",
                 boxSizing: "border-box",
                 minHeight: 44,
                 maxHeight: 200,
                 overflow: "auto",
-                textIndent: 0,
+                // Only reserve space for the skill chip on the first visual line.
+                // Wrapped/subsequent lines should start from the normal left edge.
+                textIndent: selectedSkillIndent,
               }}
             />
           </div>
@@ -1598,7 +1600,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                     {TOOL_PRESETS.map((lvl) => {
                       const preset = TOOL_PRESET_MAP[lvl];
                       const isActive = (toolPreset ?? "default") === preset;
-                      const desc = lvl === "off" ? "无工具，纯聊天" : lvl === "default" ? "4 项内置工具" : "全部内置工具";
+                      const desc = lvl === "off" ? "无工具，纯聊天" : lvl === "default" ? "基础 + CodeGraph" : "全部内置工具";
                       return (
                         <button
                           key={lvl}

@@ -10,7 +10,7 @@ export interface ToolEntry {
 
 export type ToolPreset = "none" | "default" | "full" | "custom";
 export const PRESET_NONE: string[] = [];
-export const PRESET_DEFAULT: string[] = ["read", "bash", "edit", "write"];
+export const PRESET_DEFAULT: string[] = ["read", "bash", "edit", "write", "codegraph_status", "codegraph_search", "codegraph_callers", "codegraph_callees", "codegraph_impact"];
 export const PRESET_FULL: string[] = ["bash", "read", "edit", "write", "grep", "find", "ls", "code_search", "codegraph_status", "codegraph_search", "codegraph_callers", "codegraph_callees", "codegraph_impact"];
 
 export function getPresetFromTools(tools: ToolEntry[]): ToolPreset {
@@ -32,7 +32,7 @@ interface Props {
 
 const PRESETS: { id: Exclude<ToolPreset, "custom">; label: string; desc: string; tools: string[] }[] = [
   { id: "none",    label: "关闭",  desc: "无工具",                                  tools: PRESET_NONE },
-  { id: "default", label: "低",    desc: "read · bash · edit · write",              tools: PRESET_DEFAULT },
+  { id: "default", label: "低",    desc: "read · bash · edit · write · codegraph",   tools: PRESET_DEFAULT },
   { id: "full",    label: "高",    desc: "read · bash · edit · write · grep · find · ls · code/codegraph search", tools: PRESET_FULL },
 ];
 

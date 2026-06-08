@@ -1,4 +1,5 @@
 import { spawn } from "child_process";
+import path from "path";
 
 export class CodeGraphCliError extends Error {
   constructor(message: string, readonly code?: number | null, readonly stderr?: string) {
@@ -16,12 +17,26 @@ export interface CodeGraphRunOptions {
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_STDIO_BYTES = 2 * 1024 * 1024;
 
+function buildCodeGraphPath(cwd: string): string {
+  return [
+    path.join(process.cwd(), "node_modules", ".bin"),
+    path.join(cwd, "node_modules", ".bin"),
+    "/usr/local/bin",
+    "/opt/homebrew/bin",
+    process.env.PATH,
+  ].filter(Boolean).join(path.delimiter);
+}
+
 export function runCodeGraph(args: string[], options: CodeGraphRunOptions): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawn("codegraph", args, {
       cwd: options.cwd,
       stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, NO_COLOR: "1" },
+      env: {
+        ...process.env,
+        NO_COLOR: "1",
+        PATH: buildCodeGraphPath(options.cwd),
+      },
     });
 
     let stdout = "";

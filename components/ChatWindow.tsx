@@ -618,14 +618,6 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, onAgentEnd, on
                   <Typewriter phrases={TYPEWRITER_PHRASES} />
                 </span>
               </div>
-              <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 2, flexShrink: 0 }}>
-                <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
-                  web <span style={{ color: "var(--text)" }}>v{process.env.NEXT_PUBLIC_APP_VERSION ?? "0.0.0"}</span>
-                </span>
-                <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
-                  core <span style={{ color: "var(--text)" }}>v{process.env.NEXT_PUBLIC_CORE_VERSION ?? "0.0.0"}</span>
-                </span>
-              </div>
             </div>
             {chatInputElement}
           </div>

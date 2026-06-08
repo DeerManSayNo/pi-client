@@ -610,10 +610,19 @@ export class AgentSessionWrapper {
 
       case "follow_up": {
         const followImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
-        await this.waitForCurrentTurnToStop(8_000);
-        const followPromise = this.inner.followUp(command.message as string, followImages?.length ? followImages : undefined);
-        this.trackTurn(followPromise);
-        await followPromise;
+        const imageOptions = followImages?.length ? { images: followImages } : undefined;
+        const message = command.message as string;
+
+        if (this._isRunning || this.inner.isStreaming) {
+          // SDK followUp only queues for an already-active turn. It should be
+          // sent while the turn is still active so the agent can drain it.
+          await this.inner.followUp(message, followImages?.length ? followImages : undefined);
+          return null;
+        }
+
+        // If the previous turn was already aborted/stopped, followUp would only
+        // sit in the queue and never trigger a model call. Start a fresh turn.
+        this.trackTurn(this.inner.prompt(message, imageOptions));
         return null;
       }
 

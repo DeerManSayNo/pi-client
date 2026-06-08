@@ -1,6 +1,6 @@
 import fs from "fs";
 import path from "path";
-import { runCodeGraphJson } from "./cli";
+import { runCodeGraph, runCodeGraphJson } from "./cli";
 
 export interface CodeGraphStatus {
   initialized: boolean;
@@ -17,6 +17,23 @@ export interface CodeGraphStatus {
 
 export function hasCodeGraphDir(cwd: string): boolean {
   return fs.existsSync(path.join(cwd, ".codegraph"));
+}
+
+export async function ensureCodeGraphInitialized(cwd: string, signal?: AbortSignal): Promise<CodeGraphStatus | null> {
+  try {
+    const existing = await getCodeGraphStatus(cwd, signal);
+    if (existing?.initialized) return existing;
+
+    await runCodeGraph(["init", "--index", cwd], {
+      cwd,
+      signal,
+      timeoutMs: 120_000,
+    });
+
+    return await getCodeGraphStatus(cwd, signal);
+  } catch {
+    return null;
+  }
 }
 
 export async function getCodeGraphStatus(cwd: string, signal?: AbortSignal): Promise<CodeGraphStatus | null> {

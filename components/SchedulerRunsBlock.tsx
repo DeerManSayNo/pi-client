@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ScheduledTask, TaskLog } from "@/lib/scheduler/types";
+import type { SessionInfo } from "@/lib/types";
 
 type TaskWithJobStatus = ScheduledTask & {
   jobStatus?: { scheduled: boolean; nextRun: string | Date | null };
@@ -10,59 +11,100 @@ type TaskWithJobStatus = ScheduledTask & {
 type TaskRun = TaskLog & {
   taskId: string;
   taskName: string;
+  taskCwd: string;
 };
 
-function formatTime(iso: string): string {
-  try {
-    return new Date(iso).toLocaleString("zh-CN", {
-      month: "2-digit",
-      day: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-    });
-  } catch {
-    return iso;
-  }
+interface Props {
+  selectedSessionId: string | null;
+  onSelectSession: (session: SessionInfo) => void;
 }
 
-function formatDuration(ms: number): string {
-  if (!Number.isFinite(ms)) return "--";
-  if (ms < 1000) return `${Math.max(0, Math.round(ms))}ms`;
-  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
-  const minutes = Math.floor(ms / 60_000);
-  const seconds = Math.round((ms % 60_000) / 1000);
-  return `${minutes}m ${seconds}s`;
+function formatRelativeTime(dateStr: string): string {
+  const date = new Date(dateStr);
+  const now = new Date();
+  const diff = now.getTime() - date.getTime();
+  const mins = Math.floor(diff / 60000);
+  const hours = Math.floor(diff / 3600000);
+  const days = Math.floor(diff / 86400000);
+  if (mins < 1) return "刚刚";
+  if (mins < 60) return `${mins}分钟前`;
+  if (hours < 24) return `${hours}小时前`;
+  if (days < 7) return `${days}天前`;
+  return date.toLocaleDateString();
 }
 
-function truncate(text: string, max = 120): string {
-  const normalized = text.replace(/\s+/g, " ").trim();
-  return normalized.length > max ? `${normalized.slice(0, max)}…` : normalized;
-}
-
-export function SchedulerRunsBlock() {
+export function SchedulerRunsBlock({ selectedSessionId, onSelectSession }: Props) {
   const [open, setOpen] = useState(false);
   const [tasks, setTasks] = useState<TaskWithJobStatus[]>([]);
+  const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const runs = useMemo<TaskRun[]>(() => {
     return tasks
-      .flatMap((task) => (task.logs ?? []).map((log) => ({ ...log, taskId: task.id, taskName: task.name })))
+      .flatMap((task) => (task.logs ?? []).map((log) => ({
+        ...log,
+        taskId: task.id,
+        taskName: task.name,
+        taskCwd: task.config.cwd,
+      })))
       .sort((a, b) => b.timestamp.localeCompare(a.timestamp))
       .slice(0, 50);
   }, [tasks]);
 
-  const fetchTasks = useCallback(async () => {
+  const sessionById = useMemo(() => {
+    const map = new Map<string, SessionInfo>();
+    for (const session of sessions) map.set(session.id, session);
+    return map;
+  }, [sessions]);
+
+  const scheduledSessions = useMemo(() => {
+    const used = new Set<string>();
+
+    function inferSessionForRun(run: TaskRun): SessionInfo | null {
+      if (run.sessionId) return sessionById.get(run.sessionId) ?? null;
+
+      // Backward compatibility for logs written before sessionId was recorded:
+      // task log time is written at the end of execution, so the session should
+      // have been created around timestamp - durationMs in the same cwd.
+      const expectedStart = new Date(run.timestamp).getTime() - (Number.isFinite(run.durationMs) ? run.durationMs : 0);
+      if (!Number.isFinite(expectedStart)) return null;
+
+      const candidates = sessions
+        .filter((session) => session.cwd === run.taskCwd && !used.has(session.id))
+        .map((session) => ({ session, delta: Math.abs(new Date(session.created).getTime() - expectedStart) }))
+        .filter((item) => Number.isFinite(item.delta) && item.delta < 5 * 60_000)
+        .sort((a, b) => a.delta - b.delta);
+      return candidates[0]?.session ?? null;
+    }
+
+    const items: Array<{ run: TaskRun; session: SessionInfo }> = [];
+    for (const run of runs) {
+      const session = inferSessionForRun(run);
+      if (!session) continue;
+      used.add(session.id);
+      items.push({ run, session });
+    }
+    return items;
+  }, [runs, sessionById, sessions]);
+
+  const fetchData = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch("/api/scheduler");
-      if (!res.ok) throw new Error("Failed to fetch scheduler tasks");
-      const data = (await res.json()) as { tasks?: TaskWithJobStatus[] };
-      setTasks(data.tasks ?? []);
+      const [schedulerRes, sessionsRes] = await Promise.all([
+        fetch("/api/scheduler"),
+        fetch("/api/sessions"),
+      ]);
+      if (!schedulerRes.ok) throw new Error("Failed to fetch scheduler tasks");
+      if (!sessionsRes.ok) throw new Error("Failed to fetch sessions");
+
+      const schedulerData = (await schedulerRes.json()) as { tasks?: TaskWithJobStatus[] };
+      const sessionsData = (await sessionsRes.json()) as { sessions?: SessionInfo[] };
+      setTasks(schedulerData.tasks ?? []);
+      setSessions(sessionsData.sessions ?? []);
     } catch {
-      setError("加载定时任务执行记录失败");
+      setError("加载定时任务 Session 失败");
     } finally {
       setLoading(false);
     }
@@ -70,10 +112,10 @@ export function SchedulerRunsBlock() {
 
   useEffect(() => {
     if (!open) return;
-    void fetchTasks();
-    const timer = window.setInterval(() => void fetchTasks(), 15_000);
+    void fetchData();
+    const timer = window.setInterval(() => void fetchData(), 15_000);
     return () => window.clearInterval(timer);
-  }, [open, fetchTasks]);
+  }, [open, fetchData]);
 
   return (
     <div
@@ -113,13 +155,13 @@ export function SchedulerRunsBlock() {
           </svg>
           定时任务
           <span style={{ marginLeft: "auto", color: "var(--text-dim)", fontSize: 10, letterSpacing: 0, textTransform: "none" }}>
-            {runs.length > 0 ? `${runs.length} 次执行` : `${tasks.length} 个任务`}
+            {scheduledSessions.length > 0 ? `${scheduledSessions.length} 个 Session` : `${tasks.length} 个任务`}
           </span>
         </button>
         {open && (
           <button
-            onClick={() => void fetchTasks()}
-            title="刷新定时任务执行记录"
+            onClick={() => void fetchData()}
+            title="刷新定时任务 Session"
             disabled={loading}
             style={{
               display: "flex",
@@ -146,47 +188,70 @@ export function SchedulerRunsBlock() {
       </div>
 
       {open && (
-        <div style={{ maxHeight: 220, overflowY: "auto", overflowX: "hidden", padding: "2px 8px 8px" }}>
-          {loading && runs.length === 0 && (
-            <div style={{ padding: "10px 6px", color: "var(--text-muted)", fontSize: 12 }}>加载中...</div>
+        <div style={{ maxHeight: 220, overflowY: "auto", overflowX: "hidden", padding: "2px 0 8px" }}>
+          {loading && scheduledSessions.length === 0 && (
+            <div style={{ padding: "10px 14px", color: "var(--text-muted)", fontSize: 12 }}>加载中...</div>
           )}
           {error && (
-            <div style={{ padding: "10px 6px", color: "#f87171", fontSize: 12 }}>{error}</div>
+            <div style={{ padding: "10px 14px", color: "#f87171", fontSize: 12 }}>{error}</div>
           )}
-          {!loading && !error && runs.length === 0 && (
-            <div style={{ padding: "10px 6px", color: "var(--text-muted)", fontSize: 12 }}>
-              暂无执行记录
+          {!loading && !error && scheduledSessions.length === 0 && (
+            <div style={{ padding: "10px 14px", color: "var(--text-muted)", fontSize: 12 }}>
+              暂无可打开的定时任务 Session
             </div>
           )}
-          {runs.map((run) => (
-            <div
-              key={`${run.taskId}-${run.id}`}
-              style={{
-                padding: "7px 8px",
-                marginBottom: 5,
-                borderRadius: 8,
-                background: "var(--bg)",
-                border: "1px solid var(--border)",
-              }}
-              title={run.error || run.output || run.taskName}
-            >
-              <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
-                <span style={{ color: run.result === "success" ? "#22c55e" : "#ef4444", fontSize: 12, fontWeight: 700 }}>
-                  {run.result === "success" ? "✓" : "✗"}
-                </span>
-                <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text)", fontSize: 12, fontWeight: 600 }}>
-                  {run.taskName}
-                </span>
-                <span style={{ color: "var(--text-dim)", fontSize: 10, flexShrink: 0 }}>{formatDuration(run.durationMs)}</span>
-              </div>
-              <div style={{ marginTop: 3, color: "var(--text-dim)", fontSize: 10 }}>{formatTime(run.timestamp)}</div>
-              {(run.error || run.output) && (
-                <div style={{ marginTop: 4, color: "var(--text-muted)", fontSize: 11, lineHeight: 1.35 }}>
-                  {truncate(run.error || run.output || "")}
+          {scheduledSessions.map(({ run, session }) => {
+            const title = session.name || session.firstMessage.slice(0, 50) || run.taskName || session.id.slice(0, 12);
+            const isSelected = session.id === selectedSessionId;
+            const isSuccess = run.result === "success";
+            return (
+              <button
+                key={`${run.taskId}-${run.id}-${session.id}`}
+                onClick={() => onSelectSession(session)}
+                title={title}
+                style={{
+                  height: 54,
+                  width: "100%",
+                  display: "flex",
+                  alignItems: "center",
+                  paddingLeft: 14,
+                  paddingRight: 8,
+                  cursor: "pointer",
+                  background: isSelected ? "var(--bg-selected)" : "transparent",
+                  border: "none",
+                  borderLeft: isSelected ? "2px solid var(--accent)" : "2px solid transparent",
+                  color: "var(--text)",
+                  textAlign: "left",
+                  transition: "background 0.1s",
+                  gap: 6,
+                  overflow: "hidden",
+                }}
+                onMouseEnter={(e) => { if (!isSelected) e.currentTarget.style.background = "var(--bg-hover)"; }}
+                onMouseLeave={(e) => { if (!isSelected) e.currentTarget.style.background = "transparent"; }}
+              >
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div
+                    style={{
+                      fontSize: 12,
+                      fontWeight: isSelected ? 500 : 400,
+                      lineHeight: 1.4,
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                      color: "var(--text)",
+                    }}
+                  >
+                    {title}
+                  </div>
+                  <div style={{ marginTop: 2, display: "flex", gap: 8, color: "var(--text-dim)", fontSize: 11, minWidth: 0 }}>
+                    <span title={session.modified}>{formatRelativeTime(session.modified)}</span>
+                    <span>{session.messageCount} 条消息</span>
+                    <span style={{ color: isSuccess ? "#22c55e" : "#ef4444" }}>{isSuccess ? "成功" : "失败"}</span>
+                  </div>
                 </div>
-              )}
-            </div>
-          ))}
+              </button>
+            );
+          })}
         </div>
       )}
     </div>
