@@ -392,6 +392,38 @@ export interface McpRuntime {
   close(): void;
 }
 
+export interface McpRuntimeLease {
+  runtime: McpRuntime;
+  release(): void;
+}
+
+type CachedMcpRuntime = {
+  runtime?: McpRuntime;
+  promise?: Promise<McpRuntime>;
+  refs: number;
+  lastUsedAt: number;
+};
+
+declare global {
+  var __deerhuxMcpRuntimeCache: Map<string, CachedMcpRuntime> | undefined;
+}
+
+function getMcpRuntimeCache(): Map<string, CachedMcpRuntime> {
+  if (!globalThis.__deerhuxMcpRuntimeCache) {
+    globalThis.__deerhuxMcpRuntimeCache = new Map();
+    const cleanup = () => {
+      for (const entry of globalThis.__deerhuxMcpRuntimeCache?.values() ?? []) {
+        entry.runtime?.close();
+      }
+      globalThis.__deerhuxMcpRuntimeCache?.clear();
+    };
+    process.once("exit", cleanup);
+    process.once("SIGINT", cleanup);
+    process.once("SIGTERM", cleanup);
+  }
+  return globalThis.__deerhuxMcpRuntimeCache;
+}
+
 export async function createMcpRuntime(cwd: string, serverList = loadEnabledMcpServers(cwd)): Promise<McpRuntime> {
   const clients: StdioMcpClient[] = [];
   const runtimeTools: RuntimeMcpTool[] = [];
@@ -479,7 +511,7 @@ export async function createMcpRuntime(cwd: string, serverList = loadEnabledMcpS
         let result: unknown;
         try {
           result = await visionTool.client.callTool(visionTool.tool.name, buildVisionToolArgs(visionTool.tool, image, userPrompt ?? ""));
-        } catch (error) {
+        } catch {
           // Some MCP image tools expect a data URL for a generic `image` field.
           // Retry once with data URL before surfacing the failure text.
           try {
@@ -495,6 +527,55 @@ export async function createMcpRuntime(cwd: string, serverList = loadEnabledMcpS
     },
     close: () => clients.forEach((client) => client.close()),
   };
+}
+
+export async function acquireMcpRuntime(cwd: string): Promise<McpRuntimeLease> {
+  const key = path.resolve(cwd);
+  const cache = getMcpRuntimeCache();
+  let entry = cache.get(key);
+  if (!entry) {
+    entry = { refs: 0, lastUsedAt: Date.now() };
+    cache.set(key, entry);
+  }
+
+  entry.refs += 1;
+  entry.lastUsedAt = Date.now();
+
+  try {
+    if (!entry.runtime) {
+      entry.promise ??= createMcpRuntime(cwd).then((runtime) => {
+        entry!.runtime = runtime;
+        entry!.promise = undefined;
+        entry!.lastUsedAt = Date.now();
+        return runtime;
+      }).catch((error) => {
+        entry!.promise = undefined;
+        throw error;
+      });
+      await entry.promise;
+    }
+
+    const runtime = entry.runtime;
+    if (!runtime) throw new Error("MCP runtime failed to initialize");
+
+    return {
+      runtime,
+      release: () => {
+        const current = cache.get(key);
+        if (!current) return;
+        current.refs = Math.max(0, current.refs - 1);
+        current.lastUsedAt = Date.now();
+        if (current.refs === 0) {
+          current.runtime?.close();
+          cache.delete(key);
+        }
+      },
+    };
+  } catch (error) {
+    entry.refs = Math.max(0, entry.refs - 1);
+    if (entry.refs === 0 && !entry.runtime) cache.delete(key);
+    throw error;
+  }
 }
 
 export async function createMcpRuntimeFromServers(cwd: string, servers: Partial<McpServerConfig>[]): Promise<McpRuntime> {

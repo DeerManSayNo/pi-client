@@ -7,7 +7,7 @@ import { vscDarkPlus } from "react-syntax-highlighter/dist/cjs/styles/prism";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useTheme } from "@/hooks/useTheme";
-import { encodeFilePathForApi, getFileName, getRelativeFilePath } from "@/lib/file-paths";
+import { encodeFilePathForApi, getFileName, getRelativeFilePath, joinFilePath, normalizeFilePathSlashes } from "@/lib/file-paths";
 
 interface Props {
   filePath: string;
@@ -21,18 +21,74 @@ interface FileData {
 }
 
 const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico", "avif"]);
-const AUDIO_EXTS = new Set(["mp3", "wav", "ogg", "oga", "opus", "m4a", "aac", "flac", "weba", "webm"]);
+const AUDIO_EXTS = new Set(["mp3", "wav", "ogg", "oga", "opus", "m4a", "aac", "flac", "weba"]);
+const VIDEO_EXTS = new Set(["mp4", "m4v", "webm", "ogv", "mov", "mkv"]);
+
+function getPathExt(filePath: string): string {
+  const withoutSuffix = filePath.split(/[?#]/, 1)[0];
+  return getFileName(withoutSuffix).toLowerCase().split(".").pop() ?? "";
+}
 
 function isImagePath(filePath: string): boolean {
-  const base = getFileName(filePath);
-  const ext = base.toLowerCase().split(".").pop() ?? "";
-  return IMAGE_EXTS.has(ext);
+  return IMAGE_EXTS.has(getPathExt(filePath));
 }
 
 function isAudioPath(filePath: string): boolean {
-  const base = getFileName(filePath);
-  const ext = base.toLowerCase().split(".").pop() ?? "";
-  return AUDIO_EXTS.has(ext);
+  return AUDIO_EXTS.has(getPathExt(filePath));
+}
+
+function isVideoPath(filePath: string): boolean {
+  return VIDEO_EXTS.has(getPathExt(filePath));
+}
+
+function getDirectoryPath(filePath: string): string {
+  const normalized = normalizeFilePathSlashes(filePath);
+  const lastSlash = normalized.lastIndexOf("/");
+  return lastSlash >= 0 ? normalized.slice(0, lastSlash) : "";
+}
+
+function isExternalMarkdownResource(src: string): boolean {
+  return /^(?:https?:|data:|blob:|mailto:|tel:|#|\/\/)/i.test(src);
+}
+
+function decodeResourcePath(resourcePath: string): string {
+  try {
+    return decodeURIComponent(resourcePath);
+  } catch {
+    return resourcePath;
+  }
+}
+
+function resolveMarkdownResourcePath(src: string | undefined, markdownPath: string, cwd?: string): string | null {
+  if (!src) return null;
+  const trimmed = src.trim();
+  if (!trimmed || isExternalMarkdownResource(trimmed)) return trimmed;
+
+  if (/^file:/i.test(trimmed)) {
+    try {
+      return decodeResourcePath(new URL(trimmed).pathname);
+    } catch {
+      return null;
+    }
+  }
+
+  const pathPart = decodeResourcePath(trimmed.split(/[?#]/, 1)[0]);
+  if (!pathPart) return null;
+  if (pathPart.startsWith("/")) {
+    return cwd ? joinFilePath(cwd, pathPart.slice(1)) : pathPart;
+  }
+  return joinFilePath(getDirectoryPath(markdownPath), pathPart);
+}
+
+function markdownResourceUrl(src: string | undefined, markdownPath: string, cwd?: string): string | undefined {
+  const resolved = resolveMarkdownResourcePath(src, markdownPath, cwd);
+  if (!resolved) return undefined;
+  if (resolved === src && isExternalMarkdownResource(resolved)) return resolved;
+  return `/api/files/${encodeFilePathForApi(resolved)}?type=read`;
+}
+
+function isVideoResourceSrc(src: string | undefined): boolean {
+  return Boolean(src && !isExternalMarkdownResource(src.trim()) && isVideoPath(src));
 }
 
 type DiffLine =
@@ -69,11 +125,13 @@ function SourcePreviewToggle({
   setPreviewMode,
   sourceLabel = "查看源码",
   previewLabel = "预览",
+  onPreviewDoubleClick,
 }: {
   previewMode: boolean;
   setPreviewMode: (preview: boolean) => void;
   sourceLabel?: string;
   previewLabel?: string;
+  onPreviewDoubleClick?: () => void;
 }) {
   return (
     <div style={{ display: "flex", flexShrink: 0, borderRadius: 5, overflow: "hidden", border: "1px solid var(--border)" }}>
@@ -93,6 +151,10 @@ function SourcePreviewToggle({
       </button>
       <button
         onClick={() => setPreviewMode(true)}
+        onDoubleClick={(e) => {
+          e.preventDefault();
+          onPreviewDoubleClick?.();
+        }}
         aria-label={previewLabel}
         title="预览"
         style={{
@@ -616,12 +678,136 @@ function AudioViewer({ filePath, cwd }: { filePath: string; cwd?: string }) {
   );
 }
 
+function VideoViewer({ filePath, cwd }: { filePath: string; cwd?: string }) {
+  const [watching, setWatching] = useState(false);
+  const [bust, setBust] = useState(0);
+  const [size, setSize] = useState<number | null>(null);
+  const [duration, setDuration] = useState<number | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const esRef = useRef<EventSource | null>(null);
+
+  const ext = getFileName(filePath).toLowerCase().split(".").pop() ?? "";
+
+  useEffect(() => {
+    setBust(0);
+    setSize(null);
+    setDuration(null);
+    setError(null);
+    setWatching(false);
+
+    if (esRef.current) {
+      esRef.current.close();
+      esRef.current = null;
+    }
+
+    const encoded = encodeFilePathForApi(filePath);
+    const es = new EventSource(`/api/files/${encoded}?type=watch`);
+    esRef.current = es;
+
+    es.addEventListener("connected", () => setWatching(true));
+    es.addEventListener("change", (e) => {
+      try {
+        const d = JSON.parse((e as MessageEvent).data) as { size?: number };
+        if (typeof d.size === "number") setSize(d.size);
+      } catch { /* ignore */ }
+      setDuration(null);
+      setError(null);
+      setBust((b) => b + 1);
+    });
+    es.addEventListener("error", () => setWatching(false));
+    es.onerror = () => setWatching(false);
+
+    return () => {
+      es.close();
+      esRef.current = null;
+    };
+  }, [filePath]);
+
+  const encoded = encodeFilePathForApi(filePath);
+  const src = `/api/files/${encoded}?type=read${bust ? `&v=${bust}` : ""}`;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 12,
+          padding: "4px 16px",
+          borderBottom: "1px solid var(--border)",
+          fontSize: 11,
+          color: "var(--text-dim)",
+          background: "var(--bg)",
+          flexShrink: 0,
+        }}
+      >
+        <MiddleEllipsisPath path={getRelativeFilePath(filePath, cwd)} title={filePath} />
+        <span style={{ marginLeft: "auto", flexShrink: 0 }}>{ext || "video"}</span>
+        {duration != null && <span style={{ flexShrink: 0, whiteSpace: "nowrap" }}>{formatDuration(duration)}</span>}
+        {size != null && <span style={{ flexShrink: 0, whiteSpace: "nowrap" }}>{formatSize(size)}</span>}
+        <span
+          title={watching ? "实时同步已启用" : "未监听"}
+          style={{ display: "flex", alignItems: "center", gap: 4, color: watching ? "#4ade80" : "var(--text-dim)", flexShrink: 0, whiteSpace: "nowrap" }}
+        >
+          <span
+            style={{
+              width: 7,
+              height: 7,
+              borderRadius: "50%",
+              background: watching ? "#4ade80" : "var(--border)",
+              display: "inline-block",
+              boxShadow: watching ? "0 0 4px #4ade80" : "none",
+            }}
+          />
+          {watching ? "实时" : "静态"}
+        </span>
+      </div>
+      <div
+        style={{
+          flex: 1,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          padding: 16,
+          background: "var(--bg-panel)",
+          overflow: "auto",
+        }}
+      >
+        <div style={{ width: "min(960px, 100%)" }}>
+          {error && (
+            <div style={{ color: "#f87171", fontSize: 13, marginBottom: 12, textAlign: "center" }}>
+              {error}
+            </div>
+          )}
+          <video
+            key={src}
+            controls
+            preload="metadata"
+            src={src}
+            onLoadedMetadata={(e) => setDuration(e.currentTarget.duration)}
+            onError={() => setError("视频加载失败")}
+            style={{
+              width: "100%",
+              maxHeight: "calc(100vh - 160px)",
+              background: "#000",
+              borderRadius: 8,
+            }}
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function FileViewer({ filePath, cwd }: Props) {
   if (isImagePath(filePath)) {
     return <ImageViewer filePath={filePath} cwd={cwd} />;
   }
   if (isAudioPath(filePath)) {
     return <AudioViewer filePath={filePath} cwd={cwd} />;
+  }
+  if (isVideoPath(filePath)) {
+    return <VideoViewer filePath={filePath} cwd={cwd} />;
   }
   return <TextFileViewer filePath={filePath} cwd={cwd} />;
 }
@@ -636,7 +822,9 @@ function TextFileViewer({ filePath, cwd }: Props) {
   const [viewMode, setViewMode] = useState<"source" | "diff">("source");
   const [watching, setWatching] = useState(false);
   const [changeCount, setChangeCount] = useState(0);
+  const [copiedFullText, setCopiedFullText] = useState(false);
   const esRef = useRef<EventSource | null>(null);
+  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const fetchContent = useCallback((filePath: string, isRefresh = false) => {
     const encoded = encodeFilePathForApi(filePath);
@@ -664,6 +852,18 @@ function TextFileViewer({ filePath, cwd }: Props) {
       });
   }, []);
 
+  const copyFullText = useCallback(async () => {
+    if (!data) return;
+    try {
+      await navigator.clipboard.writeText(data.content);
+      setCopiedFullText(true);
+      if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+      copyTimerRef.current = setTimeout(() => setCopiedFullText(false), 1500);
+    } catch {
+      // Clipboard can be unavailable outside secure contexts.
+    }
+  }, [data]);
+
   // Initial load + SSE watch setup
   useEffect(() => {
     setLoading(true);
@@ -673,6 +873,7 @@ function TextFileViewer({ filePath, cwd }: Props) {
     setPreviewMode(false);
     setViewMode("source");
     setChangeCount(0);
+    setCopiedFullText(false);
     setWatching(false);
 
     if (esRef.current) {
@@ -710,6 +911,12 @@ function TextFileViewer({ filePath, cwd }: Props) {
       esRef.current = null;
     };
   }, [filePath, fetchContent]);
+
+  useEffect(() => {
+    return () => {
+      if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+    };
+  }, []);
 
   if (loading) {
     return (
@@ -809,9 +1016,33 @@ function TextFileViewer({ filePath, cwd }: Props) {
             setPreviewMode={setPreviewMode}
             sourceLabel={isHtml ? "查看 HTML 源码" : "查看 Markdown 源码"}
             previewLabel={isHtml ? "预览 HTML" : "预览 Markdown"}
+            onPreviewDoubleClick={copyFullText}
           />
         )}
       </div>
+
+      {copiedFullText && (
+        <div
+          aria-live="polite"
+          style={{
+            position: "fixed",
+            top: 48,
+            left: "50%",
+            transform: "translateX(-50%)",
+            zIndex: 2000,
+            padding: "8px 12px",
+            borderRadius: 8,
+            border: "1px solid var(--border)",
+            background: "var(--bg-panel)",
+            color: "var(--text)",
+            boxShadow: "0 8px 24px rgba(0,0,0,0.18)",
+            fontSize: 12,
+            fontWeight: 600,
+          }}
+        >
+          已复制全文
+        </div>
+      )}
 
       {/* Content area */}
       <div style={{ flex: 1, overflow: "auto", background: "var(--bg)" }}>
@@ -829,7 +1060,62 @@ function TextFileViewer({ filePath, cwd }: Props) {
             className="markdown-body markdown-file-preview"
             style={{ padding: "24px 32px", maxWidth: 800 }}
           >
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{data.content}</ReactMarkdown>
+            <ReactMarkdown
+              remarkPlugins={[remarkGfm]}
+              components={{
+                img: ({ src, alt }) => {
+                  const srcText = typeof src === "string" ? src : undefined;
+                  const mediaSrc = markdownResourceUrl(srcText, filePath, cwd);
+                  if (isVideoResourceSrc(srcText)) {
+                    return (
+                      <video
+                        controls
+                        preload="metadata"
+                        src={mediaSrc}
+                        title={alt ?? srcText}
+                        style={{ maxWidth: "100%", borderRadius: 8, background: "#000", margin: "8px 0" }}
+                      />
+                    );
+                  }
+                  return (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img
+                      src={mediaSrc}
+                      alt={alt ?? ""}
+                      style={{ maxWidth: "100%", height: "auto", borderRadius: 6, margin: "8px 0" }}
+                    />
+                  );
+                },
+                a: ({ href, children }) => {
+                  const mediaSrc = markdownResourceUrl(href, filePath, cwd);
+                  if (isVideoResourceSrc(href)) {
+                    return (
+                      <video
+                        controls
+                        preload="metadata"
+                        src={mediaSrc}
+                        title={typeof children === "string" ? children : href}
+                        style={{ display: "block", maxWidth: "100%", borderRadius: 8, background: "#000", margin: "8px 0" }}
+                      />
+                    );
+                  }
+                  return <a href={href}>{children}</a>;
+                },
+                ul: ({ children }) => (
+                  <ul style={{ listStyleType: "disc", listStylePosition: "outside", paddingLeft: 24, margin: "4px 0 12px" }}>
+                    {children}
+                  </ul>
+                ),
+                ol: ({ children }) => (
+                  <ol style={{ listStyleType: "decimal", listStylePosition: "outside", paddingLeft: 24, margin: "4px 0 12px" }}>
+                    {children}
+                  </ol>
+                ),
+                li: ({ children }) => <li style={{ display: "list-item", margin: "3px 0" }}>{children}</li>,
+              }}
+            >
+              {data.content}
+            </ReactMarkdown>
           </div>
         ) : (
           <SyntaxHighlighter

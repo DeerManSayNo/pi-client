@@ -9,7 +9,7 @@ import { applyRolePromptConfigToPrompt, isRoleSystemPromptSectionEnabled, readRo
 import { indexExists } from "./code-index/database";
 import { searchIndex } from "./code-index/search";
 import { createCodeGraphTools } from "./codegraph/tools";
-import type { McpRuntime } from "./mcp-runtime";
+import type { McpRuntime, McpRuntimeLease } from "./mcp-runtime";
 
 // ============================================================================
 // Types
@@ -175,6 +175,16 @@ const TOOL_EXECUTION_MODES: Record<string, "parallel" | "sequential"> = {
   write: "sequential",
 };
 
+const FULL_PRESET_MARKERS = ["grep", "find", "ls"];
+
+function isFullToolPreset(toolNames: string[]): boolean {
+  return FULL_PRESET_MARKERS.every((name) => toolNames.includes(name));
+}
+
+function includesMcpTool(toolNames: string[]): boolean {
+  return toolNames.some((name) => name.startsWith("mcp__"));
+}
+
 export function configureToolExecutionModes(session: AgentSessionLike): void {
   const forceSequential = process.env.PI_DISABLE_PARALLEL_TOOLS === "1" || process.env.PI_DISABLE_PARALLEL_TOOLS === "true";
   if (forceSequential) {
@@ -230,10 +240,14 @@ export class AgentSessionWrapper {
   private activeTurnPromise: Promise<void> | null = null;
   private sawAssistantEventInTurn = false;
 
-  constructor(public readonly inner: AgentSessionLike, roleId?: string | null, private mcpRuntime?: McpRuntime | null) {
+  constructor(public readonly inner: AgentSessionLike, roleId?: string | null, private mcpRuntimeLease?: McpRuntimeLease | null) {
     this.roleId = roleId ?? null;
     this.baseSystemPrompt = inner.agent.state?.systemPrompt ?? "";
     this.applyRolePrompt();
+  }
+
+  private get mcpRuntime(): McpRuntime | null {
+    return this.mcpRuntimeLease?.runtime ?? null;
   }
 
   private syncRoleMcpActiveTools(): void {
@@ -465,13 +479,70 @@ export class AgentSessionWrapper {
     }
   }
 
+  private installMcpRuntime(nextRuntime: McpRuntime, activateMcp: boolean): void {
+    const previousRuntime = this.mcpRuntime;
+    const previousMcpToolNames = new Set(previousRuntime?.toolNames ?? []);
+    const nextMcpToolNames = new Set(nextRuntime.toolNames);
+    const activeBefore = this.inner.getActiveToolNames();
+
+    const rawSession = this.inner as unknown as {
+      _customTools?: ToolDefinition[];
+      _allowedToolNames?: Set<string>;
+      _refreshToolRegistry?: (options?: { activeToolNames?: string[]; includeAllExtensionTools?: boolean }) => void;
+    };
+
+    if (!Array.isArray(rawSession._customTools) || typeof rawSession._refreshToolRegistry !== "function") {
+      throw new Error("Current AgentSession does not support runtime MCP reload");
+    }
+
+    if (rawSession._allowedToolNames && rawSession._allowedToolNames.size > 0) {
+      for (const toolName of nextMcpToolNames) rawSession._allowedToolNames.add(toolName);
+    }
+
+    rawSession._customTools = [
+      ...rawSession._customTools.filter((tool) => !previousMcpToolNames.has(tool.name) && !tool.name.startsWith("mcp__")),
+      ...nextRuntime.tools,
+    ];
+
+    const nextActiveToolNames = activeBefore.filter((name) => !previousMcpToolNames.has(name) && !name.startsWith("mcp__"));
+    if (activateMcp) nextActiveToolNames.push(...nextMcpToolNames);
+
+    rawSession._refreshToolRegistry({ activeToolNames: [...new Set(nextActiveToolNames)], includeAllExtensionTools: true });
+    configureToolExecutionModes(this.inner);
+
+    if (this.inner.agent.state) {
+      this.baseSystemPrompt = this.inner.agent.state.systemPrompt ?? "";
+    }
+    this.applyRolePrompt();
+  }
+
+  private async ensureMcpRuntimeLoaded(activateMcp = false): Promise<McpRuntime | null> {
+    if (this.mcpRuntime) {
+      if (activateMcp) this.installMcpRuntime(this.mcpRuntime, true);
+      return this.mcpRuntime;
+    }
+
+    const cwd = this.inner.sessionManager.getCwd();
+    const { acquireMcpRuntime } = await import("./mcp-runtime");
+    const lease = await acquireMcpRuntime(cwd);
+    try {
+      this.installMcpRuntime(lease.runtime, activateMcp);
+      this.mcpRuntimeLease = lease;
+      return lease.runtime;
+    } catch (error) {
+      lease.release();
+      throw error;
+    }
+  }
+
   private async prepareImageFallback(message: string, images?: Array<{ type: "image"; data: string; mimeType: string }>): Promise<{ message: string; images?: Array<{ type: "image"; data: string; mimeType: string }>; displayContent?: unknown }> {
     if (!images?.length) return { message, images };
 
     const supportsImageInput = (this.inner.model as { input?: string[] } | null | undefined)?.input?.includes("image") ?? false;
     if (supportsImageInput) return { message, images };
 
-    const descriptions = await this.mcpRuntime?.describeImages(images, message).catch((error: unknown) => [
+    const mcpRuntime = await this.ensureMcpRuntimeLoaded(false).catch(() => null);
+    const descriptions = await mcpRuntime?.describeImages(images, message).catch((error: unknown) => [
       `MCP 图片识别失败：${error instanceof Error ? error.message : String(error)}`,
     ]);
     const imageContext = descriptions?.length
@@ -502,48 +573,19 @@ export class AgentSessionWrapper {
     const nextRuntime = await createMcpRuntime(cwd);
     const previousRuntime = this.mcpRuntime;
     const previousMcpToolNames = new Set(previousRuntime?.toolNames ?? []);
-    const nextMcpToolNames = new Set(nextRuntime.toolNames);
     const activeBefore = this.inner.getActiveToolNames();
     const hadActiveMcp = activeBefore.some((name) => previousMcpToolNames.has(name) || name.startsWith("mcp__"));
-    const isFullPreset = ["grep", "find", "ls"].every((name) => activeBefore.includes(name));
+    const isFullPreset = isFullToolPreset(activeBefore);
 
-    const rawSession = this.inner as unknown as {
-      _customTools?: ToolDefinition[];
-      _allowedToolNames?: Set<string>;
-      _refreshToolRegistry?: (options?: { activeToolNames?: string[]; includeAllExtensionTools?: boolean }) => void;
-    };
-
-    if (!Array.isArray(rawSession._customTools) || typeof rawSession._refreshToolRegistry !== "function") {
+    try {
+      this.installMcpRuntime(nextRuntime, hadActiveMcp || isFullPreset);
+    } catch (error) {
       nextRuntime.close();
-      throw new Error("Current AgentSession does not support runtime MCP reload");
+      throw error;
     }
 
-    if (rawSession._allowedToolNames && rawSession._allowedToolNames.size > 0) {
-      for (const toolName of nextMcpToolNames) rawSession._allowedToolNames.add(toolName);
-    }
-
-    rawSession._customTools = [
-      ...rawSession._customTools.filter((tool) => !previousMcpToolNames.has(tool.name) && !tool.name.startsWith("mcp__")),
-      ...nextRuntime.tools,
-    ];
-
-    const nextActiveToolNames = activeBefore.filter((name) => !previousMcpToolNames.has(name) && !name.startsWith("mcp__"));
-    if (hadActiveMcp || isFullPreset) nextActiveToolNames.push(...nextMcpToolNames);
-
-    this.mcpRuntime = nextRuntime;
-    rawSession._refreshToolRegistry({ activeToolNames: [...new Set(nextActiveToolNames)], includeAllExtensionTools: true });
-    previousRuntime?.close();
-    configureToolExecutionModes(this.inner);
-
-    // _refreshToolRegistry() calls setActiveToolsByName(), which rebuilds the SDK
-    // base system prompt from the newly discovered tool prompt snippets. Keep the
-    // wrapper's cached base prompt in sync before applying role/system-prompt
-    // filters; otherwise applyRolePrompt() would re-apply the stale prompt and
-    // wipe MCP tools from the visible/effective system prompt after MCP reload.
-    if (this.inner.agent.state) {
-      this.baseSystemPrompt = this.inner.agent.state.systemPrompt ?? "";
-    }
-    this.applyRolePrompt();
+    this.mcpRuntimeLease?.release();
+    this.mcpRuntimeLease = { runtime: nextRuntime, release: () => nextRuntime.close() };
 
     return { ok: true, toolNames: nextRuntime.toolNames, serverStatuses: nextRuntime.serverStatuses };
   }
@@ -785,7 +827,10 @@ export class AgentSessionWrapper {
 
       case "set_tools": {
         const requested = Array.isArray(command.toolNames) ? command.toolNames.filter((name): name is string => typeof name === "string") : [];
-        const isFullPreset = ["grep", "find", "ls"].every(name => requested.includes(name));
+        const isFullPreset = isFullToolPreset(requested);
+        if (isFullPreset || includesMcpTool(requested)) {
+          await this.ensureMcpRuntimeLoaded(true);
+        }
         const toolNames = isFullPreset
           ? [...new Set([...requested, ...(this.mcpRuntime?.toolNames ?? [])])]
           : requested;
@@ -820,7 +865,8 @@ export class AgentSessionWrapper {
     // Fire-and-forget: destroy() is called synchronously from idle timeout,
     // fork, and DELETE handler; blocking would delay those callers.
     this.inner.abort().catch(() => {});
-    this.mcpRuntime?.close();
+    this.mcpRuntimeLease?.release();
+    this.mcpRuntimeLease = null;
     this.onDestroyCallback?.();
   }
 }
@@ -931,27 +977,37 @@ export async function startRpcSession(
       },
     }) : null;
     const codeGraphTools = await createCodeGraphTools(cwd);
-    const { createMcpRuntime } = await import("./mcp-runtime");
-    const mcpRuntime = await createMcpRuntime(cwd);
-    const customTools = [...(codeSearchTool ? [codeSearchTool] : []), ...codeGraphTools, ...mcpRuntime.tools];
+    const requestedToolNames = toolNames ?? [];
+    const shouldLoadMcpAtStartup = isFullToolPreset(requestedToolNames) || includesMcpTool(requestedToolNames);
+    const mcpRuntimeLease = shouldLoadMcpAtStartup
+      ? await import("./mcp-runtime").then(({ acquireMcpRuntime }) => acquireMcpRuntime(cwd))
+      : null;
+    const mcpRuntime = mcpRuntimeLease?.runtime ?? null;
+    const customTools = [...(codeSearchTool ? [codeSearchTool] : []), ...codeGraphTools, ...(mcpRuntime?.tools ?? [])];
     const availableToolNames = [
       ...allCodingToolNames,
       ...(codeSearchTool ? ["code_search"] : []),
       ...codeGraphTools.map(tool => tool.name),
-      ...mcpRuntime.toolNames,
+      ...(mcpRuntime?.toolNames ?? []),
     ];
     let toolsOption: string[] | undefined;
     if (toolNames !== undefined) {
       toolsOption = toolNames.length === 0 ? [] : availableToolNames;
     }
 
-    const { session: inner } = await createAgentSession({
-      cwd,
-      agentDir,
-      sessionManager,
-      ...(toolsOption !== undefined ? { tools: toolsOption } : {}),
-      ...(customTools.length > 0 ? { customTools } : {}),
-    });
+    let inner: AgentSessionLike;
+    try {
+      ({ session: inner } = await createAgentSession({
+        cwd,
+        agentDir,
+        sessionManager,
+        ...(toolsOption !== undefined ? { tools: toolsOption } : {}),
+        ...(customTools.length > 0 ? { customTools } : {}),
+      }));
+    } catch (error) {
+      mcpRuntimeLease?.release();
+      throw error;
+    }
 
     configureToolExecutionModes(inner);
     hardenAutoRetry(inner);
@@ -962,9 +1018,9 @@ export async function startRpcSession(
     // "all available runtime tools", including MCP.
     if (toolNames && toolNames.length > 0) {
       const knownTools = new Set(inner.getAllTools().map((tool: ToolInfo) => tool.name));
-      const isFullPreset = ["grep", "find", "ls"].every(name => toolNames.includes(name));
+      const isFullPreset = isFullToolPreset(toolNames);
       const requested = toolNames.filter(name => knownTools.has(name));
-      if (isFullPreset) requested.push(...mcpRuntime.toolNames.filter(name => knownTools.has(name)));
+      if (isFullPreset) requested.push(...(mcpRuntime?.toolNames ?? []).filter(name => knownTools.has(name)));
       inner.setActiveToolsByName([...new Set(requested)]);
     }
 
@@ -975,7 +1031,7 @@ export async function startRpcSession(
       setEffectiveSystemPrompt(inner, "");
     }
 
-    const wrapper = new AgentSessionWrapper(inner, roleId, mcpRuntime);
+    const wrapper = new AgentSessionWrapper(inner, roleId, mcpRuntimeLease);
     wrapper.start();
 
     const realSessionId = inner.sessionId as string;

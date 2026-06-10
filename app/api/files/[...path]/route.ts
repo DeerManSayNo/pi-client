@@ -12,6 +12,7 @@ const IGNORED_NAMES = new Set([
 const IGNORED_SUFFIXES = [".pyc"];
 
 const TEXT_PREVIEW_MAX_BYTES = 256 * 1024;
+const DOCUMENT_PREVIEW_MAX_BYTES = 5 * 1024 * 1024;
 const IMAGE_PREVIEW_MAX_BYTES = 10 * 1024 * 1024;
 
 const IMAGE_EXT_TO_MIME: Record<string, string> = {
@@ -36,7 +37,15 @@ const AUDIO_EXT_TO_MIME: Record<string, string> = {
   aac: "audio/aac",
   flac: "audio/flac",
   weba: "audio/webm",
-  webm: "audio/webm",
+};
+
+const VIDEO_EXT_TO_MIME: Record<string, string> = {
+  mp4: "video/mp4",
+  m4v: "video/mp4",
+  webm: "video/webm",
+  ogv: "video/ogg",
+  mov: "video/quicktime",
+  mkv: "video/x-matroska",
 };
 
 function getExt(filePath: string): string {
@@ -50,6 +59,10 @@ function getImageMime(filePath: string): string | null {
 
 function getAudioMime(filePath: string): string | null {
   return AUDIO_EXT_TO_MIME[getExt(filePath)] ?? null;
+}
+
+function getVideoMime(filePath: string): string | null {
+  return VIDEO_EXT_TO_MIME[getExt(filePath)] ?? null;
 }
 
 const EXT_TO_LANGUAGE: Record<string, string> = {
@@ -215,11 +228,19 @@ export async function GET(
       if (audioMime) {
         return streamFile(filePath, stat, audioMime, request.headers.get("range"));
       }
-      if (stat.size > TEXT_PREVIEW_MAX_BYTES) {
-        return NextResponse.json({ error: "File too large for preview (>256KB)" }, { status: 413 });
+      const videoMime = getVideoMime(filePath);
+      if (videoMime) {
+        return streamFile(filePath, stat, videoMime, request.headers.get("range"));
+      }
+      const language = getLanguage(filePath);
+      const maxPreviewBytes = language === "markdown" || language === "html"
+        ? DOCUMENT_PREVIEW_MAX_BYTES
+        : TEXT_PREVIEW_MAX_BYTES;
+      if (stat.size > maxPreviewBytes) {
+        const maxLabel = language === "markdown" || language === "html" ? ">5MB" : ">256KB";
+        return NextResponse.json({ error: `File too large for preview (${maxLabel})` }, { status: 413 });
       }
       const content = fs.readFileSync(filePath, "utf-8");
-      const language = getLanguage(filePath);
       return NextResponse.json({ content, language, size: stat.size });
     }
 

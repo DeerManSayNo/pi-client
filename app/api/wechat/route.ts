@@ -6,6 +6,7 @@
  *   { action: "login" }           开始扫码登录（返回二维码 URL）
  *   { action: "start" }           启动消息轮询
  *   { action: "stop" }            停止轮询
+ *   { action: "restart" }         重启消息轮询
  *   { action: "logout" }          退出登录
  *   { action: "setCwd", cwd }    设置默认工作目录
  */
@@ -73,6 +74,20 @@ export async function POST(req: Request) {
         return NextResponse.json({ success: true, message: "消息轮询已停止" });
       }
 
+      case "restart": {
+        if (!bot.getStatus().connected) {
+          return NextResponse.json({
+            success: false,
+            error: "尚未登录，请先扫码",
+          }, { status: 400 });
+        }
+        bot.stopPolling();
+        void bot.startPolling().catch((err) => {
+          console.error("[WeChatBot] 重启轮询失败:", err);
+        });
+        return NextResponse.json({ success: true, message: "消息轮询已重启" });
+      }
+
       case "logout": {
         bot.logout();
         return NextResponse.json({ success: true, message: "已退出登录" });
@@ -102,7 +117,7 @@ export async function POST(req: Request) {
 
       default:
         return NextResponse.json({
-          error: `Unknown action: ${body.action}. Supported: login, start, stop, logout, setCwd, restore`,
+          error: `Unknown action: ${body.action}. Supported: login, start, stop, restart, logout, setCwd, restore`,
         }, { status: 400 });
     }
   } catch (error) {

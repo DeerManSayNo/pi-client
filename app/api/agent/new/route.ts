@@ -4,8 +4,9 @@ import { addAllowedRoot } from "@/lib/file-access";
 import { startRpcSession } from "@/lib/rpc-manager";
 import { invalidateSessionListCache } from "@/lib/session-reader";
 
-// POST /api/agent/new  body: { cwd: string; type: string; message: string; ... }
-// Spawns a brand-new DeerHux session and immediately sends the first command.
+// POST /api/agent/new  body: { cwd: string; type: string; message?: string; ... }
+// Spawns a brand-new DeerHux session. For type="create", returns the session id
+// without sending a prompt so the client can connect SSE before the first turn.
 // Returns { sessionId, data } where sessionId is DeerHux's real session id.
 export async function POST(req: Request) {
   try {
@@ -40,6 +41,11 @@ export async function POST(req: Request) {
     // Persist/apply the role selection for the new session before sending the first prompt.
     if (roleId) {
       await session.send({ type: "set_role", roleId });
+    }
+
+    if (promptCommand.type === "create") {
+      invalidateSessionListCache();
+      return NextResponse.json({ success: true, sessionId: realSessionId, data: null });
     }
 
     const result = await session.send(promptCommand);

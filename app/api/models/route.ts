@@ -14,6 +14,12 @@ interface ConfiguredModel {
   input?: ("text" | "image")[];
 }
 
+interface RecoveryFallbackModel {
+  provider: string;
+  modelId: string;
+}
+type AutoRecoveryModel = RecoveryFallbackModel | null;
+
 function getConfiguredModels(agentDir: string): Map<string, ConfiguredModel> {
   const modelsPath = join(agentDir, "models.json");
   if (!existsSync(modelsPath)) return new Map();
@@ -52,16 +58,46 @@ function getConfiguredModels(agentDir: string): Map<string, ConfiguredModel> {
   }
 }
 
+function getAutoRecoveryModels(agentDir: string, configuredModels: Map<string, ConfiguredModel>): AutoRecoveryModel[] {
+  const modelsPath = join(agentDir, "models.json");
+  if (!existsSync(modelsPath)) return [];
+
+  try {
+    const data = JSON.parse(readFileSync(modelsPath, "utf8")) as {
+      autoRecoveryModels?: unknown;
+    };
+    if (!Array.isArray(data.autoRecoveryModels)) return [];
+    const entries = data.autoRecoveryModels
+      .map((entry) => {
+        if (entry === null) return null;
+        if (!entry || typeof entry !== "object") return null;
+        const record = entry as Record<string, unknown>;
+        const provider = typeof record.provider === "string" ? record.provider.trim() : "";
+        const modelId = typeof record.modelId === "string" ? record.modelId.trim() : "";
+        if (!provider || !modelId) return null;
+        if (!configuredModels.has(`${provider}:${modelId}`)) return null;
+        return { provider, modelId };
+      })
+      .slice(0, 3);
+    while (entries.length > 0 && entries[entries.length - 1] === null) entries.pop();
+    return entries;
+  } catch {
+    return [];
+  }
+}
+
 export async function GET() {
   const nameMap = new Map<string, string>();
   let modelList: { id: string; name: string; provider: string }[] = [];
   let defaultModel: { provider: string; modelId: string } | null = null;
+  let autoRecoveryModels: AutoRecoveryModel[] = [];
   const thinkingLevels: Record<string, string[]> = {};
   const thinkingLevelMaps: Record<string, Record<string, string | null>> = {};
 
   try {
     const agentDir = getAgentDir();
     const configuredModels = getConfiguredModels(agentDir);
+    autoRecoveryModels = getAutoRecoveryModels(agentDir, configuredModels);
     const authStorage = AuthStorage.create();
     const registry = ModelRegistry.create(authStorage);
     const available = registry
@@ -94,7 +130,7 @@ export async function GET() {
     }
   } catch { /* return empty */ }
 
-  return Response.json({ models: Object.fromEntries(nameMap), modelList, defaultModel, thinkingLevels, thinkingLevelMaps });
+  return Response.json({ models: Object.fromEntries(nameMap), modelList, defaultModel, autoRecoveryModels, thinkingLevels, thinkingLevelMaps });
 }
 
 // 新增：独立接口返回模型 input 能力（纯 UI 使用，轻量）

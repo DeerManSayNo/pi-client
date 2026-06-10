@@ -145,6 +145,12 @@ function getProjectName(cwd: string): string {
   return parts.length > 0 ? parts[parts.length - 1] : cwd;
 }
 
+function isScheduledTasksCwd(cwd: string): boolean {
+  const normalized = cwd.replace(/[\\/]+$/, "");
+  return /[\\/]\.deerhux[\\/]agent[\\/]scheduled-tasks$/.test(normalized)
+    || /[\\/]\.deerhux[\\/]agent[\\/]wechat[\\/]remote-cwd$/.test(normalized);
+}
+
 function getInitial(text: string | null | undefined): string {
   const trimmed = (text ?? "").trim();
   return Array.from(trimmed)[0]?.toUpperCase() ?? "•";
@@ -427,7 +433,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       .filter((project) => project.cwd === defaultCwd || !projectMeta.hiddenCwds.includes(project.cwd))
       .map((project) => ({
         ...project,
-        displayName: project.cwd === defaultCwd ? "默认" : project.displayName,
+        displayName: isScheduledTasksCwd(project.cwd) ? "定时任务" : project.cwd === defaultCwd ? "默认" : project.displayName,
         note: projectMeta.notes[project.cwd]?.trim() || undefined,
         pinned: projectMeta.pinnedCwds.includes(project.cwd),
       }))
@@ -1013,17 +1019,17 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         );
       })()}
 
-      {/* RemoteConnectionsBlock */}
+      {/* SchedulerRunsBlock */}
       {!compact && (
-        <RemoteConnectionsBlock
+        <SchedulerRunsBlock
           selectedSessionId={selectedSessionId}
           onSelectSession={onSelectSession}
         />
       )}
 
-      {/* SchedulerRunsBlock */}
+      {/* RemoteConnectionsBlock */}
       {!compact && (
-        <SchedulerRunsBlock
+        <RemoteConnectionsBlock
           selectedSessionId={selectedSessionId}
           onSelectSession={onSelectSession}
         />

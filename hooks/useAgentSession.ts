@@ -102,6 +102,7 @@ interface ModelsResponse {
   models: Record<string, string>;
   modelList?: { id: string; name: string; provider: string; input?: ("text" | "image")[] }[];
   defaultModel?: { provider: string; modelId: string } | null;
+  autoRecoveryModels?: ({ provider: string; modelId: string } | null)[];
   thinkingLevels?: Record<string, string[]>;
   thinkingLevelMaps?: Record<string, Record<string, string | null>>;
 }
@@ -253,6 +254,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [modelList, setModelList] = useState<{ id: string; name: string; provider: string; input?: ("text" | "image")[] }[]>([]);
   const [modelThinkingLevels, setModelThinkingLevels] = useState<Record<string, string[]>>({});
   const [modelThinkingLevelMaps, setModelThinkingLevelMaps] = useState<Record<string, Record<string, string | null>>>({});
+  const [autoRecoveryModels, setAutoRecoveryModels] = useState<({ provider: string; modelId: string } | null)[]>([]);
   const [newSessionModel, setNewSessionModelState] = useState<{ provider: string; modelId: string } | null>(null);
   const [toolPreset, setToolPreset] = useState<ToolPreset>("default");
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevelOption>("auto");
@@ -296,6 +298,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const lastAgentEventAtRef = useRef(Date.now());
   const lastContentChangedAtRef = useRef(Date.now());
   const lastContentLengthRef = useRef(0);
+  const autoRecoveryModelsRef = useRef<({ provider: string; modelId: string } | null)[]>([]);
   const watchdogCheckingRef = useRef(false);
   const watchdogStaleRecoveriesRef = useRef(0);
   // Tracks how many times the watchdog has auto-recovered this logical turn.
@@ -308,6 +311,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const autoContinueInProgressRef = useRef(false);
   const abortCompletedRef = useRef(false);
   const receivedAssistantMessageRef = useRef(false);
+  const awaitingAgentStartRef = useRef(false);
+  const optimisticSessionIdRef = useRef<string | null>(null);
+  const adoptingCreatedSessionRef = useRef<string | null>(null);
   const turnIdRef = useRef(0);
 
   // Shared reset: clears all per-turn tracking state. Called at the start of
@@ -329,6 +335,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     lastModelErrorRef.current = null;
     setLastModelError(null);
     receivedAssistantMessageRef.current = false;
+    awaitingAgentStartRef.current = false;
     lastAgentEventAtRef.current = Date.now();
     lastContentChangedAtRef.current = Date.now();
     lastContentLengthRef.current = 0;
@@ -442,6 +449,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       fetch(`/api/agent/${encodeURIComponent(sid)}`)
         .then((r) => r.json())
         .then((d: { running?: boolean; status?: AgentStatus }) => {
+          if (awaitingAgentStartRef.current) return;
           if (agentRunningRef.current && (!d.running || d.status?.isRunning === false)) {
             // Session ended while we were disconnected — dispatch a synthetic
             // agent_end so the client state resets cleanly.
@@ -480,7 +488,43 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         }
       }, delay);
     };
+    return es;
   }, []);
+
+  const ensureEventsConnected = useCallback((sid: string) => {
+    const existing = eventSourceRef.current;
+    if (sessionIdRef.current === sid && existing && existing.readyState !== EventSource.CLOSED) {
+      return existing;
+    }
+    return connectEvents(sid);
+  }, [connectEvents]);
+
+  const waitForEventsReady = useCallback((sid: string, timeoutMs = 700) => new Promise<void>((resolve) => {
+    const es = eventSourceRef.current;
+    if (!es || sessionIdRef.current !== sid || es.readyState === EventSource.OPEN) {
+      resolve();
+      return;
+    }
+
+    let settled = false;
+    let timeout: ReturnType<typeof setTimeout> | null = null;
+    const cleanup = () => {
+      if (timeout) clearTimeout(timeout);
+      es.removeEventListener("open", done);
+      es.removeEventListener("message", done);
+      es.removeEventListener("error", done);
+    };
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve();
+    };
+    timeout = setTimeout(done, timeoutMs);
+    es.addEventListener("open", done);
+    es.addEventListener("message", done);
+    es.addEventListener("error", done);
+  }), []);
 
   useEffect(() => {
     agentRunningRef.current = agentRunning;
@@ -489,6 +533,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   useEffect(() => {
     agentPhaseRef.current = agentPhase;
   }, [agentPhase]);
+
+  useEffect(() => {
+    autoRecoveryModelsRef.current = autoRecoveryModels;
+  }, [autoRecoveryModels]);
 
   const handleAgentEvent = useCallback((event: AgentEvent) => {
     lastAgentEventAtRef.current = Date.now();
@@ -504,6 +552,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         turnIdRef.current += 1;
         // A fresh turn has started — reset all per-turn tracking.
         resetTurnTracking();
+        awaitingAgentStartRef.current = false;
         setAgentRunning(true);
         setAgentPhase({ kind: "waiting_model" });
         dispatch({ type: "start" });
@@ -698,6 +747,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     autoContinueInProgressRef.current = false;
     resetTurnTracking();
     autoRecoveryAttemptsRef.current = 0;
+    awaitingAgentStartRef.current = true;
 
     const imageBlocks = images?.map((img) => ({ type: "image" as const, source: { type: "base64" as const, media_type: img.mimeType, data: img.data } }));
     const userMsg: AgentMessage = {
@@ -715,8 +765,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
     let optimisticNewSession: SessionInfo | null = null;
     if (isNew && newSessionCwd) {
+      const optimisticId = `pending-${Date.now().toString(36)}`;
+      optimisticSessionIdRef.current = optimisticId;
       optimisticNewSession = {
-        id: `pending-${Date.now().toString(36)}`,
+        id: optimisticId,
         path: "",
         cwd: newSessionCwd,
         name: undefined,
@@ -729,6 +781,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
 
     const piImages = images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
+    let createdRealSession = false;
 
     try {
       if (isNew && newSessionCwd) {
@@ -741,8 +794,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             cwd: newSessionCwd,
-            type: "prompt",
-            message,
+            type: "create",
             toolNames,
             ...(piImages?.length ? { images: piImages } : {}),
             ...(selectedModel ? { provider: selectedModel.provider, modelId: selectedModel.modelId } : {}),
@@ -757,7 +809,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const result = await res.json() as { sessionId: string };
         const realId = result.sessionId;
         sessionIdRef.current = realId;
+        adoptingCreatedSessionRef.current = realId;
+        optimisticSessionIdRef.current = null;
         connectEvents(realId);
+        await waitForEventsReady(realId);
+        createdRealSession = true;
         onSessionCreated?.({
           id: realId,
           path: "",
@@ -768,8 +824,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           messageCount: 1,
           firstMessage: message,
         });
+        await sendAgentCommand(realId, {
+          type: "prompt",
+          message,
+          ...(piImages?.length ? { images: piImages } : {}),
+        });
       } else if (session) {
-        connectEvents(session.id);
+        ensureEventsConnected(session.id);
         await sendAgentCommand(session.id, {
           type: "prompt",
           message,
@@ -778,7 +839,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         });
       }
     } catch (e) {
-      if (optimisticNewSession) onSessionStarted?.(null);
+      if (optimisticNewSession && !createdRealSession) onSessionStarted?.(null);
+      awaitingAgentStartRef.current = false;
+      optimisticSessionIdRef.current = null;
+      adoptingCreatedSessionRef.current = null;
       console.error("Failed to send message:", e);
       const errorMessage = e instanceof Error ? e.message : String(e);
       // 400 with images → likely model doesn't support image input
@@ -808,7 +872,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       eventSourceRef.current?.close();
       eventSourceRef.current = null;
     }
-  }, [isNew, newSessionCwd, newSessionModel, toolPreset, thinkingLevel, session, connectEvents, onSessionCreated, onSessionStarted]);
+  }, [isNew, newSessionCwd, newSessionModel, toolPreset, thinkingLevel, session, connectEvents, ensureEventsConnected, waitForEventsReady, onSessionCreated, onSessionStarted]);
 
   const handleAbort = useCallback(async () => {
     const sid = sessionIdRef.current;
@@ -913,10 +977,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   // Shared recovery flow: abort stuck turn, reload session, send follow_up.
   // Used by both the automatic watchdog (tiered) and the manual "中断并继续" button.
-  const executeRecovery = useCallback(async (sid: string) => {
+  const executeRecovery = useCallback(async (sid: string, attempt = 1) => {
     if (autoContinueSentRef.current) return;
     autoContinueSentRef.current = true;
     setStallLevel("recovering");
+    const fallbackModel = autoRecoveryModelsRef.current[attempt - 1] ?? null;
 
     autoContinueInProgressRef.current = true;
     abortCompletedRef.current = false;
@@ -958,6 +1023,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     await new Promise((r) => setTimeout(r, 150));
 
     try {
+      if (fallbackModel) {
+        await sendAgentCommand(sid, {
+          type: "set_model",
+          provider: fallbackModel.provider,
+          modelId: fallbackModel.modelId,
+        });
+        setCurrentModelOverride(fallbackModel);
+      }
       await sendAgentCommand(sid, { type: "follow_up", message: AUTO_CONTINUE_MESSAGE });
       setStallLevel(null);
       // Recovery succeeded — close the gate so the follow_up's agent_end
@@ -1029,7 +1102,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // follow_up with a clear continue instruction so the model resumes
     // without duplicating completed content.
     const recoverWithContinue = async (sid: string) => {
-      await executeRecovery(sid);
+      await executeRecovery(sid, autoRecoveryAttemptsRef.current);
     };
 
     // Session already finished — just reload and stop gracefully
@@ -1170,7 +1243,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // Reset auto-recovery counter — a manual user action indicates the user
     // is actively engaged and the watchdog should get a fresh allowance.
     autoRecoveryAttemptsRef.current = 0;
-    await executeRecovery(sid);
+    await executeRecovery(sid, 1);
   }, [executeRecovery]);
 
   // User dismissed the stall warning — suppress further escalation this turn
@@ -1252,6 +1325,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // connected SSE and populated optimistic messages. Do not tear it down just
     // because AppShell replaced the placeholder tab with the real session tab.
     if (sessionId && sessionId === sessionIdRef.current) return;
+    if (sessionId && sessionId === optimisticSessionIdRef.current) return;
+    if (sessionId && sessionId === adoptingCreatedSessionRef.current) {
+      adoptingCreatedSessionRef.current = null;
+      return;
+    }
 
     let cancelled = false;
 
@@ -1263,6 +1341,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     eventSourceRef.current?.close();
     eventSourceRef.current = null;
     agentRunningRef.current = false;
+    awaitingAgentStartRef.current = false;
+    optimisticSessionIdRef.current = null;
+    adoptingCreatedSessionRef.current = null;
     autoContinueSentRef.current = false;
     watchdogStaleRecoveriesRef.current = 0;
     autoRecoveryAttemptsRef.current = 0;
@@ -1415,6 +1496,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     fetchModels().then((d) => {
       if (cancelled) return;
       setModelNames(d.models);
+      setAutoRecoveryModels(d.autoRecoveryModels ?? []);
       if (d.thinkingLevels) setModelThinkingLevels(d.thinkingLevels);
       if (d.thinkingLevelMaps) setModelThinkingLevelMaps(d.thinkingLevelMaps);
       if (d.modelList) {

@@ -39,6 +39,8 @@ export function SchedulerRunsBlock({ selectedSessionId, onSelectSession }: Props
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [wechatRestarting, setWechatRestarting] = useState(false);
+  const [wechatRestartDone, setWechatRestartDone] = useState(false);
 
   const runs = useMemo<TaskRun[]>(() => {
     return tasks
@@ -117,6 +119,29 @@ export function SchedulerRunsBlock({ selectedSessionId, onSelectSession }: Props
     return () => window.clearInterval(timer);
   }, [open, fetchData]);
 
+  const restartWechatPolling = useCallback(async () => {
+    setWechatRestarting(true);
+    setWechatRestartDone(false);
+    setError(null);
+    try {
+      const res = await fetch("/api/wechat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "restart" }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({})) as { error?: string };
+        throw new Error(data.error ?? "重启微信消息接收失败");
+      }
+      setWechatRestartDone(true);
+      window.setTimeout(() => setWechatRestartDone(false), 1800);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setWechatRestarting(false);
+    }
+  }, []);
+
   return (
     <div
       style={{
@@ -157,6 +182,40 @@ export function SchedulerRunsBlock({ selectedSessionId, onSelectSession }: Props
           <span style={{ marginLeft: "auto", color: "var(--text-dim)", fontSize: 10, letterSpacing: 0, textTransform: "none" }}>
             {scheduledSessions.length > 0 ? `${scheduledSessions.length} 个 Session` : `${tasks.length} 个任务`}
           </span>
+        </button>
+        <button
+          onClick={() => void restartWechatPolling()}
+          title="重启微信消息接收"
+          disabled={wechatRestarting}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            width: 26,
+            height: 26,
+            padding: 0,
+            marginRight: open ? 2 : 6,
+            background: wechatRestartDone ? "rgba(34,197,94,0.14)" : "none",
+            border: "none",
+            color: wechatRestartDone ? "#22c55e" : wechatRestarting ? "var(--text-dim)" : "var(--text-muted)",
+            cursor: wechatRestarting ? "default" : "pointer",
+            borderRadius: 5,
+            flexShrink: 0,
+            transition: "color 0.15s, background 0.15s",
+          }}
+        >
+          {wechatRestartDone ? (
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="20 6 9 17 4 12" />
+            </svg>
+          ) : (
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ opacity: wechatRestarting ? 0.55 : 1 }}>
+              <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" />
+              <path d="M3 21v-5h5" />
+              <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
+              <path d="M16 8h5V3" />
+            </svg>
+          )}
         </button>
         {open && (
           <button

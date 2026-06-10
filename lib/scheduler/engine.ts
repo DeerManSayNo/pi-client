@@ -52,6 +52,19 @@ export function startScheduler(): void {
   if (started) return;
   started = true;
 
+  // Kill any stale cron jobs left over from previous module load (e.g. HMR in dev).
+  // node-cron's internal task registry survives module reload because it's an
+  // external package, but our in-memory `runningJobs` Map is fresh.  Without this
+  // cleanup, every HMR cycle adds another duplicate cron job for the same task.
+  const staleJobs = cron.getTasks();
+  if (staleJobs.size > 0) {
+    console.log(`[scheduler] Cleaning up ${staleJobs.size} stale cron job(s) from previous module load`);
+    for (const [, job] of staleJobs) {
+      job.stop();
+      job.destroy();
+    }
+  }
+
   const tasks = loadTasks();
   console.log(`[scheduler] Starting scheduler with ${tasks.length} task(s)`);
 

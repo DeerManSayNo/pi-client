@@ -112,6 +112,7 @@ export function AppShell() {
   const rightPanelResizeStartWidth = useRef(500);
   const chatInputRef = useRef<ChatInputHandle | null>(null);
   const topBarRef = useRef<HTMLDivElement>(null);
+  const wechatAutoStartAttemptedRef = useRef(false);
 
   // Platform detection — only show custom window controls on Windows
   const isWindowsPlatform = typeof navigator !== 'undefined' && /windows/i.test(navigator.userAgent);
@@ -226,7 +227,20 @@ export function AppShell() {
     const fetchWechat = () => {
       fetch("/api/wechat", { cache: "no-store" })
         .then((res) => res.ok ? res.json() : null)
-        .then((data) => { if (data) setWechatStatus(data); })
+        .then((data) => {
+          if (!data) return;
+          setWechatStatus(data);
+          if (!wechatAutoStartAttemptedRef.current && data.connected && !data.polling) {
+            wechatAutoStartAttemptedRef.current = true;
+            fetch("/api/wechat", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ action: "start" }),
+            })
+              .then((res) => res.ok ? fetchWechat() : null)
+              .catch(() => {});
+          }
+        })
         .catch(() => {});
     };
     fetchWechat();

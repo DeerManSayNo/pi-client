@@ -118,8 +118,15 @@ interface ProviderEntry {
   modelOverrides?: Record<string, unknown>;
 }
 
+interface RecoveryFallbackModel {
+  provider: string;
+  modelId: string;
+}
+type AutoRecoveryModel = RecoveryFallbackModel | null;
+
 interface ModelsJson {
   providers?: Record<string, ProviderEntry>;
+  autoRecoveryModels?: AutoRecoveryModel[];
 }
 
 type ModelTestState =
@@ -131,6 +138,7 @@ type ModelTestState =
 type Selection =
   | { type: "provider"; name: string }
   | { type: "model"; providerName: string; index: number }
+  | { type: "recovery" }
   | { type: "oauth"; providerId: string }
   | { type: "apikey"; providerId: string };
 
@@ -765,6 +773,62 @@ function ModelDetail({
           })}
         </div>
       </div>
+    </div>
+  );
+}
+
+function RecoveryFallbackEditor({
+  value,
+  models,
+  onChange,
+}: {
+  value: AutoRecoveryModel[] | undefined;
+  models: { provider: string; modelId: string; label: string }[];
+  onChange: (v: AutoRecoveryModel[] | undefined) => void;
+}) {
+  const current = value ?? [];
+  const setLevel = (index: number, raw: string) => {
+    const next: AutoRecoveryModel[] = [...current];
+    if (!raw) {
+      next[index] = null;
+    } else {
+      const [provider, ...rest] = raw.split(":");
+      const modelId = rest.join(":");
+      next[index] = { provider, modelId };
+    }
+    const trimmed = next.slice(0, 3);
+    while (trimmed.length > 0 && trimmed[trimmed.length - 1] === null) trimmed.pop();
+    onChange(trimmed.length ? trimmed : undefined);
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <div>
+        <SectionTitle>自动续跑兜底</SectionTitle>
+        <p style={{ margin: "6px 0 0", fontSize: 12, color: "var(--text-muted)", lineHeight: 1.6 }}>
+          激进模式自动执行“中断并继续”时，会按恢复次数切换模型后再发送继续指令。留空则沿用当前会话模型。
+        </p>
+      </div>
+
+      {[0, 1, 2].map((index) => {
+        const selected = current[index] ? `${current[index].provider}:${current[index].modelId}` : "";
+        return (
+          <Field key={index} label={`第 ${index + 1} 次自动恢复`}>
+            <select
+              value={selected}
+              onChange={(e) => setLevel(index, e.target.value)}
+              style={inputStyle}
+            >
+              <option value="">沿用当前模型</option>
+              {models.map((m) => (
+                <option key={`${m.provider}:${m.modelId}`} value={`${m.provider}:${m.modelId}`}>
+                  {m.label}
+                </option>
+              ))}
+            </select>
+          </Field>
+        );
+      })}
     </div>
   );
 }
@@ -1425,6 +1489,10 @@ export function ModelsConfig({ onClose, onSaved }: { onClose: () => void; onSave
     setSelection({ type: "provider", name: providerName });
   }, []);
 
+  const updateAutoRecoveryModels = useCallback((models: AutoRecoveryModel[] | undefined) => {
+    setConfig((prev) => ({ ...prev, autoRecoveryModels: models }));
+  }, []);
+
   const handleSave = useCallback(async () => {
     setSaving(true);
     setSaveError(null);
@@ -1448,10 +1516,28 @@ export function ModelsConfig({ onClose, onSaved }: { onClose: () => void; onSave
   const providers = Object.entries(config.providers ?? {});
   const activeOAuth = oauthProviders.filter((p) => p.loggedIn);
   const activeApiKey = apiKeyProviders.filter((p) => p.configured);
+  const modelOptions = providers.flatMap(([providerName, provider]) =>
+    (provider.models ?? [])
+      .filter((model) => model.id.trim())
+      .map((model) => ({
+        provider: providerName,
+        modelId: model.id.trim(),
+        label: `${model.name?.trim() || model.id.trim()} (${providerName}/${model.id.trim()})`,
+      }))
+  );
 
   // Resolve current detail
   const detailContent = (() => {
     if (!selection) return null;
+    if (selection.type === "recovery") {
+      return (
+        <RecoveryFallbackEditor
+          value={config.autoRecoveryModels}
+          models={modelOptions}
+          onChange={updateAutoRecoveryModels}
+        />
+      );
+    }
     if (selection.type === "oauth") {
       const p = oauthProviders.find((p) => p.id === selection.providerId);
       if (!p) return null;
@@ -1512,6 +1598,25 @@ export function ModelsConfig({ onClose, onSaved }: { onClose: () => void; onSave
           {/* Left: tree */}
           <div style={{ width: 210, borderRight: "1px solid var(--border)", display: "flex", flexDirection: "column", flexShrink: 0, background: "var(--bg-panel)" }}>
             <div style={{ flex: 1, overflowY: "auto", padding: "8px 6px" }}>
+              <div
+                onClick={() => setSelection({ type: "recovery" })}
+                style={{ display: "flex", alignItems: "center", gap: 7, padding: "7px 8px", borderRadius: 5, cursor: "pointer", background: selection?.type === "recovery" ? "var(--bg-selected)" : "none", marginBottom: 4 }}
+                onMouseEnter={(e) => { if (selection?.type !== "recovery") e.currentTarget.style.background = "var(--bg-hover)"; }}
+                onMouseLeave={(e) => { if (selection?.type !== "recovery") e.currentTarget.style.background = "none"; }}
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: "var(--text-dim)", flexShrink: 0 }}>
+                  <polyline points="23 4 23 10 17 10" />
+                  <polyline points="1 20 1 14 7 14" />
+                  <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10" />
+                  <path d="M20.49 15a9 9 0 0 1-14.85 3.36L1 14" />
+                </svg>
+                <span style={{ fontSize: 12, fontWeight: selection?.type === "recovery" ? 600 : 400, color: "var(--text)" }}>自动续跑兜底</span>
+              </div>
+
+              {(activeOAuth.length > 0 || activeApiKey.length > 0 || providers.length > 0) && (
+                <div style={{ margin: "4px 8px", borderTop: "1px solid var(--border)" }} />
+              )}
+
               {/* Active OAuth subscriptions */}
               {activeOAuth.map((p) => {
                 const isSelected = selection?.type === "oauth" && selection.providerId === p.id;

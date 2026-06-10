@@ -26,6 +26,12 @@ function getWechatDataDir(): string {
   return dir;
 }
 
+function getScheduledTasksCwd(): string {
+  const dir = join(getAgentDir(), "scheduled-tasks");
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
 function getCredentialsPath(): string {
   return join(getWechatDataDir(), "credentials.json");
 }
@@ -221,6 +227,7 @@ class ILlinkApiClient {
   private token: string;
   private baseUrl: string;
   private botId: string;
+  private typingTicket: string | null = null;
 
   constructor(token: string, baseUrl: string, botId = "") {
     this.token = token;
@@ -286,6 +293,59 @@ class ILlinkApiClient {
         return { ret: 0, get_updates_buf: syncBuf };
       }
       throw err;
+    }
+  }
+
+  /** 获取 typing ticket，用于向微信展示“正在输入中” */
+  private async getTypingTicket(): Promise<string> {
+    if (this.typingTicket) return this.typingTicket;
+
+    const body = JSON.stringify({
+      base_info: { channel_version: CHANNEL_VERSION },
+    });
+    const resp = await fetch(`${this.baseUrl}/ilink/bot/getconfig`, {
+      method: "POST",
+      headers: buildHeaders(this.token),
+      body,
+    });
+    if (!resp.ok) {
+      const errorBody = await resp.text().catch(() => "");
+      throw new Error(`获取 typing_ticket 失败: ${resp.status}${errorBody ? ` - ${errorBody.slice(0, 200)}` : ""}`);
+    }
+
+    const result = await resp.json() as { typing_ticket?: string; ret?: number; errcode?: number; errmsg?: string };
+    if (!result.typing_ticket) {
+      throw new Error(`获取 typing_ticket 失败: ret=${result.ret} errcode=${result.errcode} errmsg=${result.errmsg ?? ""}`);
+    }
+
+    this.typingTicket = result.typing_ticket;
+    return result.typing_ticket;
+  }
+
+  /** 发送“正在输入中”状态：1=开始，2=结束 */
+  async sendTyping(toUserId: string, status: 1 | 2): Promise<void> {
+    const typingTicket = await this.getTypingTicket();
+    const body = JSON.stringify({
+      ilink_user_id: toUserId,
+      typing_ticket: typingTicket,
+      status,
+      base_info: { channel_version: CHANNEL_VERSION },
+    });
+
+    const resp = await fetch(`${this.baseUrl}/ilink/bot/sendtyping`, {
+      method: "POST",
+      headers: buildHeaders(this.token),
+      body,
+    });
+    if (!resp.ok) {
+      const errorBody = await resp.text().catch(() => "");
+      throw new Error(`发送 typing 状态失败: ${resp.status}${errorBody ? ` - ${errorBody.slice(0, 200)}` : ""}`);
+    }
+
+    const result = await resp.json() as { ret?: number; errcode?: number; errmsg?: string };
+    if (result.ret !== 0 && result.ret !== undefined) {
+      if (status === 1) this.typingTicket = null;
+      throw new Error(`发送 typing 状态失败: ret=${result.ret} errcode=${result.errcode} errmsg=${result.errmsg ?? ""}`);
     }
   }
 
@@ -450,7 +510,7 @@ export class WeChatBotService {
   private defaultCwd: string;
 
   constructor(defaultCwd?: string) {
-    this.defaultCwd = defaultCwd ?? process.cwd();
+    this.defaultCwd = defaultCwd ?? getScheduledTasksCwd();
     // 尝试恢复之前的凭证
     const saved = loadCredentials();
     if (saved) {
@@ -545,6 +605,40 @@ export class WeChatBotService {
   private getCachedContextToken(fromUserId: string): string | undefined {
     const tokens = loadContextTokens();
     return tokens[this.getContextTokenKey(fromUserId)];
+  }
+
+  private startTypingIndicator(fromUserId: string): () => Promise<void> {
+    let stopped = false;
+    let inFlight = false;
+
+    const sendStart = async () => {
+      if (!this.api || stopped || inFlight) return;
+      inFlight = true;
+      try {
+        await this.api.sendTyping(fromUserId, 1);
+      } catch (err) {
+        console.warn("[WeChatBot] 发送正在输入状态失败:", err);
+      } finally {
+        inFlight = false;
+      }
+    };
+
+    void sendStart();
+    const interval = setInterval(() => {
+      void sendStart();
+    }, 15_000);
+
+    return async () => {
+      if (stopped) return;
+      stopped = true;
+      clearInterval(interval);
+      if (!this.api) return;
+      try {
+        await this.api.sendTyping(fromUserId, 2);
+      } catch (err) {
+        console.warn("[WeChatBot] 关闭正在输入状态失败:", err);
+      }
+    };
   }
 
   /** 开始消息轮询 */
@@ -663,6 +757,7 @@ export class WeChatBotService {
     this.processingUsers.add(fromUserId);
 
     let currentMsg: WeixinMessage | null = null;
+    let stopTyping: (() => Promise<void>) | null = null;
 
     try {
       const { message: msg, text } = queue.shift()!;
@@ -682,6 +777,7 @@ export class WeChatBotService {
       }
 
       console.log(`[WeChatBot] 发送到 Agent: "${text.slice(0, 50)}..."`);
+      stopTyping = this.startTypingIndicator(msg.from_user_id);
 
       // 先订阅事件，再发送 prompt，避免 Agent 很快开始输出时漏掉开头事件。
       const replyPromise = collectAgentReply(session);
@@ -691,15 +787,22 @@ export class WeChatBotService {
       console.log(`[WeChatBot] Agent 回复: "${reply.slice(0, 50)}..."`);
 
       // 发送回复到微信
+      await stopTyping();
+      stopTyping = null;
       await this.sendReply(msg, reply);
     } catch (err) {
       console.error(`[WeChatBot] 处理消息失败:`, err);
+      if (stopTyping) {
+        await stopTyping();
+        stopTyping = null;
+      }
       if (currentMsg) {
         try {
           await this.sendReply(currentMsg, "（处理消息时出错，请重试）");
         } catch { /* ignore */ }
       }
     } finally {
+      if (stopTyping) await stopTyping();
       this.processingUsers.delete(fromUserId);
       // 继续处理队列中的下一条
       setTimeout(() => this.processNextMessage(fromUserId), 500);
@@ -809,6 +912,8 @@ let instance: WeChatBotService | null = null;
 export function getWeChatBotService(cwd?: string): WeChatBotService {
   if (!instance) {
     instance = new WeChatBotService(cwd);
+  } else if (cwd) {
+    instance.setCwd(cwd);
   }
   return instance;
 }
