@@ -4,6 +4,7 @@ import { existsSync, readdirSync, readFileSync } from "fs";
 import { homedir } from "os";
 import { readRoles } from "@/lib/roles";
 import { indexExists } from "@/lib/code-index/database";
+import { createMcpRuntime } from "@/lib/mcp-runtime";
 import { isManagedDeerHuxSkillFile } from "./config";
 import { loadMcpServerViews } from "./mcp";
 import type { ExtensionDiagnostic, ExtensionSource, LoadedExtensionsView, SkillView, ToolView } from "./types";
@@ -35,6 +36,56 @@ const BUILTIN_TOOLS: ToolView[] = [
   { name: "find", label: "Find", description: "Find files and directories", enabled: true, source: "builtin-pi", provider: "builtin" },
   { name: "ls", label: "List", description: "List directory contents", enabled: true, source: "builtin-pi", provider: "builtin" },
 ];
+
+// Built-in DeerHux skills — always available
+const BUILTIN_SKILLS_DIR = path.join(process.cwd(), "lib", "builtin-skills");
+const BUILTIN_SKILLS: SkillView[] = [
+  {
+    id: "tavily-search",
+    name: "tavily-search",
+    description: "Search the web with LLM-optimized results via the Tavily CLI.",
+    filePath: path.join(BUILTIN_SKILLS_DIR, "tavily-search", "SKILL.md"),
+    baseDir: path.join(BUILTIN_SKILLS_DIR, "tavily-search"),
+    enabled: true,
+    disableModelInvocation: false,
+    source: "builtin-deerhux",
+    sourceLabel: "DeerHux 内置",
+    canDelete: false,
+    canImportToDeerHux: false,
+  },
+  {
+    id: "deerhux-scheduler",
+    name: "deerhux-scheduler",
+    description: "DeerHux 内置定时任务系统。",
+    filePath: path.join(BUILTIN_SKILLS_DIR, "deerhux-scheduler", "SKILL.md"),
+    baseDir: path.join(BUILTIN_SKILLS_DIR, "deerhux-scheduler"),
+    enabled: true,
+    disableModelInvocation: false,
+    source: "builtin-deerhux",
+    sourceLabel: "DeerHux 内置",
+    canDelete: false,
+    canImportToDeerHux: false,
+  },
+];
+
+function injectBuiltinSkills(skills: SkillView[]): SkillView[] {
+  const builtinNames = new Set(BUILTIN_SKILLS.map((s) => s.name));
+  const overridden = new Set<string>();
+  const result = skills.map((s) => {
+    if (builtinNames.has(s.name)) {
+      overridden.add(s.name);
+      const builtin = BUILTIN_SKILLS.find((b) => b.name === s.name)!;
+      return { ...s, canDelete: false, canImportToDeerHux: false, sourceLabel: builtin.sourceLabel, source: builtin.source };
+    }
+    return s;
+  });
+  for (const builtin of BUILTIN_SKILLS) {
+    if (!overridden.has(builtin.name)) {
+      result.unshift(builtin);
+    }
+  }
+  return result;
+}
 
 function normalizeDiagnostic(raw: unknown): ExtensionDiagnostic {
   const d = (raw ?? {}) as PiDiagnosticLike;
@@ -125,7 +176,7 @@ function loadCompatibleSkillSources(cwd: string, existingFilePaths: Set<string>,
   return result;
 }
 
-export async function loadExtensionsView(cwd: string): Promise<LoadedExtensionsView> {
+export async function loadExtensionsView(cwd: string, options: { includeMcpRuntimeStatus?: boolean } = {}): Promise<LoadedExtensionsView> {
   const diagnostics: ExtensionDiagnostic[] = [];
   const loader = new DefaultResourceLoader({ cwd, agentDir: getAgentDir() });
   await loader.reload();
@@ -153,7 +204,33 @@ export async function loadExtensionsView(cwd: string): Promise<LoadedExtensionsV
   const runtimeSkillPaths = new Set(skills.map((skill) => path.resolve(skill.filePath)));
   skills.push(...loadCompatibleSkillSources(cwd, runtimeSkillPaths, diagnostics));
 
-  const mcpServers = loadMcpServerViews(cwd, diagnostics);
+  // Inject built-in DeerHux skills
+  const finalSkills = injectBuiltinSkills(skills);
+
+  let mcpServers = loadMcpServerViews(cwd, diagnostics);
+
+  if (options.includeMcpRuntimeStatus) {
+    let mcpRuntime: Awaited<ReturnType<typeof createMcpRuntime>> | null = null;
+    try {
+      mcpRuntime = await createMcpRuntime(cwd);
+      const statusById = new Map(mcpRuntime.serverStatuses.map((status) => [status.id, status]));
+      mcpServers = mcpServers.map((server) => {
+        const status = statusById.get(server.id);
+        if (!server.enabled) return { ...server, runtimeStatus: "disabled" };
+        if (!status) return { ...server, runtimeStatus: "unknown" };
+        return {
+          ...server,
+          runtimeStatus: status.status,
+          runtimeToolCount: status.toolCount,
+          runtimeErrorMessage: status.errorMessage,
+        };
+      });
+    } catch (error) {
+      diagnostics.push({ level: "warning", message: "MCP runtime 状态检测失败", source: "mcp", detail: String(error) });
+    } finally {
+      mcpRuntime?.close();
+    }
+  }
 
   const tools: ToolView[] = [...BUILTIN_TOOLS];
   tools.push({
@@ -174,5 +251,5 @@ export async function loadExtensionsView(cwd: string): Promise<LoadedExtensionsV
     canDelete: Boolean(role.canDelete),
   }));
 
-  return { skills, mcpServers, tools, roles, diagnostics };
+  return { skills: finalSkills, mcpServers, tools, roles, diagnostics };
 }

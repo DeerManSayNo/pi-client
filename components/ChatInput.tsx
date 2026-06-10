@@ -16,7 +16,7 @@ interface ModelOption {
   input?: ("text" | "image")[];
 }
 
-interface SkillOption {
+export interface SkillOption {
   name: string;
   description: string;
   source?: "global" | "project" | "path";
@@ -25,6 +25,12 @@ interface SkillOption {
     scope?: string;
   };
   disableModelInvocation?: boolean;
+}
+
+export interface ChatInputState {
+  value: string;
+  attachedImages: AttachedImage[];
+  selectedSkill: SkillOption | null;
 }
 
 interface RoleSetting { id: string; text: string; createdAt: string }
@@ -44,6 +50,10 @@ interface Props {
   onSteer?: (message: string, images?: AttachedImage[]) => void;
   onFollowUp?: (message: string, images?: AttachedImage[]) => void;
   isStreaming: boolean;
+  /** Saved input state to restore when the component mounts */
+  initialInputState?: ChatInputState | null;
+  /** Ref-based callback to persist input state (avoids parent re-renders on every keystroke) */
+  saveInputStateRef?: React.MutableRefObject<((state: ChatInputState) => void) | null>;
   model?: { provider: string; modelId: string } | null;
   modelNames?: Record<string, string>;
   modelList?: { id: string; name: string; provider: string; input?: ("text" | "image")[] }[];
@@ -119,8 +129,10 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   onAutoRecover,
   onDismissStall,
   onAutoRecoveryModeChange,
+  initialInputState,
+  saveInputStateRef,
 }: Props, ref) {
-  const [value, setValue] = useState("");
+  const [value, setValue] = useState(initialInputState?.value ?? "");
   const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
   const [modelDropdownRect, setModelDropdownRect] = useState<{ top: number; left: number; width: number } | null>(null);
   const [toolDropdownOpen, setToolDropdownOpen] = useState(false);
@@ -128,7 +140,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const [roleDropdownRect, setRoleDropdownRect] = useState<{ top: number; left: number; width: number } | null>(null);
   const [roles, setRoles] = useState<AgentRole[]>([]);
   const [thinkingDropdownOpen, setThinkingDropdownOpen] = useState(false);
-  const [attachedImages, setAttachedImages] = useState<AttachedImage[]>([]);
+  const [attachedImages, setAttachedImages] = useState<AttachedImage[]>(initialInputState?.attachedImages ?? []);
   const [isFocused, setIsFocused] = useState(false);
 
   // Skill picker state
@@ -136,7 +148,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const [skills, setSkills] = useState<SkillOption[]>([]);
   const [skillPickerRect, setSkillPickerRect] = useState<{ top: number; left: number; width: number } | null>(null);
   const [skillPickerIndex, setSkillPickerIndex] = useState(0);
-  const [selectedSkill, setSelectedSkill] = useState<SkillOption | null>(null);
+  const [selectedSkill, setSelectedSkill] = useState<SkillOption | null>(initialInputState?.selectedSkill ?? null);
   const skillPickerIndexRef = useRef(0);
   const skillPickerRef = useRef<HTMLDivElement>(null);
   const skillsFetchRef = useRef<AbortController | null>(null);
@@ -161,6 +173,10 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   // Sync isStreaming prop to a ref to avoid stale closure in handleSend / runSendAction.
   const isStreamingRef = useRef(isStreaming);
   isStreamingRef.current = isStreaming;
+  // Local click/Enter latch: React prop updates are async, so a rapid double-click
+  // can invoke handleSend twice before the button is re-rendered as disabled.
+  const sendInFlightRef = useRef(false);
+  const sendInFlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useImperativeHandle(ref, () => ({
     insertIfEmpty(text: string) {
@@ -240,6 +256,26 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     });
   }, []);
 
+  const releaseSendInFlight = useCallback(() => {
+    sendInFlightRef.current = false;
+    if (sendInFlightTimerRef.current) {
+      clearTimeout(sendInFlightTimerRef.current);
+      sendInFlightTimerRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!isStreaming) releaseSendInFlight();
+  }, [isStreaming, releaseSendInFlight]);
+
+  useEffect(() => {
+    return () => {
+      if (sendInFlightTimerRef.current) {
+        clearTimeout(sendInFlightTimerRef.current);
+      }
+    };
+  }, []);
+
   const cancelPendingEnterSend = useCallback(() => {
     if (pendingEnterSendTimerRef.current) {
       clearTimeout(pendingEnterSendTimerRef.current);
@@ -256,6 +292,18 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     const msg = (selectedSkill ? `/skill:${selectedSkill.name} ${currentValue}` : currentValue).trim();
     if (!msg && !attachedImages.length) return;
     if (isStreamingRef.current) return;
+    if (sendInFlightRef.current) return;
+    sendInFlightRef.current = true;
+    if (sendInFlightTimerRef.current) clearTimeout(sendInFlightTimerRef.current);
+    sendInFlightTimerRef.current = setTimeout(() => {
+      sendInFlightRef.current = false;
+      sendInFlightTimerRef.current = null;
+    }, 3000);
+    // Clear cached input state BEFORE onSend because onSend may trigger a
+    // ChatInput unmount/remount (e.g. new-session intro → chat view transition).
+    // The remount reads from the cache via initialInputState — if we clear first,
+    // the fresh mount sees empty input.
+    saveInputStateRef?.current?.({ value: "", attachedImages: [], selectedSkill: null });
     onSend(msg, attachedImages.length ? attachedImages : undefined);
     setValue("");
     setSelectedSkill(null);
@@ -263,11 +311,12 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
     }
-  }, [value, selectedSkill, attachedImages, onSend, clearImages, cancelPendingEnterSend]);
+  }, [value, selectedSkill, attachedImages, onSend, clearImages, cancelPendingEnterSend, saveInputStateRef]);
 
   const sendQueued = useCallback((mode: "steer" | "followup") => {
     const msg = (selectedSkill ? `/skill:${selectedSkill.name} ${value}` : value).trim();
     if (!msg && !attachedImages.length) return;
+    saveInputStateRef?.current?.({ value: "", attachedImages: [], selectedSkill: null });
     if (mode === "steer" && onSteer) {
       onSteer(msg, attachedImages.length ? attachedImages : undefined);
     } else if (mode === "followup" && onFollowUp) {
@@ -277,7 +326,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     setSelectedSkill(null);
     clearImages();
     if (textareaRef.current) textareaRef.current.style.height = "auto";
-  }, [value, selectedSkill, attachedImages, onSteer, onFollowUp, clearImages]);
+  }, [value, selectedSkill, attachedImages, onSteer, onFollowUp, clearImages, saveInputStateRef]);
 
   const fetchSkills = useCallback(async (cwd: string) => {
     if (skillsFetchRef.current) {
@@ -564,21 +613,14 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     ? (modelOptions.find((o) => o.modelId === model.modelId && o.provider === model.provider)?.name ?? model.modelId)
     : modelOptions.length > 0 ? modelOptions[0].name : null;
 
-  // Check whether the currently-selected model supports image input
-  const modelSupportsImages = model
-    ? (modelOptions.find((o) => o.modelId === model.modelId && o.provider === model.provider)?.input?.includes("image") ?? true)
-    : true; // unknown model → assume support
-
   const handlePaste = useCallback((e: React.ClipboardEvent) => {
-    // Skip image paste when model doesn't support it
-    if (!modelSupportsImages) return;
     const items = Array.from(e.clipboardData?.items ?? []);
     const imageItems = items.filter((item) => item.type.startsWith("image/"));
     if (!imageItems.length) return;
     e.preventDefault();
     const files = imageItems.map((item) => item.getAsFile()).filter((f): f is File => f !== null);
     processImageFiles(files);
-  }, [processImageFiles, modelSupportsImages]);
+  }, [processImageFiles]);
 
 
 
@@ -605,9 +647,14 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     };
   }, [selectedSkill]);
 
-  // Close dropdowns on outside click
+  // Persist input state to the cache ref whenever it changes
   useEffect(() => {
-    const handler = (e: MouseEvent) => {
+    saveInputStateRef?.current?.({ value, attachedImages, selectedSkill });
+  }, [value, attachedImages, selectedSkill, saveInputStateRef]);
+
+  // Close dropdowns on outside click or Escape
+  useEffect(() => {
+    const handleMouseDown = (e: MouseEvent) => {
       if (
         dropdownRef.current && !dropdownRef.current.contains(e.target as Node) &&
         modelDropdownPanelRef.current && !modelDropdownPanelRef.current.contains(e.target as Node)
@@ -630,8 +677,21 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         setSkillPickerOpen(false);
       }
     };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
+    const handleKeyDown = (e: globalThis.KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      setModelDropdownOpen(false);
+      setRoleDropdownOpen(false);
+      setToolDropdownOpen(false);
+      setThinkingDropdownOpen(false);
+      setSkillPickerOpen(false);
+    };
+    document.addEventListener("mousedown", handleMouseDown);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", handleMouseDown);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
   }, []);
 
   const loadRoles = useCallback(async () => {
@@ -1247,20 +1307,17 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
           <div style={{ flex: "0 0 auto", display: "flex", alignItems: "center", gap: 2 }}>
             <button
               onClick={() => fileInputRef.current?.click()}
-              disabled={isStreaming || !modelSupportsImages}
-              title={modelSupportsImages ? "附加图片" : "当前模型不支持图片输入"}
+              title="附加图片"
               style={{
                 flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center",
                 width: 32, height: 32, padding: 0,
                 background: "none", border: "none",
                 borderRadius: 9,
                 color: attachedImages.length ? "var(--accent)" : "var(--text-muted)",
-                cursor: isStreaming || !modelSupportsImages ? "not-allowed" : "pointer",
-                opacity: isStreaming || !modelSupportsImages ? 0.5 : 1,
+                cursor: "pointer",
                 transition: "background 0.12s, color 0.12s",
               }}
               onMouseEnter={(e) => {
-                if (isStreaming || !modelSupportsImages) return;
                 e.currentTarget.style.background = "var(--bg-hover)";
                 e.currentTarget.style.color = attachedImages.length ? "var(--accent)" : "var(--text)";
               }}

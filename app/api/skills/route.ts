@@ -21,9 +21,54 @@ interface SkillWithMeta {
   canDelete: boolean;
 }
 
+// Built-in skills — always available, never deletable
+const BUILTIN_SKILLS_DIR = path.join(process.cwd(), "lib", "builtin-skills");
+const BUILTIN_SKILLS: SkillWithMeta[] = [
+  {
+    name: "tavily-search",
+    description: "Search the web with LLM-optimized results via the Tavily CLI.",
+    filePath: path.join(BUILTIN_SKILLS_DIR, "tavily-search", "SKILL.md"),
+    baseDir: path.join(BUILTIN_SKILLS_DIR, "tavily-search"),
+    disableModelInvocation: false,
+    sourceInfo: { source: "builtin-deerhux", scope: "builtin" },
+    canDelete: false,
+  },
+  {
+    name: "deerhux-scheduler",
+    description: "DeerHux 内置定时任务系统。",
+    filePath: path.join(BUILTIN_SKILLS_DIR, "deerhux-scheduler", "SKILL.md"),
+    baseDir: path.join(BUILTIN_SKILLS_DIR, "deerhux-scheduler"),
+    disableModelInvocation: false,
+    sourceInfo: { source: "builtin-deerhux", scope: "builtin" },
+    canDelete: false,
+  },
+];
+
+function injectBuiltinSkills(skills: SkillWithMeta[]): SkillWithMeta[] {
+  const builtinNames = new Set(BUILTIN_SKILLS.map((s) => s.name));
+  const overridden = new Set<string>();
+  const result = skills.map((s) => {
+    if (builtinNames.has(s.name)) {
+      overridden.add(s.name);
+      // Override existing skill's managed properties with builtin defaults
+      const builtin = BUILTIN_SKILLS.find((b) => b.name === s.name)!;
+      return { ...s, canDelete: false, sourceInfo: builtin.sourceInfo };
+    }
+    return s;
+  });
+  // Add builtin skills that had no existing counterpart
+  for (const builtin of BUILTIN_SKILLS) {
+    if (!overridden.has(builtin.name)) {
+      result.unshift(builtin);
+    }
+  }
+  return result;
+}
+
 // GET /api/skills?cwd=<path>
 // Uses DefaultResourceLoader (same logic as AgentSession startup) so settings.json
 // skill paths, package skills, and .deerhux/skills directories are all included.
+// Built-in skills (e.g., tavily-search) are injected if not already present.
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
   const cwd = searchParams.get("cwd");
@@ -52,10 +97,14 @@ export async function GET(req: Request) {
       };
     });
 
-    return NextResponse.json({ skills: skillsWithMeta, diagnostics });
+    return NextResponse.json({ skills: injectBuiltinSkills(skillsWithMeta), diagnostics });
   } catch (e) {
     return NextResponse.json({ error: String(e) }, { status: 500 });
   }
+}
+
+function isBuiltinSkill(filePath: string): boolean {
+  return BUILTIN_SKILLS.some((s) => s.filePath === filePath);
 }
 
 // DELETE /api/skills — delete a skill file
@@ -64,6 +113,9 @@ export async function DELETE(req: Request) {
     const { searchParams } = new URL(req.url);
     const cwd = searchParams.get("cwd");
     const filePath = searchParams.get("filePath");
+    if (filePath && isBuiltinSkill(filePath)) {
+      return NextResponse.json({ error: "built-in skills cannot be deleted" }, { status: 400 });
+    }
     if (!filePath) {
       return NextResponse.json({ error: "filePath required" }, { status: 400 });
     }
@@ -102,6 +154,9 @@ export async function PATCH(req: Request) {
     const body = await req.json() as { filePath: string; disableModelInvocation: boolean; cwd?: string | null };
     const { filePath, disableModelInvocation, cwd } = body;
     if (!filePath) return NextResponse.json({ error: "filePath required" }, { status: 400 });
+    if (isBuiltinSkill(filePath)) {
+      return NextResponse.json({ error: "built-in skills cannot be modified through this API" }, { status: 400 });
+    }
     if (!existsSync(filePath)) return NextResponse.json({ error: "file not found" }, { status: 404 });
 
     if (!isManagedDeerHuxSkillFile(filePath, cwd)) {

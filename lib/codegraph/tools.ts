@@ -34,7 +34,7 @@ export async function createCodeGraphTools(cwd: string): Promise<ToolDefinition[
       name: "codegraph_search",
       label: "CodeGraph Search",
       description: "Search semantic code symbols using the CodeGraph index. Prefer this before grep/find for symbol lookup.",
-      promptSnippet: "codegraph_search: Search semantic symbols in the CodeGraph index by name, qualified name, signature, or docstring.",
+      promptSnippet: "codegraph_search: 优先使用 Search semantic symbols in the CodeGraph index by name, qualified name, signature, or docstring.",
       promptGuidelines: [
         "Use codegraph_search before grep/find when looking for functions, classes, components, exported values, or other code symbols.",
       ],
@@ -56,7 +56,7 @@ export async function createCodeGraphTools(cwd: string): Promise<ToolDefinition[
       name: "codegraph_callers",
       label: "CodeGraph Callers",
       description: "Find functions or methods that call a symbol using CodeGraph call edges.",
-      promptSnippet: "codegraph_callers: Find callers of a symbol from the semantic call graph.",
+      promptSnippet: "codegraph_callers: 优先使用 Find callers of a symbol from the semantic call graph.",
       parameters: Type.Object({
         symbol: Type.String({ description: "Symbol/function/method name" }),
         limit: Type.Optional(Type.Number({ description: "Maximum results, default 20, max 100" })),
@@ -72,7 +72,7 @@ export async function createCodeGraphTools(cwd: string): Promise<ToolDefinition[
       name: "codegraph_callees",
       label: "CodeGraph Callees",
       description: "Find functions or methods called by a symbol using CodeGraph call edges.",
-      promptSnippet: "codegraph_callees: Find callees/dependencies of a symbol from the semantic call graph.",
+      promptSnippet: "codegraph_callees: 优先使用 Find callees/dependencies of a symbol from the semantic call graph.",
       parameters: Type.Object({
         symbol: Type.String({ description: "Symbol/function/method name" }),
         limit: Type.Optional(Type.Number({ description: "Maximum results, default 20, max 100" })),
@@ -88,7 +88,7 @@ export async function createCodeGraphTools(cwd: string): Promise<ToolDefinition[
       name: "codegraph_impact",
       label: "CodeGraph Impact",
       description: "Analyze what code may be affected by changing a symbol using CodeGraph graph traversal.",
-      promptSnippet: "codegraph_impact: Analyze impact radius for a symbol before refactors or risky edits.",
+      promptSnippet: "codegraph_impact: 优先使用 Analyze impact radius for a symbol before refactors or risky edits.",
       promptGuidelines: [
         "Use codegraph_impact before refactoring public APIs, shared utilities, or heavily reused components.",
       ],

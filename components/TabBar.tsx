@@ -15,6 +15,7 @@ interface Props {
   activeTabId: string;
   onSelectTab: (id: string) => void;
   onCloseTab: (id: string) => void;
+  onCloseTabs?: (ids: string[]) => void;
   cwd?: string;
 }
 
@@ -33,9 +34,101 @@ const menuItemStyle: React.CSSProperties = {
   fontSize: 12,
 };
 
-export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, cwd }: Props) {
+const disabledMenuItemStyle: React.CSSProperties = {
+  ...menuItemStyle,
+  color: "var(--text-dim)",
+  cursor: "not-allowed",
+  opacity: 0.5,
+};
+
+function MenuIcon({ type }: { type: "close" | "right" | "others" | "all" | "copy" | "folder" }) {
+  if (type === "copy") {
+    return (
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+      </svg>
+    );
+  }
+  if (type === "folder") {
+    return (
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+      </svg>
+    );
+  }
+  if (type === "right") {
+    return (
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M8 6l6 6-6 6" />
+        <path d="M16 6v12" />
+      </svg>
+    );
+  }
+  if (type === "others") {
+    return (
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <rect x="3" y="5" width="18" height="14" rx="2" />
+        <path d="M8 9l8 8" />
+        <path d="M16 9l-8 8" />
+      </svg>
+    );
+  }
+  if (type === "all") {
+    return (
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M3 6h18" />
+        <path d="M8 6V4h8v2" />
+        <path d="M19 6l-1 14H6L5 6" />
+        <path d="M10 11v5" />
+        <path d="M14 11v5" />
+      </svg>
+    );
+  }
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M18 6L6 18" />
+      <path d="M6 6l12 12" />
+    </svg>
+  );
+}
+
+function ContextMenuButton({
+  children,
+  icon,
+  disabled,
+  onClick,
+}: {
+  children: React.ReactNode;
+  icon: React.ComponentProps<typeof MenuIcon>["type"];
+  disabled?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      style={disabled ? disabledMenuItemStyle : menuItemStyle}
+      disabled={disabled}
+      onClick={onClick}
+      onMouseEnter={(e) => {
+        if (disabled) return;
+        e.currentTarget.style.background = "var(--bg-hover)";
+        e.currentTarget.style.color = "var(--text)";
+      }}
+      onMouseLeave={(e) => {
+        if (disabled) return;
+        e.currentTarget.style.background = "transparent";
+        e.currentTarget.style.color = "var(--text-muted)";
+      }}
+    >
+      <MenuIcon type={icon} />
+      {children}
+    </button>
+  );
+}
+
+export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, onCloseTabs, cwd }: Props) {
   const [hoveredClose, setHoveredClose] = useState<string | null>(null);
-  const [contextMenu, setContextMenu] = useState<{ filePath: string; x: number; y: number } | null>(null);
+  const [contextMenu, setContextMenu] = useState<{ tabId: string; filePath: string; x: number; y: number } | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
   const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -52,14 +145,21 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, cwd }: Prop
     };
   }, [contextMenu]);
 
-  const handleContextMenu = useCallback((e: React.MouseEvent, filePath: string) => {
+  const handleContextMenu = useCallback((e: React.MouseEvent, tab: Tab) => {
     e.preventDefault();
     e.stopPropagation();
-    setContextMenu({ filePath, x: e.clientX, y: e.clientY });
+    setContextMenu({ tabId: tab.id, filePath: tab.filePath, x: e.clientX, y: e.clientY });
   }, []);
 
+  const closeTabs = useCallback((ids: string[]) => {
+    if (ids.length === 0) return;
+    if (onCloseTabs) onCloseTabs(ids);
+    else ids.forEach(onCloseTab);
+    setContextMenu(null);
+  }, [onCloseTab, onCloseTabs]);
+
   const handleCopyPath = useCallback(async (type: "absolute" | "relative") => {
-    if (!contextMenu) return;
+    if (!contextMenu || contextMenu.tabId === "__log__") return;
     const text = type === "absolute" ? contextMenu.filePath : getRelativeFilePath(contextMenu.filePath, cwd);
     try {
       await navigator.clipboard.writeText(text);
@@ -73,7 +173,7 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, cwd }: Prop
   }, [contextMenu, cwd]);
 
   const handleRevealInFinder = useCallback(async () => {
-    if (!contextMenu) return;
+    if (!contextMenu || contextMenu.tabId === "__log__") return;
     try {
       await fetch("/api/files/reveal", {
         method: "POST",
@@ -87,6 +187,12 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, cwd }: Prop
   }, [contextMenu]);
 
   const isMac = typeof navigator !== "undefined" && navigator.platform.toUpperCase().indexOf("MAC") >= 0;
+  const contextTab = contextMenu ? tabs.find((tab) => tab.id === contextMenu.tabId) : null;
+  const contextTabIndex = contextTab ? tabs.findIndex((tab) => tab.id === contextTab.id) : -1;
+  const rightTabIds = contextTabIndex >= 0 ? tabs.slice(contextTabIndex + 1).map((tab) => tab.id) : [];
+  const otherTabIds = contextTab ? tabs.filter((tab) => tab.id !== contextTab.id).map((tab) => tab.id) : [];
+  const allTabIds = tabs.map((tab) => tab.id);
+  const isLogTab = contextMenu?.tabId === "__log__";
 
   return (
     <>
@@ -106,7 +212,7 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, cwd }: Prop
           <div
             key={tab.id}
             onClick={() => onSelectTab(tab.id)}
-            onContextMenu={(e) => handleContextMenu(e, tab.filePath)}
+            onContextMenu={(e) => handleContextMenu(e, tab)}
             style={{
               display: "flex",
               alignItems: "center",
@@ -170,7 +276,7 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, cwd }: Prop
     </div>
 
     {/* Context Menu */}
-    {contextMenu && (
+    {contextMenu && contextTab && (
       <div
         style={{
           position: "fixed",
@@ -198,44 +304,21 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, cwd }: Prop
           }}
           title={contextMenu.filePath}
         >
-          {contextMenu.filePath.split(/[\\/]/).filter(Boolean).pop() ?? contextMenu.filePath}
+          {contextTab.label}
         </div>
-        <button
-          style={menuItemStyle}
-          onClick={() => handleCopyPath("absolute")}
-          onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text)"; }}
-          onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "var(--text-muted)"; }}
-        >
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
-            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-          </svg>
-          {copied === "absolute" ? "已复制!" : "复制绝对路径"}
-        </button>
-        <button
-          style={menuItemStyle}
-          onClick={() => handleCopyPath("relative")}
-          onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text)"; }}
-          onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "var(--text-muted)"; }}
-        >
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
-            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-          </svg>
-          {copied === "relative" ? "已复制!" : "复制相对路径"}
-        </button>
-        <div style={{ height: 1, background: "var(--border)", margin: "5px 4px" }} />
-        <button
-          style={menuItemStyle}
-          onClick={handleRevealInFinder}
-          onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text)"; }}
-          onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "var(--text-muted)"; }}
-        >
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
-          </svg>
-          {isMac ? "在 Finder 中显示" : "打开所在文件夹"}
-        </button>
+        <ContextMenuButton icon="close" onClick={() => closeTabs([contextTab.id])}>关闭此页</ContextMenuButton>
+        <ContextMenuButton icon="right" disabled={rightTabIds.length === 0} onClick={() => closeTabs(rightTabIds)}>关闭右侧标签</ContextMenuButton>
+        <ContextMenuButton icon="others" disabled={otherTabIds.length === 0} onClick={() => closeTabs(otherTabIds)}>关闭其他页签</ContextMenuButton>
+        <ContextMenuButton icon="all" disabled={allTabIds.length === 0} onClick={() => closeTabs(allTabIds)}>关闭全部页签</ContextMenuButton>
+        {!isLogTab && (
+          <>
+            <div style={{ height: 1, background: "var(--border)", margin: "5px 4px" }} />
+            <ContextMenuButton icon="copy" onClick={() => handleCopyPath("absolute")}>{copied === "absolute" ? "已复制!" : "复制绝对路径"}</ContextMenuButton>
+            <ContextMenuButton icon="copy" onClick={() => handleCopyPath("relative")}>{copied === "relative" ? "已复制!" : "复制相对路径"}</ContextMenuButton>
+            <div style={{ height: 1, background: "var(--border)", margin: "5px 4px" }} />
+            <ContextMenuButton icon="folder" onClick={handleRevealInFinder}>{isMac ? "在 Finder 中显示" : "打开所在文件夹"}</ContextMenuButton>
+          </>
+        )}
       </div>
     )}
     </>

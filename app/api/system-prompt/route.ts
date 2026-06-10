@@ -8,6 +8,7 @@ import {
   writeRoleSystemPromptConfig,
 } from "@/lib/system-prompt-decomposer";
 import { DefaultResourceLoader, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { createMcpRuntime } from "@/lib/mcp-runtime";
 
 function roleIdFromUrl(req: Request): string {
   return new URL(req.url).searchParams.get("roleId") || "default";
@@ -19,7 +20,7 @@ export async function GET(req: Request) {
   const cwd = url.searchParams.get("cwd");
 
   const config = readRoleSystemPromptConfig(roleId);
-  const sections = applySectionOverrides(getDefaultSystemPromptSections(), config.sections);
+  const sections = applySectionOverrides(getDefaultSystemPromptSections(cwd), config.sections);
 
   // Load available skills for the current project
   let availableSkills: { name: string; description: string; disabled: boolean }[] = [];
@@ -36,11 +37,28 @@ export async function GET(req: Request) {
     } catch { /* skills unavailable */ }
   }
 
+  // Load available MCP runtime tools for the current project. This mirrors the
+  // MCP config window's runtime discovery so roles can filter actual tool names.
+  let availableMcpTools: { name: string; label: string; description: string }[] = [];
+  let mcpRuntime: Awaited<ReturnType<typeof createMcpRuntime>> | null = null;
+  if (cwd) {
+    try {
+      mcpRuntime = await createMcpRuntime(cwd);
+      availableMcpTools = mcpRuntime.tools.map((tool) => ({
+        name: tool.name,
+        label: tool.label ?? tool.name,
+        description: tool.description ?? "",
+      }));
+    } catch { /* MCP unavailable */ }
+    finally { mcpRuntime?.close(); }
+  }
+
   return NextResponse.json({
     roleId,
     sections,
-    config: { ...config, skillNames: config.skillNames ?? null },
+    config: { ...config, skillNames: config.skillNames ?? null, mcpToolNames: config.mcpToolNames ?? null },
     availableSkills,
+    availableMcpTools,
     versions: readVersions(roleId),
   });
 }
@@ -51,12 +69,14 @@ export async function PATCH(req: Request) {
     const body = await req.json() as {
       sections?: { id: string; enabled: boolean; content: string }[];
       skillNames?: string[] | null;
+      mcpToolNames?: string[] | null;
       activeVersionId?: string | null;
     };
 
     const config = writeRoleSystemPromptConfig(roleId, {
       sections: body.sections ?? [],
       skillNames: body.skillNames,
+      mcpToolNames: body.mcpToolNames,
       activeVersionId: body.activeVersionId ?? null,
     });
 
@@ -89,7 +109,12 @@ export async function POST(req: Request) {
 
     let config = readRoleSystemPromptConfig(roleId);
     if (body.makeActive) {
-      config = writeRoleSystemPromptConfig(roleId, { sections: version.sections, activeVersionId: version.id });
+      config = writeRoleSystemPromptConfig(roleId, {
+        sections: version.sections,
+        skillNames: config.skillNames,
+        mcpToolNames: config.mcpToolNames,
+        activeVersionId: version.id,
+      });
     }
 
     return NextResponse.json({ roleId, version, config });

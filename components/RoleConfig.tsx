@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
+import { useEscapeClose } from "@/hooks/useEscapeClose";
 import { SystemPromptConfig } from "./SystemPromptConfig";
 
 interface RoleSetting { id: string; text: string; createdAt: string }
@@ -59,6 +60,8 @@ function notifyRolesUpdated() {
 
 function ProjectList({ projects, selectedCwd, onSelect }: { projects: { cwd: string; displayName: string }[]; selectedCwd: string; onSelect: (cwd: string) => void }) {
   const [open, setOpen] = useState(false);
+
+  useEscapeClose(() => setOpen(false), open);
 
   if (projects.length === 0) {
     return <div style={{ fontSize: 12, color: "var(--text-muted)", padding: "8px 2px" }}>暂无项目</div>;
@@ -169,6 +172,10 @@ export function RoleConfig({ onClose, cwd, projects = [] }: { onClose: () => voi
   const [draft, setDraft] = useState<AgentRole | null>(null);
   const [newRoleOpen, setNewRoleOpen] = useState(false);
   const [systemPromptRole, setSystemPromptRole] = useState<AgentRole | null>(null);
+
+  useEscapeClose(() => setNewRoleOpen(false), newRoleOpen);
+  useEscapeClose(onClose, !newRoleOpen && !systemPromptRole);
+
   const [newName, setNewName] = useState("");
   const [newDescription, setNewDescription] = useState("");
   const [newBasePrompt, setNewBasePrompt] = useState("");

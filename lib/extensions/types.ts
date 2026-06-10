@@ -48,6 +48,9 @@ export interface McpServerView {
   canEdit: boolean;
   canDelete: boolean;
   canImportToDeerHux: boolean;
+  runtimeStatus?: "connected" | "error" | "unsupported" | "disabled" | "unknown";
+  runtimeToolCount?: number;
+  runtimeErrorMessage?: string;
 }
 
 export interface ToolView {

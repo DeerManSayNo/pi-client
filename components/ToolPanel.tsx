@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef } from "react";
+import { useEscapeClose } from "@/hooks/useEscapeClose";
 
 export interface ToolEntry {
   name: string;
@@ -39,6 +40,8 @@ const PRESETS: { id: Exclude<ToolPreset, "custom">; label: string; desc: string;
 export function ToolPanel({ tools, onPreset, onClose }: Props) {
   const panelRef = useRef<HTMLDivElement>(null);
   const current = getPresetFromTools(tools);
+
+  useEscapeClose(onClose);
 
   useEffect(() => {
     const handler = (e: MouseEvent) => {

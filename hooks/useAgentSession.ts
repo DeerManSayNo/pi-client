@@ -163,17 +163,31 @@ function userContentKey(msg: AgentMessage | Partial<AgentMessage>): string | nul
 
   const parts = content.map((block) => {
     if (typeof block !== "object" || block === null || !("type" in block)) return block;
-    if (block.type === "text" && "text" in block && typeof block.text === "string") {
-      return { type: "text", text: compressSkillText(block.text).trim() };
+    const blockRecord = block as Record<string, unknown>;
+    if (blockRecord.type === "text" && typeof blockRecord.text === "string") {
+      return { type: "text", text: compressSkillText(blockRecord.text).trim() };
     }
-    if (block.type === "image" && "source" in block && typeof block.source === "object" && block.source !== null) {
-      const source = block.source as { media_type?: unknown; data?: unknown; url?: unknown };
-      return {
-        type: "image",
-        mediaType: typeof source.media_type === "string" ? source.media_type : "",
-        data: typeof source.data === "string" ? source.data : "",
-        url: typeof source.url === "string" ? source.url : "",
-      };
+    if (blockRecord.type === "image") {
+      const source = typeof blockRecord.source === "object" && blockRecord.source !== null
+        ? blockRecord.source as Record<string, unknown>
+        : null;
+      const mediaType = source
+        ? (typeof source.media_type === "string" ? source.media_type
+          : typeof source.mediaType === "string" ? source.mediaType
+          : typeof source.mimeType === "string" ? source.mimeType
+          : typeof source.mime_type === "string" ? source.mime_type
+          : "")
+        : (typeof blockRecord.mimeType === "string" ? blockRecord.mimeType
+          : typeof blockRecord.mediaType === "string" ? blockRecord.mediaType
+          : typeof blockRecord.media_type === "string" ? blockRecord.media_type
+          : "");
+      const data = source
+        ? (typeof source.data === "string" ? source.data : "")
+        : (typeof blockRecord.data === "string" ? blockRecord.data : "");
+      const url = source
+        ? (typeof source.url === "string" ? source.url : "")
+        : (typeof blockRecord.url === "string" ? blockRecord.url : "");
+      return { type: "image", mediaType, data, url };
     }
     return block;
   });
@@ -278,6 +292,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const pendingScrollToUserRef = useRef(false);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+  const entryIdsRef = useRef<string[]>([]);
   const lastAgentEventAtRef = useRef(Date.now());
   const lastContentChangedAtRef = useRef(Date.now());
   const lastContentLengthRef = useRef(0);
@@ -427,7 +442,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       fetch(`/api/agent/${encodeURIComponent(sid)}`)
         .then((r) => r.json())
         .then((d: { running?: boolean; status?: AgentStatus }) => {
-          if (!d.running || d.status?.isRunning === false) {
+          if (agentRunningRef.current && (!d.running || d.status?.isRunning === false)) {
             // Session ended while we were disconnected — dispatch a synthetic
             // agent_end so the client state resets cleanly.
             handleAgentEventRef.current?.({ type: "agent_end", willRetry: false });
@@ -1297,6 +1312,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
     loadSession(sessionId, true, true).then((agentState) => {
       if (cancelled || sessionIdRef.current !== sessionId) return;
+
+      // 远程连接（例如微信 Bot）可能会在当前 session 空闲时从外部发起 prompt。
+      // 之前只有“加载时已在运行”的 session 才连接 SSE，导致手机刚发来的 user 消息
+      // 不能实时出现在已打开的 session 里，只能等手动刷新/回合结束后重新加载。
+      // 这里改为：打开已有 session 时始终保持 SSE 连接，以便接收未来的外部消息事件。
+      connectEvents(sessionId);
+
       if (agentState?.running) {
         loadTools(sessionId);
         // Reconnect SSE whenever a turn is active — isRunning stays true
@@ -1307,7 +1329,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           agentRunningRef.current = true;
           setAgentRunning(true);
           setAgentPhase({ kind: "waiting_model" });
-          connectEvents(sessionId);
         }
       }
       if (agentState?.state) {
@@ -1324,6 +1345,50 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       eventSourceRef.current = null;
     };
   }, [connectEvents, loadSession, loadTools, activeTabId, newSessionCwd, activeSessionId]);
+
+  useEffect(() => {
+    entryIdsRef.current = entryIds;
+  }, [entryIds]);
+
+  // 兜底同步：远程连接（微信 Bot 等）可能从服务端直接写入当前 session，
+  // 在某些 dev/runtime 场景下 SSE 事件不会可靠到达浏览器。这里对当前打开的
+  // 已有 session 做轻量轮询，只在 entryIds 变化时刷新消息，避免必须右键 reload。
+  useEffect(() => {
+    if (!activeSessionId || newSessionCwd) return;
+    let stopped = false;
+    let inFlight = false;
+
+    const tick = async () => {
+      if (stopped || inFlight || sessionIdRef.current !== activeSessionId) return;
+      inFlight = true;
+      try {
+        const res = await fetch(`/api/sessions/${encodeURIComponent(activeSessionId)}`, { cache: "no-store" });
+        if (!res.ok) return;
+        const d = await res.json() as SessionData;
+        if (stopped || sessionIdRef.current !== activeSessionId) return;
+        const prevKey = entryIdsRef.current.join("\0");
+        const nextEntryIds = d.context.entryIds ?? [];
+        const nextKey = nextEntryIds.join("\0");
+        if (nextKey && nextKey !== prevKey) {
+          setData(d);
+          setMessages(normalizeCompletedMessages(d.context.messages.map(compressMessageContent)));
+          setEntryIds(nextEntryIds);
+          setCurrentModelOverride(null);
+          setError(null);
+        }
+      } catch {
+        // ignore transient polling errors
+      } finally {
+        inFlight = false;
+      }
+    };
+
+    const timer = window.setInterval(tick, 900);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [activeSessionId, newSessionCwd]);
 
   useEffect(() => {
     onSystemPromptChange?.(systemPrompt);

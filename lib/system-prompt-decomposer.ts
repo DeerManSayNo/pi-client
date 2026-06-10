@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import path from "path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { composeGlobalMemoryPrompt } from "./memory";
+import { loadEnabledMcpServers } from "./mcp-runtime";
 
 /**
  * Decompose DeerHux's built-in system prompt into structured, configurable sections.
@@ -44,6 +45,8 @@ export interface SystemPromptGlobalConfig {
   sections: Pick<SystemPromptSection, "id" | "enabled" | "content">[];
   /** Skill names allowed for this role. null/undefined = all globally-enabled skills. [] = none. */
   skillNames?: string[] | null;
+  /** MCP tool names allowed in this role's prompt. null/undefined = all discovered MCP tools. [] = none. */
+  mcpToolNames?: string[] | null;
   activeVersionId?: string | null;
   updatedAt: string;
 }
@@ -82,6 +85,12 @@ const SECTION_SPECS: Omit<SystemPromptSection, "content" | "enabled">[] = [
     editable: false,
   },
   {
+    id: "mcp_tools",
+    label: "MCP 工具",
+    description: "来自 MCP 配置窗口的 runtime tools，可按角色整体启用/禁用，并在下方细分工具",
+    editable: false,
+  },
+  {
     id: "date_cwd",
     label: "日期与目录",
     description: "当前日期和工作目录",
@@ -104,18 +113,45 @@ const SECTION_SPECS: Omit<SystemPromptSection, "content" | "enabled">[] = [
 const DEFAULT_SECTION_CONTENT: Record<string, string> = {
   identity: "You are an expert coding assistant operating inside DeerHux, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.",
   tools: "Available tools:\n[自动生成：根据当前会话启用的工具生成工具列表]",
-  guidelines: "Guidelines:\n- Be concise in your responses\n- Show file paths clearly when working with files",
+  guidelines: "Guidelines:\n- Be concise in your responses and thinking all use chinese language\n- Show file paths clearly when working with files",
   project_context: "<project_context>\n[自动生成：来自 AGENTS.md 等项目上下文文件]\n</project_context>",
   skills: "<available_skills>\n[自动生成：当前可用 skills 列表]\n</available_skills>",
+  mcp_tools: "MCP runtime tools:\n[自动生成：来自 MCP 配置窗口；会话启动/重载时动态发现具体工具]",
   date_cwd: "Current date: [自动生成]\nCurrent working directory: [自动生成]",
   role_profile: "<!-- PI_ROLE_PROFILE_START -->\n[自动生成：当前角色设定]\n<!-- PI_ROLE_PROFILE_END -->",
 };
 
-export function getDefaultSystemPromptSections(): SystemPromptSection[] {
+function buildToolsSectionContent(_cwd?: string | null): string {
+  return ["Available tools:", "[自动生成：根据当前会话启用的工具生成工具列表]"].join("\n");
+}
+
+function buildMcpToolsSectionContent(cwd?: string | null): string {
+  const lines = [
+    "MCP runtime tools:",
+    "- 可按角色整体启用/禁用 MCP 工具提示；具体 MCP tool 会在会话启动/重载时通过 tools/list 动态发现。",
+    "- 若当前模型配置未勾选图片输入，用户仍上传图片时，DeerHux 会优先调用可用的 MCP 图片识别工具生成 <image_context>，再把识别结果交给文本模型回答。",
+  ];
+  if (cwd?.trim()) {
+    const mcpServers = loadEnabledMcpServers(cwd).filter((server) => server.transport === "stdio");
+    for (const server of mcpServers) {
+      lines.push(`- mcp__${server.id}__<tool>: ${server.name}${server.description ? ` — ${server.description}` : ""} (stdio)`);
+    }
+    if (mcpServers.length === 0) lines.push("- 当前没有启用的 stdio MCP server。");
+  }
+  return lines.join("\n");
+}
+
+export function getDefaultSystemPromptSections(cwd?: string | null): SystemPromptSection[] {
   const globalMemoryContent = composeGlobalMemoryPrompt();
   return SECTION_SPECS.map((spec) => ({
     ...spec,
-    content: spec.id === "global_memory" ? globalMemoryContent : (DEFAULT_SECTION_CONTENT[spec.id] ?? ""),
+    content: spec.id === "global_memory"
+      ? globalMemoryContent
+      : spec.id === "tools"
+        ? buildToolsSectionContent(cwd)
+        : spec.id === "mcp_tools"
+          ? buildMcpToolsSectionContent(cwd)
+          : (DEFAULT_SECTION_CONTENT[spec.id] ?? ""),
     enabled: spec.id === "global_memory" ? globalMemoryContent.length > 0 : true,
   }));
 }
@@ -240,6 +276,16 @@ export function decomposeSystemPrompt(fullPrompt: string): SystemPromptSection[]
           if (endIdx !== -1) {
             remaining = remaining.slice(endIdx + closeTag.length);
           }
+          found = true;
+        }
+        break;
+      }
+
+      case "mcp_tools": {
+        const mcpMatch = remaining.match(/(MCP runtime tools:\n[\s\S]*?)(?=\n\nCurrent date:|\n\n<!-- PI_ROLE|\n\n# Global Memory|$)/);
+        if (mcpMatch) {
+          content = mcpMatch[1].trim();
+          remaining = remaining.slice(mcpMatch[0].length);
           found = true;
         }
         break;
@@ -448,6 +494,26 @@ export function filterSkillsInPrompt(prompt: string, allowedSkillNames: string[]
 }
 
 /**
+ * Filter MCP tool lines in the full prompt. MCP tools are injected by the SDK as
+ * lines in `Available tools:` whose names start with `mcp__`.
+ * null/undefined keeps all MCP tool lines; [] removes all MCP tool lines.
+ */
+export function filterMcpToolsInPrompt(prompt: string, allowedMcpToolNames: string[] | null | undefined): string {
+  if (allowedMcpToolNames === null || allowedMcpToolNames === undefined) return prompt;
+  const allowed = new Set(allowedMcpToolNames);
+  return prompt
+    .split("\n")
+    .filter((line) => {
+      const match = line.match(/^\s*-\s+(mcp__[\w-]+__[\w-]+(?:_\d+)?):/);
+      if (!match) return true;
+      return allowed.has(match[1]);
+    })
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+/**
  * Apply a version's section config to a set of live sections.
  * Returns the merged sections: live content from the current prompt,
  * but with enabled/disabled toggles and editable content from the version.
@@ -490,6 +556,7 @@ export function readRoleSystemPromptConfig(roleId?: string | null): SystemPrompt
           version: 1,
           sections: Array.isArray(config.sections) ? config.sections : [],
           skillNames: config.skillNames ?? null,
+          mcpToolNames: config.mcpToolNames ?? null,
           activeVersionId: config.activeVersionId ?? null,
           updatedAt: config.updatedAt ?? nowIso(),
         };
@@ -498,12 +565,13 @@ export function readRoleSystemPromptConfig(roleId?: string | null): SystemPrompt
   }
   // Backward compatibility: the old global config becomes the default role config.
   if (normalized === DEFAULT_ROLE_ID) return readGlobalSystemPromptConfig();
-  return { version: 1, sections: [], skillNames: null, activeVersionId: null, updatedAt: nowIso() };
+  return { version: 1, sections: [], skillNames: null, mcpToolNames: null, activeVersionId: null, updatedAt: nowIso() };
 }
 
 export function writeRoleSystemPromptConfig(roleId: string | null | undefined, input: {
   sections: Pick<SystemPromptSection, "id" | "enabled" | "content">[];
   skillNames?: string[] | null;
+  mcpToolNames?: string[] | null;
   activeVersionId?: string | null;
 }): SystemPromptGlobalConfig {
   const normalized = normalizeRoleId(roleId);
@@ -519,6 +587,7 @@ export function writeRoleSystemPromptConfig(roleId: string | null | undefined, i
     version: 1,
     sections: input.sections,
     skillNames: input.skillNames ?? null,
+    mcpToolNames: input.mcpToolNames ?? null,
     activeVersionId: input.activeVersionId ?? null,
     updatedAt: nowIso(),
   };
@@ -582,6 +651,11 @@ export function applyRolePromptConfigToPrompt(prompt: string, roleId?: string | 
   }
   // Apply per-role skill filter (null = all, [] = none, ["a","b"] = only those)
   result = filterSkillsInPrompt(result, config.skillNames);
+  // Apply per-role MCP prompt filter. The MCP module switch lives in sections;
+  // when disabled it removes all MCP tool lines from `Available tools:`.
+  const mcpSection = config.sections.find((s) => s.id === "mcp_tools");
+  const mcpAllowedNames = mcpSection?.enabled === false ? [] : config.mcpToolNames;
+  result = filterMcpToolsInPrompt(result, mcpAllowedNames);
   return result;
 }
 

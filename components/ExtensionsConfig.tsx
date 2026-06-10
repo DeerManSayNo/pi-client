@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { useEscapeClose } from "@/hooks/useEscapeClose";
 import type { LoadedExtensionsView } from "@/lib/extensions/types";
 
 function Panel({ title, count, children }: { title: string; count: string; children: React.ReactNode }) {
@@ -24,6 +25,8 @@ function Tag({ children }: { children: React.ReactNode }) {
 }
 
 export function ExtensionsConfig({ cwd, onClose }: { cwd: string; onClose: () => void }) {
+  useEscapeClose(onClose);
+
   const [data, setData] = useState<LoadedExtensionsView | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -31,7 +34,7 @@ export function ExtensionsConfig({ cwd, onClose }: { cwd: string; onClose: () =>
   const load = () => {
     setLoading(true);
     setError(null);
-    fetch(`/api/extensions?cwd=${encodeURIComponent(cwd)}`)
+    fetch(`/api/extensions?cwd=${encodeURIComponent(cwd)}&mcpRuntime=1`)
       .then((res) => res.ok ? res.json() : res.json().then((d) => Promise.reject(new Error(d.error ?? `HTTP ${res.status}`))))
       .then((json: LoadedExtensionsView) => setData(json))
       .catch((e) => setError(String(e)))
@@ -71,7 +74,7 @@ export function ExtensionsConfig({ cwd, onClose }: { cwd: string; onClose: () =>
             <>
               <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 10 }}>
                 <Panel title="Skills" count={`${summary.skillsEnabled}/${data.skills.length} 启用`}><Empty text="来自 Pi ResourceLoader 的实际加载结果" /></Panel>
-                <Panel title="MCP 服务" count={`${summary.mcpEnabled}/${data.mcpServers.length} 启用`}><Empty text="MVP 仅展示配置，暂未注入 runtime" /></Panel>
+                <Panel title="MCP 服务" count={`${summary.mcpEnabled}/${data.mcpServers.length} 启用`}><Empty text="显示配置来源与实时连接状态；http/sse 暂标记未支持" /></Panel>
                 <Panel title="Tools" count={`${summary.toolsEnabled}/${data.tools.length} 可用`}><Empty text="包含内置工具与 DeerHux code_search" /></Panel>
                 <Panel title="Diagnostics" count={`${summary.warnings} 条需关注`}><Empty text="Pi loader / facade 诊断信息" /></Panel>
               </div>
@@ -93,15 +96,22 @@ export function ExtensionsConfig({ cwd, onClose }: { cwd: string; onClose: () =>
 
               <Panel title="MCP 服务" count={`${data.mcpServers.length} 个`}>
                 {data.mcpServers.length === 0 ? <Empty text="暂无 MCP 服务配置" /> : <div style={{ display: "grid", gap: 8 }}>
-                  {data.mcpServers.map((server) => (
-                    <div key={server.id} style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                      <span style={{ width: 8, height: 8, borderRadius: 999, background: server.enabled ? "var(--accent)" : "var(--border)" }} />
-                      <strong style={{ fontSize: 13 }}>{server.name}</strong>
-                      <Tag>{server.transport}</Tag>
-                      {server.envKeys?.length ? <Tag>env: {server.envKeys.join(", ")}</Tag> : null}
-                      <span style={{ fontSize: 12, color: "var(--text-dim)" }}>{server.description}</span>
-                    </div>
-                  ))}
+                  {data.mcpServers.map((server) => {
+                    const runtimeStatus = server.runtimeStatus ?? (server.enabled ? "unknown" : "disabled");
+                    const dotColor = runtimeStatus === "connected" ? "#22c55e" : runtimeStatus === "error" ? "#ef4444" : runtimeStatus === "unsupported" ? "#f59e0b" : server.enabled ? "var(--accent)" : "var(--border)";
+                    return <div key={server.id} style={{ display: "grid", gap: 4, padding: "8px 0", borderBottom: "1px solid var(--border)" }}>
+                      <div style={{ display: "flex", gap: 8, alignItems: "center", minWidth: 0 }}>
+                        <span style={{ width: 8, height: 8, borderRadius: 999, background: dotColor, flexShrink: 0 }} />
+                        <strong style={{ fontSize: 13 }}>{server.name}</strong>
+                        <Tag>{server.transport}</Tag>
+                        <Tag>{runtimeStatus}</Tag>
+                        {typeof server.runtimeToolCount === "number" && <Tag>{server.runtimeToolCount} tools</Tag>}
+                        {server.envKeys?.length ? <Tag>env: {server.envKeys.join(", ")}</Tag> : null}
+                        <span style={{ fontSize: 12, color: "var(--text-dim)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{server.description}</span>
+                      </div>
+                      {server.runtimeErrorMessage && <div style={{ marginLeft: 16, color: "#f87171", fontSize: 11, fontFamily: "var(--font-mono)", whiteSpace: "pre-wrap" }}>{server.runtimeErrorMessage}</div>}
+                    </div>;
+                  })}
                 </div>}
               </Panel>
 

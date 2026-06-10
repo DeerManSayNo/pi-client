@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useRef, useEffect, useMemo, type CSSProperties } from "react";
+import { useState, useCallback, useRef, useEffect, useMemo, type CSSProperties, type ReactNode } from "react";
 import { useSearchParams } from "next/navigation";
 import { SessionSidebar } from "./SessionSidebar";
 import { ChatWindow } from "./ChatWindow";
@@ -14,8 +14,10 @@ import { MemoryConfig } from "./MemoryConfig";
 import { McpConfig } from "./McpConfig";
 import { ExtensionsConfig } from "./ExtensionsConfig";
 import { LogPanel } from "./LogPanel";
+import { WeChatConfig } from "./WeChatConfig";
 import { getLocalStorageItem } from "@/lib/client-storage";
 import { useTheme } from "@/hooks/useTheme";
+import { useEscapeClose } from "@/hooks/useEscapeClose";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { SessionInfo } from "@/lib/types";
 import type { ChatInputHandle } from "./ChatInput";
@@ -73,6 +75,7 @@ export function AppShell() {
   // Session tabs — browser-style in top bar
   const [sessionTabs, setSessionTabs] = useState<SessionInfo[]>([]);
   const [activeSessionTabId, setActiveSessionTabId] = useState<string | null>(null);
+  const [sessionTabContextMenu, setSessionTabContextMenu] = useState<{ sessionId: string; x: number; y: number } | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [explorerRefreshKey, setExplorerRefreshKey] = useState(0);
   const [modelsConfigOpen, setModelsConfigOpen] = useState(false);
@@ -81,6 +84,8 @@ export function AppShell() {
   const [extensionsConfigOpen, setExtensionsConfigOpen] = useState(false);
   const [quickConfigOpen, setQuickConfigOpen] = useState<"memory" | "mcp" | "role" | null>(null);
   const [schedulerPanelOpen, setSchedulerPanelOpen] = useState(false);
+  const [wechatConfigOpen, setWechatConfigOpen] = useState(false);
+  const [wechatStatus, setWechatStatus] = useState<{ connected: boolean; polling: boolean; accountId?: string; activeUserCount?: number } | null>(null);
   const [runningSessionStatuses, setRunningSessionStatuses] = useState<Map<string, RunningSessionStatus>>(new Map());
   const pendingSessionIdRef = useRef<string | null>(null);
   const pendingTempTabIdRef = useRef<string | null>(null);
@@ -97,6 +102,14 @@ export function AppShell() {
   const [isResizing, setIsResizing] = useState(false);
   const resizeStartX = useRef(0);
   const resizeStartWidth = useRef(260);
+
+  // Right panel (file viewer) resize
+  const RIGHT_PANEL_MIN = 250;
+  const RIGHT_PANEL_MAX = 1000;
+  const [rightPanelWidth, setRightPanelWidth] = useState<number>(500);
+  const [isResizingRightPanel, setIsResizingRightPanel] = useState(false);
+  const rightPanelResizeStartX = useRef(0);
+  const rightPanelResizeStartWidth = useRef(500);
   const chatInputRef = useRef<ChatInputHandle | null>(null);
   const topBarRef = useRef<HTMLDivElement>(null);
 
@@ -148,6 +161,10 @@ export function AppShell() {
   const [projectOptions, setProjectOptions] = useState<{ cwd: string; displayName: string }[]>([]);
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
   const [settingsMenuOpen, setSettingsMenuOpen] = useState(false);
+
+  useEscapeClose(() => setProjectPickerOpen(false), projectPickerOpen);
+  useEscapeClose(() => setSettingsMenuOpen(false), settingsMenuOpen);
+
   const effectiveProjectCwd = selectedSession?.cwd ?? newSessionCwd ?? activeCwd ?? defaultCwd;
   // True once the initial ?session= URL param has been resolved (or confirmed absent)
   const [initialSessionRestored, setInitialSessionRestored] = useState<boolean>(() => !searchParams.get("session"));
@@ -160,6 +177,11 @@ export function AppShell() {
     if (storedWidth) {
       const parsed = parseInt(storedWidth, 10);
       if (Number.isFinite(parsed)) setSidebarWidth(Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, parsed)));
+    }
+    const storedRightWidth = getLocalStorageItem("deerhux.right-panel-width");
+    if (storedRightWidth) {
+      const parsed = parseInt(storedRightWidth, 10);
+      if (Number.isFinite(parsed)) setRightPanelWidth(Math.min(RIGHT_PANEL_MAX, Math.max(RIGHT_PANEL_MIN, parsed)));
     }
     setCustomCwds(readCustomCwds());
   }, []);
@@ -198,6 +220,19 @@ export function AppShell() {
     }, 4000);
     return () => clearInterval(interval);
   }, [runningSessionStatuses.size]);
+
+  // Poll WeChat bot status for the settings dropdown inline indicator
+  useEffect(() => {
+    const fetchWechat = () => {
+      fetch("/api/wechat", { cache: "no-store" })
+        .then((res) => res.ok ? res.json() : null)
+        .then((data) => { if (data) setWechatStatus(data); })
+        .catch(() => {});
+    };
+    fetchWechat();
+    const interval = setInterval(fetchWechat, 5000);
+    return () => clearInterval(interval);
+  }, []);
 
   const setSessionRunning = useCallback((sessionId: string | null | undefined, running: boolean) => {
     if (!sessionId) return;
@@ -446,6 +481,36 @@ export function AppShell() {
     };
   }, [isResizing]);
 
+  // ── Right panel resize handlers ──
+  const handleRightPanelResizeStart = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    setIsResizingRightPanel(true);
+    rightPanelResizeStartX.current = e.clientX;
+    rightPanelResizeStartWidth.current = rightPanelWidth;
+  }, [rightPanelWidth]);
+
+  useEffect(() => {
+    if (!isResizingRightPanel) return;
+    const handleMove = (e: MouseEvent) => {
+      const delta = rightPanelResizeStartX.current - e.clientX;
+      const next = Math.min(RIGHT_PANEL_MAX, Math.max(RIGHT_PANEL_MIN, rightPanelResizeStartWidth.current + delta));
+      setRightPanelWidth(next);
+    };
+    const handleUp = () => {
+      setIsResizingRightPanel(false);
+      setRightPanelWidth((w) => {
+        if (typeof window !== "undefined") window.localStorage.setItem("deerhux.right-panel-width", String(w));
+        return w;
+      });
+    };
+    window.addEventListener("mousemove", handleMove);
+    window.addEventListener("mouseup", handleUp);
+    return () => {
+      window.removeEventListener("mousemove", handleMove);
+      window.removeEventListener("mouseup", handleUp);
+    };
+  }, [isResizingRightPanel]);
+
   const handleSessionDeleted = useCallback((sessionId: string) => {
     setRefreshKey((k) => k + 1);
     if (selectedSession?.id === sessionId) {
@@ -496,6 +561,29 @@ export function AppShell() {
     });
   }, [fileTabs, logPanelOpen]);
 
+  const handleCloseFileTabs = useCallback((tabIds: string[]) => {
+    const ids = new Set(tabIds);
+    if (ids.size === 0) return;
+
+    const closingLog = ids.has("__log__");
+    if (closingLog) setLogPanelOpen(false);
+
+    const nextFileTabs = fileTabs.filter((tab) => !ids.has(tab.id));
+    setFileTabs(nextFileTabs);
+
+    const nextTabs = [
+      ...(!closingLog && logPanelOpen ? [{ id: "__log__" as string }] : []),
+      ...nextFileTabs,
+    ];
+
+    setActiveFileTabId((cur) => {
+      if (cur && !ids.has(cur)) return cur;
+      return nextTabs.length > 0 ? nextTabs[nextTabs.length - 1].id : null;
+    });
+
+    if (nextTabs.length === 0) setRightPanelOpen(false);
+  }, [fileTabs, logPanelOpen]);
+
   const handleCloseSessionTab = useCallback((sessionId: string) => {
     if (pendingTempTabIdRef.current === sessionId) {
       pendingTempTabIdRef.current = null;
@@ -526,6 +614,50 @@ export function AppShell() {
       return next;
     });
   }, [activeSessionTabId, selectedSession]);
+
+  const handleCloseSessionTabs = useCallback((sessionIds: string[]) => {
+    const ids = new Set(sessionIds);
+    if (ids.size === 0) return;
+
+    if (pendingTempTabIdRef.current && ids.has(pendingTempTabIdRef.current)) {
+      pendingTempTabIdRef.current = null;
+    }
+    ids.forEach((id) => placeholderTabIdsRef.current.delete(id));
+
+    const next = sessionTabs.filter((tab) => !ids.has(tab.id));
+    setSessionTabs(next);
+
+    const activeId = selectedSession?.id ?? activeSessionTabId;
+    if (!activeId || !ids.has(activeId)) return;
+
+    if (next.length > 0) {
+      const nextSession = next[next.length - 1];
+      setActiveSessionTabId(nextSession.id);
+      if (placeholderTabIdsRef.current.has(nextSession.id)) {
+        setSelectedSession(null);
+        setNewSessionCwd(nextSession.cwd);
+      } else {
+        setSelectedSession(nextSession);
+        setNewSessionCwd(null);
+      }
+    } else {
+      setSelectedSession(null);
+      setActiveSessionTabId(null);
+      setNewSessionCwd(null);
+    }
+  }, [activeSessionTabId, selectedSession, sessionTabs]);
+
+  useEffect(() => {
+    if (!sessionTabContextMenu) return;
+    const close = () => setSessionTabContextMenu(null);
+    const handleKey = (e: KeyboardEvent) => { if (e.key === "Escape") close(); };
+    window.addEventListener("click", close);
+    window.addEventListener("keydown", handleKey);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("keydown", handleKey);
+    };
+  }, [sessionTabContextMenu]);
 
   // Show chat area only when a session tab is open and active, or when a new-session tab is active
   const effectiveNewSessionCwd = newSessionCwd ?? (selectedSession === null && activeCwd ? activeCwd : null);
@@ -682,6 +814,61 @@ export function AppShell() {
         ))}
       </div>
     </div>
+  );
+
+  const sessionContextTab = sessionTabContextMenu ? sessionTabs.find((tab) => tab.id === sessionTabContextMenu.sessionId) : null;
+  const sessionContextIndex = sessionContextTab ? sessionTabs.findIndex((tab) => tab.id === sessionContextTab.id) : -1;
+  const sessionRightTabIds = sessionContextIndex >= 0 ? sessionTabs.slice(sessionContextIndex + 1).map((tab) => tab.id) : [];
+  const sessionOtherTabIds = sessionContextTab ? sessionTabs.filter((tab) => tab.id !== sessionContextTab.id).map((tab) => tab.id) : [];
+  const sessionAllTabIds = sessionTabs.map((tab) => tab.id);
+
+  const sessionContextMenuItemStyle: CSSProperties = {
+    width: "100%",
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    padding: "7px 9px",
+    background: "transparent",
+    border: "none",
+    borderRadius: 7,
+    color: "var(--text-muted)",
+    cursor: "pointer",
+    textAlign: "left",
+    fontSize: 12,
+  };
+
+  const renderSessionContextMenuButton = (label: string, disabled: boolean, onClick: () => void, icon: ReactNode) => (
+    <button
+      style={{ ...sessionContextMenuItemStyle, opacity: disabled ? 0.5 : 1, cursor: disabled ? "not-allowed" : "pointer", color: disabled ? "var(--text-dim)" : "var(--text-muted)" }}
+      disabled={disabled}
+      onClick={onClick}
+      onMouseEnter={(e) => {
+        if (disabled) return;
+        e.currentTarget.style.background = "var(--bg-hover)";
+        e.currentTarget.style.color = "var(--text)";
+      }}
+      onMouseLeave={(e) => {
+        if (disabled) return;
+        e.currentTarget.style.background = "transparent";
+        e.currentTarget.style.color = "var(--text-muted)";
+      }}
+    >
+      {icon}
+      {label}
+    </button>
+  );
+
+  const closeIcon = (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6L6 18" /><path d="M6 6l12 12" /></svg>
+  );
+  const closeRightIcon = (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M8 6l6 6-6 6" /><path d="M16 6v12" /></svg>
+  );
+  const closeOthersIcon = (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="5" width="18" height="14" rx="2" /><path d="M8 9l8 8" /><path d="M16 9l-8 8" /></svg>
+  );
+  const closeAllIcon = (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18" /><path d="M8 6V4h8v2" /><path d="M19 6l-1 14H6L5 6" /><path d="M10 11v5" /><path d="M14 11v5" /></svg>
   );
 
   return (
@@ -914,6 +1101,15 @@ export function AppShell() {
                   <path d="M10 6.5h4" />
                   <path d="M17.5 10v2a2 2 0 0 1-2 2H12" />
                   <path d="M6.5 10v2a2 2 0 0 0 2 2H12" />
+                </svg>
+              ),
+            },
+            {
+              label: "微信 Bot",
+              onClick: () => { setSettingsMenuOpen(false); setWechatConfigOpen(true); },
+              icon: (
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />
                 </svg>
               ),
             },
@@ -1184,6 +1380,11 @@ export function AppShell() {
                   <div
                     key={tab.id}
                     onClick={() => handleSelectSession(tab)}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setSessionTabContextMenu({ sessionId: tab.id, x: e.clientX, y: e.clientY });
+                    }}
                     style={{
                       display: "flex",
                       alignItems: "center",
@@ -1720,7 +1921,26 @@ export function AppShell() {
         </div>
       </div>
 
-      {/* Right panel: file viewer — always mounted, width animated via CSS */}
+      {/* Right panel resize handle */}
+      {rightPanelOpen && (
+        <div
+          onMouseDown={handleRightPanelResizeStart}
+          style={{
+            width: 5,
+            cursor: "col-resize",
+            flexShrink: 0,
+            background: isResizingRightPanel ? "var(--accent)" : "transparent",
+            transition: isResizingRightPanel ? "none" : "background 0.15s",
+            zIndex: 201,
+            marginLeft: -2,
+            marginRight: -2,
+          }}
+          onMouseEnter={(e) => { if (!isResizingRightPanel) e.currentTarget.style.background = "var(--border)"; }}
+          onMouseLeave={(e) => { if (!isResizingRightPanel) e.currentTarget.style.background = "transparent"; }}
+        />
+      )}
+
+      {/* Right panel: file viewer — width via inline style, CSS class for mobile */}
       <div
         className={`right-panel-container${rightPanelOpen ? " right-panel-open" : " right-panel-closed"}`}
         style={{
@@ -1728,6 +1948,9 @@ export function AppShell() {
           flexDirection: "column",
           borderLeft: "1px solid var(--border)",
           background: "var(--bg)",
+          width: rightPanelOpen ? rightPanelWidth : 0,
+          minWidth: rightPanelOpen ? RIGHT_PANEL_MIN : 0,
+          transition: isResizingRightPanel ? "none" : undefined,
         }}
       >
         {/* Tabs: log tab + file tabs */}
@@ -1740,6 +1963,7 @@ export function AppShell() {
             activeTabId={activeFileTabId ?? (logPanelOpen ? "__log__" : "")}
             onSelectTab={(id) => setActiveFileTabId(id)}
             onCloseTab={handleCloseFileTab}
+            onCloseTabs={handleCloseFileTabs}
             cwd={effectiveProjectCwd ?? undefined}
           />
         )}
@@ -1769,7 +1993,44 @@ export function AppShell() {
     )}
     {quickConfigOpen === "role" && <RoleConfig onClose={() => setQuickConfigOpen(null)} cwd={activeCwd ?? selectedSession?.cwd ?? newSessionCwd ?? undefined} projects={projectOptions} />}
     {quickConfigOpen === "memory" && <MemoryConfig onClose={() => setQuickConfigOpen(null)} cwd={activeCwd ?? selectedSession?.cwd ?? newSessionCwd ?? undefined} />}
-    {quickConfigOpen === "mcp" && <McpConfig onClose={() => setQuickConfigOpen(null)} />}
+    {quickConfigOpen === "mcp" && <McpConfig onClose={() => setQuickConfigOpen(null)} cwd={activeCwd ?? selectedSession?.cwd ?? newSessionCwd ?? undefined} />}
+    {wechatConfigOpen && <WeChatConfig onClose={() => setWechatConfigOpen(false)} />}
+    {sessionTabContextMenu && sessionContextTab && (
+      <div
+        style={{
+          position: "fixed",
+          left: sessionTabContextMenu.x,
+          top: sessionTabContextMenu.y,
+          zIndex: 1000,
+          width: 200,
+          padding: 6,
+          background: "var(--bg-panel)",
+          border: "1px solid var(--border)",
+          borderRadius: 10,
+          boxShadow: "0 12px 28px rgba(0,0,0,0.16)",
+        }}
+        onClick={(e) => e.stopPropagation()}
+        onContextMenu={(e) => e.preventDefault()}
+      >
+        <div
+          style={{
+            padding: "5px 8px 7px",
+            color: "var(--text-dim)",
+            fontSize: 10,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+          title={sessionContextTab.name || sessionContextTab.firstMessage || sessionContextTab.id}
+        >
+          {sessionContextTab.name || sessionContextTab.firstMessage?.slice(0, 40) || sessionContextTab.id.slice(0, 8)}
+        </div>
+        {renderSessionContextMenuButton("关闭此页", false, () => { handleCloseSessionTabs([sessionContextTab.id]); setSessionTabContextMenu(null); }, closeIcon)}
+        {renderSessionContextMenuButton("关闭右侧标签", sessionRightTabIds.length === 0, () => { handleCloseSessionTabs(sessionRightTabIds); setSessionTabContextMenu(null); }, closeRightIcon)}
+        {renderSessionContextMenuButton("关闭其他页签", sessionOtherTabIds.length === 0, () => { handleCloseSessionTabs(sessionOtherTabIds); setSessionTabContextMenu(null); }, closeOthersIcon)}
+        {renderSessionContextMenuButton("关闭全部页签", sessionAllTabIds.length === 0, () => { handleCloseSessionTabs(sessionAllTabIds); setSessionTabContextMenu(null); }, closeAllIcon)}
+      </div>
+    )}
     </>
   );
 }

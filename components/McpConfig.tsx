@@ -1,9 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
+import { useEscapeClose } from "@/hooks/useEscapeClose";
 
 type McpTransport = "stdio" | "sse" | "http";
 interface McpServerConfig { id: string; name: string; enabled: boolean; transport: McpTransport; command?: string; args?: string[]; url?: string; env?: Record<string, string>; description?: string; createdAt: string; updatedAt: string }
+interface McpServerStatus { id: string; name: string; transport: McpTransport; status: "connected" | "error" | "unsupported"; toolCount: number; errorMessage?: string; sourcePath?: string }
 
 function makeServer(): McpServerConfig { return { id: `local_${Date.now()}`, name: "新 MCP 服务", enabled: true, transport: "stdio", command: "", args: [], url: "", env: {}, description: "", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }; }
 function argsText(s: McpServerConfig) { return (s.args ?? []).join("\n"); }
@@ -11,11 +13,17 @@ function envText(s: McpServerConfig) { return Object.entries(s.env ?? {}).map(([
 function parseLines(text: string) { return text.split(/\n+/).map((v) => v.trim()).filter(Boolean); }
 function parseEnv(text: string) { return Object.fromEntries(text.split(/\n+/).map((line) => line.trim()).filter(Boolean).map((line) => { const i = line.indexOf("="); return i >= 0 ? [line.slice(0, i).trim(), line.slice(i + 1).trim()] : [line, ""]; })); }
 
-export function McpConfig({ onClose }: { onClose: () => void }) {
+export function McpConfig({ cwd, onClose }: { cwd?: string; onClose: () => void }) {
+  useEscapeClose(onClose);
+
   const [servers, setServers] = useState<McpServerConfig[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [saveMessage, setSaveMessage] = useState<string>("");
+  const [testStatuses, setTestStatuses] = useState<McpServerStatus[]>([]);
+  const [testMessage, setTestMessage] = useState<string>("");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -38,11 +46,39 @@ export function McpConfig({ onClose }: { onClose: () => void }) {
     try {
       const res = await fetch("/api/mcp-config", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ servers }) });
       if (res.ok) {
-        const list = ((await res.json()) as { servers: McpServerConfig[] }).servers;
+        const payload = (await res.json()) as { servers: McpServerConfig[]; reloadResults?: Array<{ ok: boolean; skipped?: boolean; error?: string }> };
+        const list = payload.servers;
         setServers(list); setSelectedId((id) => id && list.some((s) => s.id === id) ? id : (list[0]?.id ?? null));
+        const reloadResults = payload.reloadResults ?? [];
+        if (reloadResults.length === 0) setSaveMessage("已保存。新会话将自动使用最新 MCP 配置。");
+        else {
+          const ok = reloadResults.filter((r) => r.ok).length;
+          const skipped = reloadResults.filter((r) => r.skipped).length;
+          const failed = reloadResults.filter((r) => r.error).length;
+          setSaveMessage(`已保存。MCP 热刷新：成功 ${ok}，跳过 ${skipped}，失败 ${failed}。`);
+        }
       }
     } finally { setSaving(false); }
   }, [servers]);
+
+  const testConnection = useCallback(async () => {
+    setTesting(true);
+    setTestMessage("");
+    setTestStatuses([]);
+    try {
+      const res = await fetch("/api/mcp-config/test", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ cwd, servers }) });
+      const payload = await res.json() as { statuses?: McpServerStatus[]; toolCount?: number; error?: string };
+      if (!res.ok) throw new Error(payload.error ?? `HTTP ${res.status}`);
+      const statuses = payload.statuses ?? [];
+      setTestStatuses(statuses);
+      const connected = statuses.filter((s) => s.status === "connected").length;
+      const errors = statuses.filter((s) => s.status === "error").length;
+      const unsupported = statuses.filter((s) => s.status === "unsupported").length;
+      setTestMessage(`测试完成：连接 ${connected}，错误 ${errors}，未支持 ${unsupported}，工具 ${payload.toolCount ?? 0} 个。`);
+    } catch (error) {
+      setTestMessage(`测试失败：${error instanceof Error ? error.message : String(error)}`);
+    } finally { setTesting(false); }
+  }, [cwd, servers]);
 
   return <div role="dialog" aria-modal="true" aria-label="MCP" style={overlayStyle} onClick={onClose}>
     <div onClick={(e) => e.stopPropagation()} style={modalStyle}>
@@ -57,13 +93,19 @@ export function McpConfig({ onClose }: { onClose: () => void }) {
         })}</div>
       </aside>
       <main style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
-        <div style={mainHeaderStyle}><div style={{ flex: 1 }}><div style={{ fontSize: 15, fontWeight: 800, color: "var(--text)" }}>{selected?.name ?? "MCP 服务配置"}</div><div style={subStyle}>配置会保存到 ~/.deerhux/agent/mcp.json；后续可由 Agent 运行时读取接入。</div></div>{selected && <button onClick={remove} style={dangerBtnStyle}>删除</button>}<button onClick={save} disabled={saving} style={{ ...primaryBtnStyle, opacity: saving ? 0.5 : 1 }}>{saving ? "保存中..." : "保存"}</button><button onClick={onClose} style={closeBtnStyle}>×</button></div>
+        <div style={mainHeaderStyle}><div style={{ flex: 1 }}><div style={{ fontSize: 15, fontWeight: 800, color: "var(--text)" }}>{selected?.name ?? "MCP 服务配置"}</div><div style={subStyle}>配置会保存到 ~/.deerhux/agent/mcp.json；启用的 stdio 服务会在 Agent 会话启动时注入为工具。</div></div>{selected && <button onClick={remove} style={dangerBtnStyle}>删除</button>}<button onClick={testConnection} disabled={testing} style={{ ...secondaryBtnStyle, opacity: testing ? 0.5 : 1 }}>{testing ? "测试中..." : "测试连接"}</button><button onClick={save} disabled={saving} style={{ ...primaryBtnStyle, opacity: saving ? 0.5 : 1 }}>{saving ? "保存中..." : "保存"}</button><button onClick={onClose} style={closeBtnStyle}>×</button></div>
         {!selected ? <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center" }}><button onClick={add} style={primaryBtnStyle}>创建第一个 MCP 服务</button></div> : <div style={{ flex: 1, overflowY: "auto", padding: 18 }}>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}><label style={labelStyle}>服务名称<input value={selected.name} onChange={(e) => updateSelected({ name: e.target.value })} style={inputStyle} /></label><label style={labelStyle}>传输类型<select value={selected.transport} onChange={(e) => updateSelected({ transport: e.target.value as McpTransport })} style={inputStyle}><option value="stdio">stdio</option><option value="sse">sse</option><option value="http">http</option></select></label></div>
           <label style={{ ...labelStyle, display: "flex", alignItems: "center", gap: 8, margin: "4px 0 12px" }}><input type="checkbox" checked={selected.enabled} onChange={(e) => updateSelected({ enabled: e.target.checked })} />启用该服务</label>
           <label style={labelStyle}>描述<input value={selected.description ?? ""} onChange={(e) => updateSelected({ description: e.target.value })} style={inputStyle} /></label>
           {selected.transport === "stdio" ? <><label style={labelStyle}>Command<input value={selected.command ?? ""} onChange={(e) => updateSelected({ command: e.target.value })} placeholder="例如：npx" style={inputStyle} /></label><label style={labelStyle}>Args（每行一个参数）<textarea value={argsText(selected)} onChange={(e) => updateSelected({ args: parseLines(e.target.value) })} rows={5} placeholder="-y\n@modelcontextprotocol/server-filesystem\n/Users/me/project" style={textareaStyle} /></label></> : <label style={labelStyle}>URL<input value={selected.url ?? ""} onChange={(e) => updateSelected({ url: e.target.value })} placeholder="https://..." style={inputStyle} /></label>}
           <label style={labelStyle}>环境变量（每行 KEY=VALUE）<textarea value={envText(selected)} onChange={(e) => updateSelected({ env: parseEnv(e.target.value) })} rows={5} placeholder="API_KEY=..." style={textareaStyle} /></label>
+          {testMessage && <div style={hintStyle}>{testMessage}</div>}
+          {testStatuses.length > 0 && <div style={{ display: "grid", gap: 8, marginTop: 10 }}>{testStatuses.map((status) => <div key={status.id} style={{ ...statusRowStyle, borderColor: status.status === "connected" ? "rgba(34,197,94,0.35)" : status.status === "error" ? "rgba(239,68,68,0.35)" : "var(--border)" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}><span style={{ width: 8, height: 8, borderRadius: 99, background: status.status === "connected" ? "#22c55e" : status.status === "error" ? "#ef4444" : "#f59e0b" }} /><strong>{status.name}</strong><span style={pillStyle}>{status.transport}</span><span style={pillStyle}>{status.status}</span><span style={pillStyle}>{status.toolCount} tools</span></div>
+            {status.errorMessage && <div style={{ marginTop: 6, color: "#f87171", fontSize: 11, fontFamily: "var(--font-mono)", whiteSpace: "pre-wrap" }}>{status.errorMessage}</div>}
+          </div>)}</div>}
+          {saveMessage && <div style={hintStyle}>{saveMessage}</div>}
         </div>}
       </main>
     </div>
@@ -86,5 +128,8 @@ const textareaStyle: CSSProperties = { ...inputStyle, resize: "vertical", lineHe
 const emptyStyle: CSSProperties = { padding: 12, color: "var(--text-muted)", fontSize: 12 };
 const smallBtnStyle: CSSProperties = { width: 30, height: 30, borderRadius: 9, border: "1px solid var(--border)", background: "var(--bg)", color: "var(--text)", cursor: "pointer", fontSize: 18 };
 const primaryBtnStyle: CSSProperties = { padding: "8px 12px", borderRadius: 9, border: "1px solid var(--accent)", background: "var(--accent)", color: "white", cursor: "pointer", fontSize: 12, fontWeight: 700 };
+const secondaryBtnStyle: CSSProperties = { padding: "8px 12px", borderRadius: 9, border: "1px solid var(--border)", background: "var(--bg-panel)", color: "var(--text)", cursor: "pointer", fontSize: 12, fontWeight: 700 };
 const dangerBtnStyle: CSSProperties = { padding: "8px 10px", borderRadius: 9, border: "1px solid rgba(239,68,68,0.35)", background: "rgba(239,68,68,0.08)", color: "#ef4444", cursor: "pointer", fontSize: 12 };
 const closeBtnStyle: CSSProperties = { width: 30, height: 30, borderRadius: 9, border: "1px solid var(--border)", background: "var(--bg-panel)", color: "var(--text-muted)", cursor: "pointer", fontSize: 18 };
+const hintStyle: CSSProperties = { marginTop: 10, padding: "10px 12px", border: "1px solid var(--border)", borderRadius: 10, background: "var(--bg-panel)", color: "var(--text-muted)", fontSize: 12 };
+const statusRowStyle: CSSProperties = { padding: "10px 12px", border: "1px solid var(--border)", borderRadius: 10, background: "var(--bg-panel)", color: "var(--text)", fontSize: 12 };

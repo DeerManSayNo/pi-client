@@ -6,6 +6,8 @@ import { useEffect, useState, useCallback, useRef, useMemo, type CSSProperties }
 import type { SessionInfo } from "@/lib/types";
 import { FileExplorer } from "./FileExplorer";
 import { SchedulerRunsBlock } from "./SchedulerRunsBlock";
+import { RemoteConnectionsBlock } from "./RemoteConnectionsBlock";
+
 
 type RunningSessionStatus = {
   sessionId: string;
@@ -224,6 +226,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
 
   const [explorerRefreshDone, setExplorerRefreshDone] = useState(false);
   const explorerRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [projectsRefreshDone, setProjectsRefreshDone] = useState(false);
+  const projectsRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const sidebarRef = useRef<HTMLDivElement>(null);
   const headerRef = useRef<HTMLDivElement>(null);
   const splitterRef = useRef<HTMLDivElement>(null);
@@ -607,6 +611,23 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     });
   }, []);
 
+  const handleRefreshProjects = useCallback(async () => {
+    setCustomCwds(readCustomCwds());
+    setProjectMeta(readProjectMeta());
+    await loadSessions(true);
+    void ensureDefaultCwd();
+    setProjectsRefreshDone(true);
+    if (projectsRefreshTimerRef.current) clearTimeout(projectsRefreshTimerRef.current);
+    projectsRefreshTimerRef.current = setTimeout(() => setProjectsRefreshDone(false), 2000);
+  }, [ensureDefaultCwd, loadSessions]);
+
+  useEffect(() => {
+    return () => {
+      if (explorerRefreshTimerRef.current) clearTimeout(explorerRefreshTimerRef.current);
+      if (projectsRefreshTimerRef.current) clearTimeout(projectsRefreshTimerRef.current);
+    };
+  }, []);
+
   return (
     <div ref={sidebarRef} style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
       {/* Header */}
@@ -769,47 +790,82 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             flexShrink: 0,
           }}
         >
-          <button
-            onClick={() => setAllProjectsState((prev) => prev === "expanded" ? "compact" : prev === "compact" ? "collapsed" : "expanded")}
-            style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: compact ? "center" : undefined,
-              gap: compact ? 0 : 6,
-              width: "100%",
-              padding: compact ? "6px 0" : "6px 10px",
-              background: "none",
-              border: "none",
-              color: "var(--text-muted)",
-              cursor: "pointer",
-              fontSize: 11,
-              fontWeight: 600,
-              letterSpacing: compact ? 0 : "0.05em",
-              textTransform: compact ? "none" : "uppercase",
-              textAlign: "left",
-              userSelect: "none",
-            }}
-            onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
-            onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-muted)"; }}
-            title={compact ? (allProjectsState === "expanded" ? "收起" : allProjectsState === "compact" ? "折叠" : "展开全部") : undefined}
-          >
-            <svg
-              width="9" height="9" viewBox="0 0 10 10" fill="none"
-              stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"
+          <div style={{ display: "flex", alignItems: "center" }}>
+            <button
+              onClick={() => setAllProjectsState((prev) => prev === "expanded" ? "compact" : prev === "compact" ? "collapsed" : "expanded")}
               style={{
-                transform: allProjectsState === "expanded" ? "rotate(90deg)" : "none",
-                transition: "transform 0.15s",
-                flexShrink: 0,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: compact ? "center" : undefined,
+                gap: compact ? 0 : 6,
+                flex: 1,
+                minWidth: 0,
+                padding: compact ? "6px 0" : "6px 10px",
+                background: "none",
+                border: "none",
+                color: "var(--text-muted)",
+                cursor: "pointer",
+                fontSize: 11,
+                fontWeight: 600,
+                letterSpacing: compact ? 0 : "0.05em",
+                textTransform: compact ? "none" : "uppercase",
+                textAlign: "left",
+                userSelect: "none",
               }}
+              onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
+              onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-muted)"; }}
+              title={compact ? (allProjectsState === "expanded" ? "收起" : allProjectsState === "compact" ? "折叠" : "展开全部") : undefined}
             >
-              {allProjectsState === "compact" ? (
-                <line x1="3" y1="5" x2="7" y2="5" />
+              <svg
+                width="9" height="9" viewBox="0 0 10 10" fill="none"
+                stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"
+                style={{
+                  transform: allProjectsState === "expanded" ? "rotate(90deg)" : "none",
+                  transition: "transform 0.15s",
+                  flexShrink: 0,
+                }}
+              >
+                {allProjectsState === "compact" ? (
+                  <line x1="3" y1="5" x2="7" y2="5" />
+                ) : (
+                  <polyline points="3 2 7 5 3 8" />
+                )}
+              </svg>
+              {!compact && "全部项目"}
+            </button>
+            <button
+              onClick={(event) => {
+                event.stopPropagation();
+                void handleRefreshProjects();
+              }}
+              title="刷新项目和会话"
+              aria-label="刷新项目和会话"
+              style={{
+                display: "flex", alignItems: "center", justifyContent: "center",
+                width: 26, height: 26, padding: 0, marginRight: compact ? 4 : 6,
+                background: projectsRefreshDone ? "rgba(74,222,128,0.18)" : "none",
+                border: "none",
+                color: projectsRefreshDone ? "#4ade80" : "var(--text-dim)",
+                cursor: "pointer",
+                borderRadius: 5,
+                flexShrink: 0,
+                transition: "color 0.3s, background 0.3s",
+              }}
+              onMouseEnter={(e) => { if (projectsRefreshDone) return; e.currentTarget.style.color = "var(--text-muted)"; e.currentTarget.style.background = "var(--bg-hover)"; }}
+              onMouseLeave={(e) => { if (projectsRefreshDone) return; e.currentTarget.style.color = "var(--text-dim)"; e.currentTarget.style.background = "none"; }}
+            >
+              {projectsRefreshDone ? (
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#4ade80" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="20 6 9 17 4 12" />
+                </svg>
               ) : (
-                <polyline points="3 2 7 5 3 8" />
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+                  <path d="M3 3v5h5" />
+                </svg>
               )}
-            </svg>
-            {!compact && "全部项目"}
-          </button>
+            </button>
+          </div>
         </div>
       )}
 
@@ -832,11 +888,11 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         )}
         {!loading && !error && (
           <>
-            {(normalizedSearchQuery || allProjectsState !== "collapsed") && (allProjectsState === "compact" && !normalizedSearchQuery ? projects.filter((project) => project.pinned) : projects).map((project) => (
+            {(normalizedSearchQuery || allProjectsState !== "collapsed") && projects.map((project) => (
           <ProjectSection
             key={project.cwd}
             project={project}
-            expanded={normalizedSearchQuery ? true : expandedCwds.has(project.cwd)}
+            expanded={normalizedSearchQuery ? true : allProjectsState === "compact" ? true : expandedCwds.has(project.cwd)}
             showAll={normalizedSearchQuery ? true : showAllCwds.has(project.cwd)}
             selectedSessionId={selectedSessionId}
             runningSessionStatuses={runningSessionStatuses}
@@ -854,7 +910,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             }}
             compact={compact}
             isActiveProject={project.cwd === activeSelectedCwd}
-            maxSessions={allProjectsState === "compact" ? 2 : undefined}
+            maxSessions={allProjectsState === "compact" ? 3 : undefined}
           />
         ))}
           </>
@@ -957,6 +1013,22 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         );
       })()}
 
+      {/* RemoteConnectionsBlock */}
+      {!compact && (
+        <RemoteConnectionsBlock
+          selectedSessionId={selectedSessionId}
+          onSelectSession={onSelectSession}
+        />
+      )}
+
+      {/* SchedulerRunsBlock */}
+      {!compact && (
+        <SchedulerRunsBlock
+          selectedSessionId={selectedSessionId}
+          onSelectSession={onSelectSession}
+        />
+      )}
+
       {/* Draggable splitter handle */}
       {explorerOpen && !compact && (selectedCwdProp || selectedCwd) && (
         <div
@@ -975,8 +1047,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         />
       )}
 
-      {/* Scheduler executions section */}
-      {!compact && (selectedCwdProp || selectedCwd) && <SchedulerRunsBlock selectedSessionId={selectedSessionId} onSelectSession={onSelectSession} />}
+
 
       {/* File Explorer section */}
       {!compact && (selectedCwdProp || selectedCwd) && (
@@ -1102,12 +1173,13 @@ function ProjectSection({
   maxSessions?: number;
 }) {
   const selectedInProject = selectedSessionId ? project.sessions.find((s) => s.id === selectedSessionId) : undefined;
-  const limit = maxSessions ?? (showAll ? project.sessions.length : 2);
+  const collapsedLimit = maxSessions ?? 2;
+  const limit = showAll ? project.sessions.length : collapsedLimit;
   let visibleSessions = project.sessions.slice(0, limit);
-  if (selectedInProject && !visibleSessions.some((s) => s.id === selectedInProject.id)) {
+  if (selectedInProject && !showAll && !visibleSessions.some((s) => s.id === selectedInProject.id)) {
     visibleSessions = [...visibleSessions, selectedInProject];
   }
-  const hiddenSessionCount = maxSessions !== undefined ? Math.max(0, project.sessions.length - maxSessions) : Math.max(0, project.sessions.length - (showAll ? project.sessions.length : 2));
+  const hiddenSessionCount = Math.max(0, project.sessions.length - collapsedLimit);
   const sessionTree = buildSessionTree(project.sessions);
   const projectTitle = project.displayName ?? getProjectName(project.cwd);
   const projectInitial = getInitial(projectTitle);
@@ -1201,12 +1273,12 @@ function ProjectSection({
 
       {(compact || expanded) && (
         <div>
-          {showAll && !compact && maxSessions === undefined ? sessionTree.map((node) => (
+          {showAll && !compact ? sessionTree.map((node) => (
             <SessionTreeItem key={node.session.id} node={node} selectedSessionId={selectedSessionId} runningSessionStatuses={runningSessionStatuses} onSelectSession={onSelectSession} onRenamed={onRenamed} onSessionDeleted={onSessionDeleted} depth={0} compact={compact} />
           )) : visibleSessions.map((session) => (
             <SessionItem key={session.id} session={session} isSelected={session.id === selectedSessionId} runningStatus={runningSessionStatuses.get(session.id)} onClick={() => onSelectSession(session)} onRenamed={onRenamed} onDeleted={(id) => onSessionDeleted?.(id)} depth={0} compact={compact} />
           ))}
-          {project.sessions.length > 2 && !compact && maxSessions === undefined && (
+          {project.sessions.length > collapsedLimit && !compact && (
             <button
               onClick={(e) => { e.stopPropagation(); onToggleShowAll(); }}
               style={{

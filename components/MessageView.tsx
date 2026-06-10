@@ -100,6 +100,13 @@ export const MessageView = memo(MessageViewImpl, (prev, next) => (
   prev.onResend === next.onResend
 ));
 
+/** Parse /skill:name prefix from message text. Returns { skillName, rest } or null. */
+function parseSkillPrefix(text: string): { skillName: string; rest: string } | null {
+  const match = text.match(/^\/skill:([\w-]+)(?:\s|$)([\s\S]*)/);
+  if (!match) return null;
+  return { skillName: match[1], rest: match[2] };
+}
+
 function UserMessageView({ message, entryId, onResend }: {
   message: UserMessage;
   entryId?: string;
@@ -119,6 +126,10 @@ function UserMessageView({ message, entryId, onResend }: {
     typeof message.content === "string"
       ? []
       : message.content.filter((b): b is ImageContent => b.type === "image");
+
+  // Extract /skill:name prefix for tag display
+  const skillPrefix = useMemo(() => parseSkillPrefix(content), [content]);
+  const displayContent = skillPrefix ? skillPrefix.rest : content;
 
   const [expanded, setExpanded] = useState(false);
   const [editValue, setEditValue] = useState(content);
@@ -244,7 +255,41 @@ function UserMessageView({ message, entryId, onResend }: {
               wordBreak: "break-word",
             }}
           >
-            {content}
+            {skillPrefix && (
+              <span
+                title={`使用了技能: ${skillPrefix.skillName}`}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 4,
+                  marginRight: 5,
+                  verticalAlign: "middle",
+                  height: 22,
+                  padding: "0 7px 0 7px",
+                  borderRadius: 999,
+                  background: "color-mix(in srgb, var(--accent) 6%, var(--bg))",
+                  border: "1px solid color-mix(in srgb, var(--accent) 13%, transparent)",
+                  color: "color-mix(in srgb, var(--accent) 55%, var(--text-muted))",
+                  fontSize: 12,
+                  fontWeight: 500,
+                  letterSpacing: "-0.01em",
+                }}
+              >
+                <span
+                  aria-hidden="true"
+                  style={{
+                    width: 4,
+                    height: 4,
+                    borderRadius: "50%",
+                    background: "currentColor",
+                    opacity: 0.45,
+                    flexShrink: 0,
+                  }}
+                />
+                {skillPrefix.skillName}
+              </span>
+            )}
+            {displayContent}
           </div>
         </button>
       ) : (
@@ -365,6 +410,7 @@ function AssistantMessageView({
   const [hovered, setHovered] = useState(false);
   const [copied, setCopied] = useState(false);
   const streamStartRef = useRef<number | null>(null);
+  const [streamElapsedSeconds, setStreamElapsedSeconds] = useState<number | null>(null);
   const [tps, setTps] = useState<number | null>(null);
   const blocksRef = useRef(blocks);
   blocksRef.current = blocks;
@@ -373,13 +419,20 @@ function AssistantMessageView({
   const blockStartTimesRef = useRef<Map<number, number>>(new Map());
   const [streamingDurations, setStreamingDurations] = useState<Map<number, number>>(new Map());
 
-  // Thinking duration derived from file timestamps: time from prev message end to this message end
-  // This is the total generation time (thinking + any text before first tool call)
-  const thinkingDurationFromFile = useMemo<number | undefined>(() => {
+  // Total assistant turn duration derived from session file timestamps:
+  // previous visible message end → current assistant message end.
+  // This also works for sessions driven by remote connectors (WeChat Bot), because
+  // once the session is reloaded from disk it has the same persisted timestamps as
+  // a normal in-app conversation.
+  const totalDurationFromFile = useMemo<number | undefined>(() => {
     if (!message.timestamp || !prevTimestamp) return undefined;
     const secs = Math.round((message.timestamp - prevTimestamp) / 1000);
     return secs > 0 ? secs : undefined;
   }, [message.timestamp, prevTimestamp]);
+
+  // Thinking duration derived from file timestamps: time from prev message end to this message end
+  // This is the total generation time (thinking + any text before first tool call)
+  const thinkingDurationFromFile = totalDurationFromFile;
 
   // Tool call durations derived from session file timestamps (accurate for completed messages)
   // assistant message timestamp = when generation ended = when tools started running
@@ -420,12 +473,19 @@ function AssistantMessageView({
         return next;
       });
       streamStartRef.current = null;
+      setStreamElapsedSeconds(null);
       setTps(null);
       return;
     }
     const tick = () => {
       const bs = blocksRef.current;
       const now = Date.now();
+
+      // Start elapsed timer immediately, even before the first text delta, so
+      // remote sessions (WeChat Bot etc.) show the same “正在生成 / 耗时 x 秒” feel.
+      const streamStart = streamStartRef.current ?? now;
+      streamStartRef.current = streamStart;
+      setStreamElapsedSeconds(Math.max(0, Math.round((now - streamStart) / 1000)));
 
       // Record start time for each block the first time we see it
       bs.forEach((_, i) => {
@@ -454,8 +514,7 @@ function AssistantMessageView({
         else if (b.type === "toolCall") chars += JSON.stringify((b as ToolCallContent).input ?? {}).length;
       }
       if (chars === 0) return;
-      if (streamStartRef.current === null) streamStartRef.current = now;
-      const elapsed = (now - streamStartRef.current) / 1000;
+      const elapsed = (now - streamStart) / 1000;
       if (elapsed > 0.5) setTps(chars / 4 / elapsed);
     };
     const id = setInterval(tick, 300);
@@ -493,6 +552,11 @@ function AssistantMessageView({
           return (
             <>
 
+              {streamElapsedSeconds !== null && (
+                <span style={{ color: "var(--text-dim)", fontSize: 11, fontVariantNumeric: "tabular-nums" }} title="本轮已运行时间">
+                  {formatCompactDuration(streamElapsedSeconds)}
+                </span>
+              )}
               {est > 0 && (
                 <span style={{ display: "flex", alignItems: "center", gap: 4, color: "var(--text)" }} title="预估 token 数（流式接收中）">
                   <span style={{ display: "flex", alignItems: "center", gap: 2, fontSize: 11, fontWeight: 400 }}>
@@ -543,6 +607,11 @@ function AssistantMessageView({
         {message.usage && !isStreaming && (
           <div style={{ fontSize: 11, color: "var(--text-dim)" }}>
             {formatUsage(message.usage)}
+          </div>
+        )}
+        {totalDurationFromFile !== undefined && !isStreaming && (
+          <div style={{ fontSize: 11, color: "var(--text-dim)", fontVariantNumeric: "tabular-nums" }}>
+            耗时 {formatCompactDuration(totalDurationFromFile)}
           </div>
         )}
         {textContent && !isStreaming && (
@@ -841,6 +910,16 @@ function getToolPreview(block: ToolCallContent): string {
 
   const first = input[keys[0]];
   return String(first).slice(0, 120);
+}
+
+function formatCompactDuration(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  if (minutes < 60) return rest ? `${minutes}m ${rest}s` : `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const mins = minutes % 60;
+  return mins ? `${hours}h ${mins}m` : `${hours}h`;
 }
 
 function formatUsage(usage: {

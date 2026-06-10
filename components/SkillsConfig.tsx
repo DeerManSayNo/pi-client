@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
+import { useEscapeClose } from "@/hooks/useEscapeClose";
 import type { SkillSearchResult } from "@/app/api/skills/search/route";
 
 interface Skill {
@@ -25,6 +26,7 @@ function sourceLabel(skill: Skill): string {
   const scope = skill.sourceInfo?.scope;
   if (scope === "user") return "global";
   if (scope === "project") return "project";
+  if (scope === "builtin") return "builtin";
   return "path";
 }
 
@@ -68,6 +70,7 @@ const labelMap: Record<string, string> = {
   global: "全局",
   project: "项目",
   path: "路径",
+  builtin: "内置",
 };
 
 function Toggle({
@@ -116,6 +119,291 @@ function Toggle({
         }}
       />
     </button>
+  );
+}
+
+function TavilyKeyConfig() {
+  const [apiKey, setApiKey] = useState("");
+  const [saved, setSaved] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [showKey, setShowKey] = useState(false);
+  const [hasExistingKey, setHasExistingKey] = useState(false);
+
+  // Load current config on mount
+  useEffect(() => {
+    setLoading(true);
+    fetch("/api/tavily/config")
+      .then((r) => r.json())
+      .then((d: { configured?: boolean; apiKey?: string; hasKey?: boolean; error?: string }) => {
+        if (d.error) {
+          setError(d.error);
+          return;
+        }
+        if (d.configured) {
+          setApiKey(d.apiKey || "");
+          setHasExistingKey(true);
+          setSaved(true);
+        }
+      })
+      .catch((e) => setError(String(e)))
+      .finally(() => setLoading(false));
+  }, []);
+
+  const handleSave = useCallback(async () => {
+    if (!apiKey.trim()) {
+      setError("请输入 API 密钥");
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    setTestResult(null);
+    try {
+      const res = await fetch("/api/tavily/config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ apiKey: apiKey.trim() }),
+      });
+      const d = await res.json() as { success?: boolean; error?: string };
+      if (!res.ok || d.error) {
+        setError(d.error ?? `HTTP ${res.status}`);
+        return;
+      }
+      setSaved(true);
+      setHasExistingKey(true);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSaving(false);
+    }
+  }, [apiKey]);
+
+  const handleTest = useCallback(async () => {
+    setTesting(true);
+    setTestResult(null);
+    setError(null);
+    try {
+      const res = await fetch("/api/tavily/test", { method: "POST" });
+      const d = await res.json() as { success?: boolean; message?: string; error?: string };
+      if (d.success) {
+        setTestResult({ success: true, message: d.message || "API 密钥有效" });
+      } else {
+        setTestResult({ success: false, message: d.message || d.error || "测试失败" });
+      }
+    } catch (e) {
+      setTestResult({ success: false, message: String(e) });
+    } finally {
+      setTesting(false);
+    }
+  }, []);
+
+  const handleClear = useCallback(async () => {
+    setApiKey("");
+    // Clear the key by saving empty config
+    try {
+      await fetch("/api/tavily/config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ apiKey: "" }),
+      });
+    } catch { /* ignore */ }
+    setSaved(false);
+    setHasExistingKey(false);
+    setTestResult(null);
+    setError(null);
+  }, []);
+
+  if (loading) {
+    return (
+      <div style={{ marginTop: 28, padding: 16, borderTop: "1px solid var(--border)" }}>
+        <div style={{ fontSize: 12, color: "var(--text-muted)" }}>加载中…</div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ marginTop: 28, padding: 16, borderTop: "1px solid var(--border)" }}>
+      <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text)", marginBottom: 4 }}>
+        Tavily API 密钥
+      </div>
+      <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 12, lineHeight: 1.5 }}>
+        设置后，Agent 可通过 Tavily 搜索引擎获取最新网络信息。
+        前往{" "}
+        <a
+          href="https://app.tavily.com"
+          target="_blank"
+          rel="noreferrer"
+          style={{ color: "var(--accent)", textDecoration: "none" }}
+        >
+          tavily.com
+        </a>{" "}
+        获取 API 密钥。
+      </div>
+
+      {/* Input row */}
+      <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+        <div style={{ flex: 1, position: "relative" }}>
+          <input
+            type={showKey ? "text" : "password"}
+            value={apiKey}
+            onChange={(e) => {
+              setApiKey(e.target.value);
+              setSaved(false);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") handleSave();
+            }}
+            placeholder={hasExistingKey ? "（已配置，输入新密钥以更新）" : "输入 Tavily API 密钥…"}
+            style={{
+              width: "100%",
+              padding: "7px 36px 7px 10px",
+              fontSize: 13,
+              fontFamily: "var(--font-mono)",
+              background: "var(--bg-panel)",
+              border: "1px solid var(--border)",
+              borderRadius: 6,
+              color: "var(--text)",
+              outline: "none",
+              boxSizing: "border-box",
+            }}
+          />
+          <button
+            onClick={() => setShowKey(!showKey)}
+            style={{
+              position: "absolute",
+              right: 4,
+              top: "50%",
+              transform: "translateY(-50%)",
+              background: "none",
+              border: "none",
+              color: "var(--text-dim)",
+              cursor: "pointer",
+              padding: 4,
+              display: "flex",
+            }}
+            title={showKey ? "隐藏" : "显示"}
+          >
+            {showKey ? (
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" />
+                <line x1="1" y1="1" x2="23" y2="23" />
+              </svg>
+            ) : (
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+                <circle cx="12" cy="12" r="3" />
+              </svg>
+            )}
+          </button>
+        </div>
+        <button
+          onClick={handleSave}
+          disabled={saving || !apiKey.trim()}
+          style={{
+            padding: "7px 14px",
+            fontSize: 12,
+            fontWeight: 500,
+            borderRadius: 6,
+            border: "none",
+            background: saved ? "rgba(34,197,94,0.1)" : "var(--accent)",
+            color: saved ? "#16a34a" : "#fff",
+            cursor: saving || !apiKey.trim() ? "not-allowed" : "pointer",
+            opacity: saving || !apiKey.trim() ? 0.5 : 1,
+            flexShrink: 0,
+            transition: "background 0.15s, color 0.15s",
+          }}
+        >
+          {saving ? "保存中…" : saved ? "✓ 已保存" : "保存"}
+        </button>
+      </div>
+
+      {/* Action buttons */}
+      <div style={{ display: "flex", gap: 8 }}>
+        <button
+          onClick={handleTest}
+          disabled={testing || !hasExistingKey}
+          style={{
+            padding: "5px 12px",
+            fontSize: 12,
+            borderRadius: 5,
+            border: "1px solid var(--border)",
+            background: "none",
+            color: hasExistingKey ? "var(--text-muted)" : "var(--text-dim)",
+            cursor: testing || !hasExistingKey ? "not-allowed" : "pointer",
+            opacity: testing || !hasExistingKey ? 0.4 : 1,
+          }}
+        >
+          {testing ? "测试中…" : "测试密钥"}
+        </button>
+        {hasExistingKey && (
+          <button
+            onClick={handleClear}
+            style={{
+              padding: "5px 12px",
+              fontSize: 12,
+              borderRadius: 5,
+              border: "1px solid var(--border)",
+              background: "none",
+              color: "var(--text-dim)",
+              cursor: "pointer",
+            }}
+          >
+            清除
+          </button>
+        )}
+      </div>
+
+      {/* Test result */}
+      {testResult && (
+        <div
+          style={{
+            marginTop: 10,
+            padding: "8px 12px",
+            borderRadius: 6,
+            background: testResult.success
+              ? "rgba(34,197,94,0.08)"
+              : "rgba(239,68,68,0.08)",
+            border: `1px solid ${testResult.success ? "rgba(34,197,94,0.2)" : "rgba(239,68,68,0.2)"}`,
+            fontSize: 12,
+            color: testResult.success ? "#16a34a" : "#ef4444",
+            lineHeight: 1.5,
+            display: "flex",
+            alignItems: "flex-start",
+            gap: 6,
+          }}
+        >
+          {testResult.success ? (
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, marginTop: 1 }}>
+              <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
+              <polyline points="22 4 12 14.01 9 11.01" />
+            </svg>
+          ) : (
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, marginTop: 1 }}>
+              <circle cx="12" cy="12" r="10" />
+              <line x1="12" y1="8" x2="12" y2="12" />
+              <line x1="12" y1="16" x2="12.01" y2="16" />
+            </svg>
+          )}
+          {testResult.message}
+        </div>
+      )}
+
+      {/* General error */}
+      {error && (
+        <div
+          style={{
+            marginTop: 10,
+            fontSize: 12,
+            color: "#f87171",
+          }}
+        >
+          {error}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -703,6 +991,9 @@ export function SkillsConfig({
   const [saveError, setSaveError] = useState<string | null>(null);
   const [addMode, setAddMode] = useState(false);
 
+  useEscapeClose(() => setAddMode(false), addMode);
+  useEscapeClose(onClose, !addMode);
+
   const loadSkills = useCallback(() => {
     setLoading(true);
     setError(null);
@@ -921,7 +1212,7 @@ export function SkillsConfig({
                   type SubGroup = { label: string; skills: typeof skills };
                   type ScopeGroup = { label: string; subGroups: SubGroup[] };
                   const scopeGroups: ScopeGroup[] = [];
-                  for (const scope of ["project", "global", "path"]) {
+                  for (const scope of ["builtin", "project", "global", "path"]) {
                     const scopeSkills = skills.filter(
                       (s) => sourceLabel(s) === scope,
                     );
@@ -1113,16 +1404,19 @@ export function SkillsConfig({
                 }}
               />
             ) : loading ? null : selectedSkill ? (
-              <SkillDetail
-                key={selectedSkill.filePath}
-                skill={selectedSkill}
-                cwd={cwd}
-                onToggle={toggle}
-                onDelete={deleteSkill}
-                toggling={toggling.has(selectedSkill.filePath)}
-                deleting={deleting.has(selectedSkill.filePath)}
-                saveError={saveError}
-              />
+              <>
+                <SkillDetail
+                  key={selectedSkill.filePath}
+                  skill={selectedSkill}
+                  cwd={cwd}
+                  onToggle={toggle}
+                  onDelete={deleteSkill}
+                  toggling={toggling.has(selectedSkill.filePath)}
+                  deleting={deleting.has(selectedSkill.filePath)}
+                  saveError={saveError}
+                />
+                {selectedSkill.name === "tavily-search" && <TavilyKeyConfig />}
+              </>
             ) : (
               <div
                 style={{

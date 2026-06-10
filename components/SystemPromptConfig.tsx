@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
+import { useEscapeClose } from "@/hooks/useEscapeClose";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -54,11 +55,17 @@ export function SystemPromptConfig({ onClose, roleId, roleName, cwd }: Props) {
   // Skills
   const [availableSkills, setAvailableSkills] = useState<{ name: string; description: string; disabled: boolean }[]>([]);
   const [selectedSkillNames, setSelectedSkillNames] = useState<string[] | null>(null);
+  // MCP tools
+  const [availableMcpTools, setAvailableMcpTools] = useState<{ name: string; label: string; description: string }[]>([]);
+  const [selectedMcpToolNames, setSelectedMcpToolNames] = useState<string[] | null>(null);
 
   // Version form
   const [saveOpen, setSaveOpen] = useState(false);
   const [saveName, setSaveName] = useState("");
   const [saveDesc, setSaveDesc] = useState("");
+
+  useEscapeClose(() => { setSaveOpen(false); setSaveName(""); setSaveDesc(""); }, saveOpen);
+  useEscapeClose(onClose, !saveOpen);
 
   // Expanded sections
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set(["identity", "guidelines"]));
@@ -85,13 +92,16 @@ export function SystemPromptConfig({ onClose, roleId, roleName, cwd }: Props) {
       const data = await res.json() as {
         sections: SystemPromptSection[] | null;
         versions: SystemPromptVersion[];
-        config?: { skillNames?: string[] | null };
+        config?: { skillNames?: string[] | null; mcpToolNames?: string[] | null };
         availableSkills?: { name: string; description: string; disabled: boolean }[];
+        availableMcpTools?: { name: string; label: string; description: string }[];
       };
       if (data.sections) setSections(data.sections);
       setVersions(data.versions ?? []);
       setAvailableSkills(data.availableSkills ?? []);
       setSelectedSkillNames(data.config?.skillNames ?? null);
+      setAvailableMcpTools(data.availableMcpTools ?? []);
+      setSelectedMcpToolNames(data.config?.mcpToolNames ?? null);
     } finally {
       setLoading(false);
     }
@@ -128,6 +138,7 @@ export function SystemPromptConfig({ onClose, roleId, roleName, cwd }: Props) {
         body: JSON.stringify({
           sections: sections.map((s) => ({ id: s.id, enabled: s.enabled, content: s.content })),
           skillNames: selectedSkillNames,
+          mcpToolNames: selectedMcpToolNames,
         }),
       });
       if (res.ok) {
@@ -137,7 +148,7 @@ export function SystemPromptConfig({ onClose, roleId, roleName, cwd }: Props) {
     } finally {
       setSavingGlobal(false);
     }
-  }, [sections, roleId, selectedSkillNames]);
+  }, [sections, roleId, selectedSkillNames, selectedMcpToolNames]);
 
   // ── Version CRUD ──────────────────────────────────────────────────────
 
@@ -826,6 +837,135 @@ export function SystemPromptConfig({ onClose, roleId, roleName, cwd }: Props) {
                                     (全局已禁用)
                                   </span>
                                 )}
+                              </div>
+                            </div>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* MCP tools toggle section */}
+              {availableMcpTools.length > 0 && (
+                <div
+                  style={{
+                    marginTop: 18,
+                    border: "1px solid var(--border)",
+                    borderRadius: 10,
+                    overflow: "hidden",
+                  }}
+                >
+                  <div
+                    style={{
+                      padding: "10px 14px",
+                      borderBottom: "1px solid var(--border)",
+                      fontSize: 12,
+                      fontWeight: 700,
+                      color: "var(--text-muted)",
+                      background: "var(--bg-panel)",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 6,
+                    }}
+                  >
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
+                      <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
+                      <line x1="12" y1="22.08" x2="12" y2="12" />
+                    </svg>
+                    MCP 工具
+                    <span style={{ fontSize: 11, fontWeight: 400, color: "var(--text-dim)", marginLeft: 4 }}>
+                      (勾选的 MCP tool 会注入当前角色的 System Prompt)
+                    </span>
+                  </div>
+                  <div style={{ padding: "10px 14px" }}>
+                    <label
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 8,
+                        padding: "6px 0",
+                        marginBottom: 6,
+                        borderBottom: "1px solid var(--border)",
+                        cursor: "pointer",
+                        fontSize: 12,
+                        color: "var(--text-dim)",
+                      }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={selectedMcpToolNames === null}
+                        onChange={() => {
+                          if (selectedMcpToolNames === null) {
+                            setSelectedMcpToolNames([]);
+                            setSaved(false);
+                          } else {
+                            setSelectedMcpToolNames(null);
+                            setSaved(false);
+                          }
+                        }}
+                        style={{ accentColor: "var(--accent)" }}
+                      />
+                      <span style={{ fontWeight: selectedMcpToolNames === null ? 600 : 400 }}>
+                        使用所有发现到的 MCP 工具（默认）
+                      </span>
+                    </label>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 4, maxHeight: 240, overflowY: "auto" }}>
+                      {availableMcpTools.map((tool) => {
+                        const isChecked = selectedMcpToolNames === null || selectedMcpToolNames.includes(tool.name);
+                        return (
+                          <label
+                            key={tool.name}
+                            style={{
+                              display: "flex",
+                              alignItems: "flex-start",
+                              gap: 8,
+                              padding: "6px 4px",
+                              borderRadius: 6,
+                              cursor: "pointer",
+                            }}
+                            onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
+                            onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={isChecked}
+                              onChange={() => {
+                                setSaved(false);
+                                setSelectedMcpToolNames((prev) => {
+                                  const current = prev ?? availableMcpTools.map((t) => t.name);
+                                  return current.includes(tool.name)
+                                    ? current.filter((n) => n !== tool.name)
+                                    : [...current, tool.name];
+                                });
+                              }}
+                              style={{ accentColor: "var(--accent)", marginTop: 2, flexShrink: 0 }}
+                            />
+                            <div style={{ minWidth: 0 }}>
+                              <div
+                                style={{
+                                  fontSize: 12,
+                                  fontWeight: 500,
+                                  color: "var(--text)",
+                                  fontFamily: "var(--font-mono)",
+                                }}
+                              >
+                                {tool.name}
+                              </div>
+                              <div
+                                style={{
+                                  fontSize: 11,
+                                  color: "var(--text-dim)",
+                                  marginTop: 1,
+                                  overflow: "hidden",
+                                  textOverflow: "ellipsis",
+                                  whiteSpace: "nowrap",
+                                }}
+                                title={tool.description}
+                              >
+                                {tool.label}{tool.description ? ` — ${tool.description}` : ""}
                               </div>
                             </div>
                           </label>

@@ -139,3 +139,10 @@ export function getJobStatus(taskId: string): { scheduled: boolean; nextRun: Dat
     return { scheduled: true, nextRun: null };
   }
 }
+
+export function runTaskNow(id: string): boolean {
+  const task = getTask(id);
+  if (!task) return false;
+  void executeTask(task);
+  return true;
+}

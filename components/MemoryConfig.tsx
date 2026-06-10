@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
+import { useEscapeClose } from "@/hooks/useEscapeClose";
 
 interface MemoryItem { id: string; text: string; createdAt: string }
 interface AgentRole { id: string; name: string; description: string; builtIn?: boolean; sourceInfo?: { scope?: string; filePath?: string }; blocks: Record<string, MemoryItem[]> }
@@ -16,6 +17,8 @@ function roleProjectCwd(role: AgentRole): string { return role.sourceInfo?.fileP
 function scopeLabel(scope: string): string { return scope === "project" ? "项目" : scope === "user" ? "全局" : scope === "builtIn" ? "内置" : scope; }
 
 export function MemoryConfig({ onClose, cwd }: { onClose: () => void; cwd?: string }) {
+  useEscapeClose(onClose);
+
   const [globalMemory, setGlobalMemory] = useState<MemoryItem[]>([]);
   const [roles, setRoles] = useState<AgentRole[]>([]);
   const [selectedId, setSelectedId] = useState("global");

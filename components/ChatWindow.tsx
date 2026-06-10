@@ -3,10 +3,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AgentMessage, SessionInfo } from "@/lib/types";
 import { MessageView } from "./MessageView";
-import { ChatInput, type ChatInputHandle, type AttachedImage } from "./ChatInput";
+import { ChatInput, type ChatInputHandle, type ChatInputState, type AttachedImage } from "./ChatInput";
 import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
 import { ChangedFilesList } from "./ChangedFilesList";
-import { useAgentSession, type AgentPhase } from "@/hooks/useAgentSession";
+import { useAgentSession, type AgentPhase, type WatchdogInfo } from "@/hooks/useAgentSession";
+import { useAgentStatus, type ServerStatus } from "@/hooks/useAgentStatus";
 import { useAudio } from "@/hooks/useAudio";
 import { useDragDrop } from "@/hooks/useDragDrop";
 import { logEventStore } from "@/lib/log-event-store";
@@ -49,6 +50,187 @@ function phaseLabel(phase: AgentPhase): string {
   }
   if (phase?.kind === "waiting_model") return "正在等待模型响应...";
   return "正在思考...";
+}
+
+// ============================================================================
+// AgentStatusTicker — 模型等待时展示详细的实时状态信息
+// ============================================================================
+
+interface TickerProps {
+  serverStatus: ServerStatus | null;
+  watchdog: WatchdogInfo | null;
+  agentPhase: AgentPhase;
+  thinkingLevel: string;
+  retryInfo: { attempt: number; maxAttempts: number; errorMessage?: string } | null;
+  contextUsage: { percent: number | null; contextWindow: number; tokens: number | null } | null;
+  isCompacting: boolean;
+  stallLevel: string | null;
+  autoRecoveryMode: string;
+}
+
+function formatMs(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+  const mins = Math.floor(ms / 60_000);
+  const secs = Math.floor((ms % 60_000) / 1000);
+  return `${mins}m${secs}s`;
+}
+
+function formatRate(rate: number): string {
+  if (rate >= 100) return rate.toFixed(0);
+  if (rate >= 10) return rate.toFixed(1);
+  return rate.toFixed(2);
+}
+
+function StatusPill({ label, value, accent, title }: { label: string; value: string; accent?: boolean; title?: string }) {
+  return (
+    <span
+      className={`inline-flex items-center gap-0.5 shrink-0 rounded px-1.5 py-0.5 text-[11px] leading-none font-mono border whitespace-nowrap ${accent ? "bg-accent/10 border-accent/30 text-accent" : "bg-bg-hover border-border text-text-muted"}`}
+      title={title ?? `${label}: ${value}`}
+    >
+      <span className="opacity-60">{label}</span>
+      <span className={accent ? "font-semibold" : ""}>{value}</span>
+    </span>
+  );
+}
+
+function AgentStatusTicker(props: TickerProps) {
+  const { serverStatus, watchdog, thinkingLevel, retryInfo,
+    contextUsage, isCompacting, stallLevel, autoRecoveryMode } = props;
+  // 构建状态条目列表
+  const items: { label: string; value: string; accent?: boolean; title?: string; priority: number }[] = [];
+
+  // 1. 事件静默时间（服务端）
+  if (serverStatus?.eventIdleMs != null && serverStatus.eventIdleMs > 0) {
+    const idleSec = (serverStatus.eventIdleMs / 1000).toFixed(1);
+    items.push({
+      label: "静默",
+      value: `${idleSec}s`,
+      accent: serverStatus.eventIdleMs > 30_000,
+      title: `距上次事件 ${formatMs(serverStatus.eventIdleMs)}`,
+      priority: 1,
+    });
+  }
+
+  // 2. 内容停滞时间（服务端）
+  if (serverStatus?.contentIdleMs != null && serverStatus.contentIdleMs > 0) {
+    const contentSec = (serverStatus.contentIdleMs / 1000).toFixed(1);
+    items.push({
+      label: "内容停滞",
+      value: `${contentSec}s`,
+      accent: serverStatus.contentIdleMs > 30_000,
+      title: `距上次内容变更 ${formatMs(serverStatus.contentIdleMs)}`,
+      priority: 2,
+    });
+  }
+
+  // 3. 事件速率 + 总数
+  if (serverStatus?.eventCount != null && serverStatus.eventCount > 0) {
+    const rate = typeof serverStatus.eventRate === "number" ? formatRate(serverStatus.eventRate) : "?";
+    items.push({
+      label: "事件",
+      value: `${rate}/s · ${serverStatus.eventCount}`,
+      title: `事件速率 ${rate}/s，共 ${serverStatus.eventCount} 个`,
+      priority: 3,
+    });
+  }
+
+  // 4. 最后事件类型
+  if (serverStatus?.lastEventType) {
+    const typeMap: Record<string, string> = {
+      agent_start: "回合开始", agent_end: "回合结束",
+      message_start: "消息开始", message_update: "消息更新", message_end: "消息结束",
+      tool_execution_start: "工具开始", tool_execution_end: "工具结束",
+      auto_retry_start: "重试开始", auto_retry_end: "重试结束",
+      compaction_start: "压缩开始", compaction_end: "压缩结束",
+      auto_compaction_start: "压缩开始", auto_compaction_end: "压缩结束",
+    };
+    const displayType = typeMap[serverStatus.lastEventType] ?? serverStatus.lastEventType;
+    items.push({
+      label: "最后事件",
+      value: displayType,
+      title: `最后事件类型: ${serverStatus.lastEventType}`,
+      priority: 4,
+    });
+  }
+
+  // 5. 思考等级
+  if (thinkingLevel && thinkingLevel !== "auto") {
+    const levelMap: Record<string, string> = { off: "关闭", minimal: "最低", low: "低", medium: "中", high: "高", xhigh: "极高" };
+    items.push({ label: "思考", value: levelMap[thinkingLevel] ?? thinkingLevel, accent: thinkingLevel === "xhigh", priority: 5 });
+  }
+
+  // 6. 上下文使用率
+  if (contextUsage?.percent != null) {
+    const pct = Math.round(contextUsage.percent);
+    const tokensStr = contextUsage.tokens != null ? `${(contextUsage.tokens / 1000).toFixed(0)}k` : "?";
+    items.push({
+      label: "上下文",
+      value: `${pct}% (${tokensStr}/${(contextUsage.contextWindow / 1000).toFixed(0)}k)`,
+      accent: pct > 80,
+      title: `上下文窗口使用 ${pct}%，${tokensStr} / ${(contextUsage.contextWindow / 1000).toFixed(0)}k tokens`,
+      priority: 6,
+    });
+  }
+
+  // 7. 自动重试
+  if (retryInfo) {
+    items.push({
+      label: "重试",
+      value: `${retryInfo.attempt}/${retryInfo.maxAttempts}`,
+      accent: true,
+      title: retryInfo.errorMessage ? `第 ${retryInfo.attempt} 次重试：${retryInfo.errorMessage}` : `第 ${retryInfo.attempt} 次重试`,
+      priority: 7,
+    });
+  }
+
+  // 8. 压缩状态
+  if (isCompacting) {
+    items.push({ label: "压缩中", value: "⏳", accent: true, priority: 8 });
+  }
+
+  // 9. 卡顿告警
+  if (stallLevel === "warning") {
+    items.push({ label: "卡顿", value: "⚠️", accent: true, title: "检测到模型响应卡顿", priority: 9 });
+  } else if (stallLevel === "recovering") {
+    items.push({ label: "恢复中", value: "🔄", accent: true, title: "正在自动恢复连接", priority: 9 });
+  }
+
+  // 10. 自动恢复模式
+  if (autoRecoveryMode !== "conservative") {
+    items.push({
+      label: "恢复",
+      value: autoRecoveryMode === "aggressive" ? "激进" : "关闭",
+      accent: autoRecoveryMode === "aggressive",
+      priority: 10,
+    });
+  }
+
+  // 11. 看门狗剩余时间（客户端）
+  if (watchdog && watchdog.eventIdleMs > 5000) {
+    const eventLeft = Math.max(0, Math.ceil((watchdog.eventThresholdMs - watchdog.eventIdleMs) / 1000));
+    const contentLeft = Math.max(0, Math.ceil((watchdog.contentThresholdMs - watchdog.contentIdleMs) / 1000));
+    items.push({
+      label: "看门狗",
+      value: `事件${eventLeft}s 内容${contentLeft}s`,
+      accent: eventLeft <= 10 || contentLeft <= 15,
+      title: `看门狗触发倒计时：事件 ${eventLeft}s，内容 ${contentLeft}s`,
+      priority: 11,
+    });
+  }
+
+  // 按优先级排序
+  items.sort((a, b) => a.priority - b.priority);
+
+  if (items.length === 0) return null;
+
+  return (
+    <span className="inline-flex items-center gap-1 ml-2 overflow-x-auto max-w-[480px] scrollbar-none">
+      {items.map((item, i) => (
+        <StatusPill key={i} label={item.label} value={item.value} accent={item.accent} title={item.title} />
+      ))}
+    </span>
+  );
 }
 
 const TYPEWRITER_PHRASES = [
@@ -118,6 +300,7 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, onAgentEnd, on
   const [roles, setRoles] = useState<AgentRole[]>([]);
   const [pendingRoleSetting, setPendingRoleSetting] = useState<{ roleId: string; roleName: string; block: string; setting: string } | null>(null);
   const [systemPromptExpanded, setSystemPromptExpanded] = useState(false);
+  const [lastUserMsgExpanded, setLastUserMsgExpanded] = useState(false);
   const wrappedOnAgentEnd = useCallback((sessionId: string, cf?: string[]) => {
     setChangedFilesBySession((prev) => ({
       ...prev,
@@ -146,6 +329,9 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, onAgentEnd, on
     modelsRefreshKey,
     activeTabId,
   });
+
+  // 实时轮询服务端 agent 状态（用于状态 ticker）
+  const { server: serverStatus } = useAgentStatus(session?.id, agentRunning, watchdogInfo);
 
   const currentCwd = session?.cwd ?? newSessionCwd ?? undefined;
 
@@ -383,6 +569,60 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, onAgentEnd, on
     return map;
   }, [messages]);
   const messageRefs = useMessageRefs(visibleMessages.length);
+
+  // 所有 user 消息在 messages 中的索引
+  const userMsgIndices = useMemo(() => {
+    return messages.reduce<number[]>((arr, m, i) => {
+      if (m.role === "user") arr.push(i);
+      return arr;
+    }, []);
+  }, [messages]);
+
+  // user 消息在 messages 中的索引 → 在 messageRefs 中的索引
+  const userMsgIdxToRefIdx = useMemo(() => {
+    const map = new Map<number, number>();
+    let refIdx = 0;
+    for (let i = 0; i < messages.length; i++) {
+      const isVisible = messages[i].role === "user" || messages[i].role === "assistant";
+      if (messages[i].role === "user") map.set(i, refIdx);
+      if (isVisible) refIdx++;
+    }
+    return map;
+  }, [messages]);
+
+  // 当前悬浮面板钉住的 user 消息在 messages 中的索引
+  const [pinnedUserMsgIdx, setPinnedUserMsgIdx] = useState<number>(-1);
+  const prevUserMsgCountRef = useRef(0);
+
+  // 仅在 user 消息数量变化时重置为最后一条（避免 streaming 等场景频繁重置）
+  useEffect(() => {
+    const count = userMsgIndices.length;
+    if (count !== prevUserMsgCountRef.current) {
+      prevUserMsgCountRef.current = count;
+      if (count > 0) {
+        setPinnedUserMsgIdx(userMsgIndices[count - 1]);
+      } else {
+        setPinnedUserMsgIdx(-1);
+      }
+    }
+  }, [userMsgIndices.length]);
+
+  // 钉住的 user 消息文本
+  const pinnedUserMsgText = useMemo(() => {
+    if (pinnedUserMsgIdx < 0) return "";
+    const msg = messages[pinnedUserMsgIdx] as import("@/lib/types").UserMessage | undefined;
+    if (!msg || msg.role !== "user") return "";
+    const content = msg.content;
+    if (typeof content === "string") return content;
+    return content.filter((b): b is import("@/lib/types").TextContent => b.type === "text").map((b) => b.text).join("\n");
+  }, [messages, pinnedUserMsgIdx]);
+
+  const scrollToPinnedUserMsg = useCallback(() => {
+    const refIdx = userMsgIdxToRefIdx.get(pinnedUserMsgIdx);
+    if (refIdx === undefined) return;
+    const el = messageRefs.current[refIdx];
+    if (el) el.scrollIntoView({ block: "start", behavior: "smooth" });
+  }, [pinnedUserMsgIdx, userMsgIdxToRefIdx, messageRefs]);
   const liveStreamEndRef = useRef<HTMLDivElement | null>(null);
   const [shouldAutoScroll, setShouldAutoScroll] = useState(true);
   const shouldAutoScrollRef = useRef(true);
@@ -436,18 +676,55 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, onAgentEnd, on
   }, [agentRunning, scrollContainerRef]);
 
   const handleScroll = useCallback(() => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+
     const nearBottom = isNearBottom();
     if (nearBottom) {
       setAutoScroll(true);
+      // 在底部时，始终钉住最后一条 user 消息
+      if (userMsgIndices.length > 0) {
+        const lastIdx = userMsgIndices[userMsgIndices.length - 1];
+        setPinnedUserMsgIdx((prev) => prev !== lastIdx ? lastIdx : prev);
+      }
       return;
     }
 
-    // Only user-initiated upward scrolling pauses tracking. Programmatic scrolls
-    // from session loading / prompt positioning should not fight streaming follow.
+    // Only user-initiated upward scrolling pauses tracking.
     if (userScrollIntentRef.current) {
       setAutoScroll(false);
     }
-  }, [isNearBottom, setAutoScroll]);
+
+    // 根据滚动位置更新钉住的 user 消息：
+    // 从旧到新遍历，找第一条顶部仍在容器顶部之下的消息
+    const containerTop = container.getBoundingClientRect().top;
+    for (let i = 0; i < userMsgIndices.length; i++) {
+      const msgIdx = userMsgIndices[i];
+      const refIdx = userMsgIdxToRefIdx.get(msgIdx);
+      if (refIdx === undefined) continue;
+      const el = messageRefs.current[refIdx];
+      if (el && el.getBoundingClientRect().top >= containerTop) {
+        // 第一条满足条件的就是最旧的 user 消息
+        if (i === 0) {
+          // 还需确认最后一条也在容器下方 → 用户确实在底部附近
+          const lastIdx = userMsgIndices[userMsgIndices.length - 1];
+          const lastRefIdx = userMsgIdxToRefIdx.get(lastIdx);
+          const lastEl = lastRefIdx !== undefined ? messageRefs.current[lastRefIdx] : null;
+          if (lastEl && lastEl.getBoundingClientRect().top >= containerTop) {
+            // 最后一条也在下方 → 用户在底部，显示最后一条
+            setPinnedUserMsgIdx((prev) => prev !== lastIdx ? lastIdx : prev);
+          } else {
+            // 只有第一条在下方 → 用户真的滚到了第一条
+            setPinnedUserMsgIdx((prev) => prev !== msgIdx ? msgIdx : prev);
+          }
+        } else {
+          setPinnedUserMsgIdx((prev) => prev !== msgIdx ? msgIdx : prev);
+        }
+        return;
+      }
+    }
+    // 所有 user 消息都已滚出顶部，保持不变（"如果没有就不变"）
+  }, [isNearBottom, setAutoScroll, userMsgIndices, userMsgIdxToRefIdx, messageRefs, scrollContainerRef]);
 
   const handleResumeAutoScroll = useCallback(() => {
     setAutoScroll(true);
@@ -479,6 +756,17 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, onAgentEnd, on
   const currentThinkingLevelMap = displayModelValue
     ? (modelThinkingLevelMaps[`${displayModelValue.provider}:${displayModelValue.modelId}`] ?? null)
     : null;
+
+  // Input state cache — preserves text / images / selected skill across tab switches
+  const inputStateCache = useRef<Map<string, ChatInputState>>(new Map());
+  const currentInputKey = session?.id ?? `new:${newSessionCwd ?? ""}:${activeTabId ?? ""}`;
+  const savedInputState = inputStateCache.current.get(currentInputKey) ?? null;
+  const currentInputKeyRef = useRef(currentInputKey);
+  currentInputKeyRef.current = currentInputKey;
+  const saveInputStateRef = useRef<((state: ChatInputState) => void) | null>(null);
+  saveInputStateRef.current = (state: ChatInputState) => {
+    inputStateCache.current.set(currentInputKeyRef.current, state);
+  };
 
   const chatInputElement = (
     <>
@@ -536,6 +824,8 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, onAgentEnd, on
       onAutoRecover={handleAutoRecover}
       onDismissStall={handleDismissStall}
       onAutoRecoveryModeChange={handleAutoRecoveryModeChange}
+      initialInputState={savedInputState}
+      saveInputStateRef={saveInputStateRef}
     />
     </>
   );
@@ -704,6 +994,102 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, onAgentEnd, on
           </div>
         </div>
       )}
+      {pinnedUserMsgIdx >= 0 && pinnedUserMsgText && (
+        <div
+          style={{
+            flexShrink: 0,
+            width: "100%",
+            boxSizing: "border-box",
+            paddingLeft: 16,
+            paddingRight: 52,
+          }}
+        >
+          <div style={{
+            maxWidth: 820,
+            margin: "4px auto 0",
+            border: "1px solid var(--border)",
+            borderRadius: 8,
+            background: "var(--bg-panel)",
+            overflow: "hidden",
+          }}>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+              }}
+            >
+              <button
+                onClick={() => scrollToPinnedUserMsg()}
+                title="点击定位到消息位置"
+                style={{
+                  flex: 1,
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 6,
+                  padding: "5px 10px",
+                  border: "none",
+                  background: "transparent",
+                  cursor: "pointer",
+                  fontSize: 11,
+                  color: "var(--text-muted)",
+                  fontFamily: "inherit",
+                  minWidth: 0,
+                }}
+                onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
+                onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: "var(--accent)", flexShrink: 0 }}>
+                  <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+                </svg>
+                <span style={{ fontWeight: 500, flexShrink: 0 }}>最新提示词</span>
+                <span style={{
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                  opacity: 0.6,
+                  fontSize: 10,
+                }}>
+                  {pinnedUserMsgText.slice(0, 60).replace(/\n/g, " ")}{pinnedUserMsgText.length > 60 ? "…" : ""}
+                </span>
+              </button>
+              <button
+                onClick={(e) => { e.stopPropagation(); setLastUserMsgExpanded(!lastUserMsgExpanded); }}
+                title={lastUserMsgExpanded ? "收起" : "展开查看完整内容"}
+                style={{
+                  padding: "5px 10px",
+                  border: "none",
+                  borderLeft: "1px solid var(--border)",
+                  background: "transparent",
+                  cursor: "pointer",
+                  color: "var(--text-muted)",
+                  flexShrink: 0,
+                }}
+                onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
+                onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
+              >
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ transform: lastUserMsgExpanded ? "rotate(180deg)" : "none", transition: "transform 0.15s" }}>
+                  <polyline points="6 9 12 15 18 9" />
+                </svg>
+              </button>
+            </div>
+            {lastUserMsgExpanded && (
+              <div style={{
+                padding: "8px 10px 10px",
+                borderTop: "1px solid var(--border)",
+                fontSize: 11,
+                lineHeight: 1.65,
+                color: "var(--text-muted)",
+                whiteSpace: "pre-wrap",
+                fontFamily: "var(--font-mono)",
+                maxHeight: 240,
+                overflowY: "auto",
+              }}>
+                {pinnedUserMsgText}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
       <div className="relative flex flex-1 overflow-hidden">
         <div
           ref={scrollContainerRef}
@@ -768,7 +1154,20 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, onAgentEnd, on
 
             {agentRunning && !streamState.streamingMessage && (
               <div className="py-2 text-[13px] text-text-muted">
-                <span className="animate-[pulse_1.5s_infinite]">{phaseLabel(agentPhase)}</span>
+                <div className="flex items-center gap-0 flex-wrap">
+                  <span className="animate-[pulse_1.5s_infinite] shrink-0">{phaseLabel(agentPhase)}</span>
+                  <AgentStatusTicker
+                    serverStatus={serverStatus}
+                    watchdog={watchdogInfo}
+                    agentPhase={agentPhase}
+                    thinkingLevel={thinkingLevel}
+                    retryInfo={retryInfo}
+                    contextUsage={contextUsage}
+                    isCompacting={isCompacting}
+                    stallLevel={stallLevel}
+                    autoRecoveryMode={autoRecoveryMode}
+                  />
+                </div>
               </div>
             )}
 

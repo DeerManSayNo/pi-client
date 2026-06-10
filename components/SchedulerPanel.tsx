@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
+import { useEscapeClose } from "@/hooks/useEscapeClose";
 import type { ScheduledTask, TaskLog } from "@/lib/scheduler/types";
 
 interface ModelOption {
@@ -83,11 +84,15 @@ export function SchedulerPanel({ onClose, cwd }: Props) {
   const [form, setForm] = useState<TaskFormData>({ ...EMPTY_FORM, config: { ...EMPTY_FORM.config, cwd: cwd || "" } });
   const [isCreating, setIsCreating] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [models, setModels] = useState<ModelOption[]>([]);
   const [defaultModel, setDefaultModel] = useState<{ provider: string; modelId: string } | null>(null);
   const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
   const modelDropdownRef = useRef<HTMLDivElement>(null);
+
+  useEscapeClose(() => setModelDropdownOpen(false), modelDropdownOpen);
+  useEscapeClose(onClose, !modelDropdownOpen);
 
   const selectedTask = tasks.find((t) => t.id === selectedId) ?? null;
 
@@ -226,6 +231,26 @@ export function SchedulerPanel({ onClose, cwd }: Props) {
       await fetchTasks();
     } catch {
       setError("切换状态失败");
+    }
+  };
+
+  const handleRunNow = async () => {
+    if (!selectedId) return;
+    setRunning(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/scheduler/${selectedId}/run`, { method: "POST" });
+      if (!res.ok) {
+        const err = (await res.json()) as { error?: string };
+        throw new Error(err.error || "执行失败");
+      }
+      // Refresh task list after a brief delay to let the runner start
+      setTimeout(() => void fetchTasks(), 500);
+      setTimeout(() => void fetchTasks(), 3000);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "执行失败");
+    } finally {
+      setRunning(false);
     }
   };
 
@@ -552,18 +577,33 @@ export function SchedulerPanel({ onClose, cwd }: Props) {
 
                 {/* Actions */}
                 <div style={{ display: "flex", gap: 8, justifyContent: "space-between" }}>
-                  <div>
+                  <div style={{ display: "flex", gap: 8 }}>
                     {selectedTask && (
-                      <button
-                        onClick={handleDelete}
-                        style={{
-                          padding: "8px 16px", borderRadius: 8,
-                          border: "1px solid #fca5a5", background: "transparent",
-                          color: "#ef4444", cursor: "pointer", fontSize: 13, fontWeight: 600,
-                        }}
-                      >
-                        删除任务
-                      </button>
+                      <>
+                        <button
+                          onClick={handleRunNow}
+                          disabled={running}
+                          style={{
+                            padding: "8px 16px", borderRadius: 8,
+                            border: "1px solid #22c55e", background: running ? "var(--border)" : "transparent",
+                            color: running ? "var(--text-dim)" : "#22c55e", cursor: running ? "not-allowed" : "pointer",
+                            fontSize: 13, fontWeight: 600,
+                            display: "flex", alignItems: "center", gap: 4,
+                          }}
+                        >
+                          {running ? "执行中..." : "▶ 手动执行"}
+                        </button>
+                        <button
+                          onClick={handleDelete}
+                          style={{
+                            padding: "8px 16px", borderRadius: 8,
+                            border: "1px solid #fca5a5", background: "transparent",
+                            color: "#ef4444", cursor: "pointer", fontSize: 13, fontWeight: 600,
+                          }}
+                        >
+                          删除任务
+                        </button>
+                      </>
                     )}
                   </div>
                   <div style={{ display: "flex", gap: 8 }}>

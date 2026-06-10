@@ -1,14 +1,15 @@
 import path from "path";
-import { createAgentSession, defineTool, SessionManager } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, defineTool, SessionManager, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { cacheSessionPath, invalidateSessionListCache } from "./session-reader";
 import type { AgentSessionLike, ToolInfo } from "./deerhux-types";
 import { getLiveIslandClient } from "./live-island-client";
 import { applyRolePromptToSystemPrompt } from "./roles";
-import { applyRolePromptConfigToPrompt, isRoleSystemPromptSectionEnabled } from "./system-prompt-decomposer";
+import { applyRolePromptConfigToPrompt, isRoleSystemPromptSectionEnabled, readRoleSystemPromptConfig } from "./system-prompt-decomposer";
 import { indexExists } from "./code-index/database";
 import { searchIndex } from "./code-index/search";
 import { createCodeGraphTools } from "./codegraph/tools";
+import type { McpRuntime } from "./mcp-runtime";
 
 // ============================================================================
 // Types
@@ -229,14 +230,40 @@ export class AgentSessionWrapper {
   private activeTurnPromise: Promise<void> | null = null;
   private sawAssistantEventInTurn = false;
 
-  constructor(public readonly inner: AgentSessionLike, roleId?: string | null) {
+  constructor(public readonly inner: AgentSessionLike, roleId?: string | null, private mcpRuntime?: McpRuntime | null) {
     this.roleId = roleId ?? null;
     this.baseSystemPrompt = inner.agent.state?.systemPrompt ?? "";
     this.applyRolePrompt();
   }
 
+  private syncRoleMcpActiveTools(): void {
+    const allMcpToolNames = this.mcpRuntime?.toolNames ?? [];
+    if (allMcpToolNames.length === 0) return;
+
+    const config = readRoleSystemPromptConfig(this.roleId);
+    const mcpSection = config.sections.find((s) => s.id === "mcp_tools");
+    const allowedMcpToolNames = mcpSection?.enabled === false ? [] : (config.mcpToolNames ?? allMcpToolNames);
+    const allowed = new Set(allowedMcpToolNames);
+    const allMcp = new Set(allMcpToolNames);
+    const activeBefore = this.inner.getActiveToolNames();
+    const nonMcpActive = activeBefore.filter((name) => !allMcp.has(name) && !name.startsWith("mcp__"));
+    const hadActiveMcp = activeBefore.some((name) => allMcp.has(name) || name.startsWith("mcp__"));
+    const isFullPreset = ["grep", "find", "ls"].every((name) => nonMcpActive.includes(name));
+    if (!hadActiveMcp && !isFullPreset) return;
+
+    const nextMcpActive = allMcpToolNames.filter((name) => allowed.has(name));
+    const nextActive = [...new Set([...nonMcpActive, ...nextMcpActive])];
+    const currentKey = activeBefore.join("\0");
+    const nextKey = nextActive.join("\0");
+    if (currentKey === nextKey) return;
+
+    this.inner.setActiveToolsByName(nextActive);
+    if (this.inner.agent.state) this.baseSystemPrompt = this.inner.agent.state.systemPrompt ?? "";
+  }
+
   private applyRolePrompt(): void {
     if (!this.inner.agent.state) return;
+    this.syncRoleMcpActiveTools();
     const basePrompt = this.baseSystemPrompt;
     const configuredPrompt = applyRolePromptConfigToPrompt(basePrompt, this.roleId);
     const nextPrompt = isRoleSystemPromptSectionEnabled(this.roleId, "role_profile")
@@ -270,6 +297,8 @@ export class AgentSessionWrapper {
   }
 
   start(): void {
+    if (this.unsubscribe) return;
+
     const liveIsland = getLiveIslandClient();
     const cwd = this.inner.sessionManager.getCwd();
     liveIsland.trackSession(this.inner.sessionId, cwd);
@@ -405,6 +434,7 @@ export class AgentSessionWrapper {
       for (const l of this.listeners) l({ type: "agent_end", messages: [], willRetry: false, error: msg });
     }).finally(() => {
       if (this.activeTurnId !== turnId) return;
+      invalidateSessionListCache();
       this.activeTurnPromise = null;
       if (this._isRunning && !this.inner.isStreaming && this.sawAssistantEventInTurn) {
         this._isRunning = false;
@@ -435,6 +465,89 @@ export class AgentSessionWrapper {
     }
   }
 
+  private async prepareImageFallback(message: string, images?: Array<{ type: "image"; data: string; mimeType: string }>): Promise<{ message: string; images?: Array<{ type: "image"; data: string; mimeType: string }>; displayContent?: unknown }> {
+    if (!images?.length) return { message, images };
+
+    const supportsImageInput = (this.inner.model as { input?: string[] } | null | undefined)?.input?.includes("image") ?? false;
+    if (supportsImageInput) return { message, images };
+
+    const descriptions = await this.mcpRuntime?.describeImages(images, message).catch((error: unknown) => [
+      `MCP 图片识别失败：${error instanceof Error ? error.message : String(error)}`,
+    ]);
+    const imageContext = descriptions?.length
+      ? descriptions.map((text, index) => `图片 ${index + 1}:\n${text}`).join("\n\n")
+      : "当前模型未开启图片输入，且没有可用的 MCP 图片识别工具。";
+    const displayContent = [
+      ...(message.trim() ? [{ type: "text", text: message }] : []),
+      ...images.map((image) => ({
+        type: "image",
+        source: { type: "base64", media_type: image.mimeType, data: image.data },
+      })),
+    ];
+
+    return {
+      message: `${message}\n\n<image_context source="mcp-vision-fallback">\n${imageContext}\n</image_context>\n\n注意：当前模型配置未勾选图片输入，上面的 image_context 是由 MCP 图片识别服务生成的，请基于该内容回答用户。`,
+      images: undefined,
+      displayContent: displayContent.length ? displayContent : message,
+    };
+  }
+
+  private async reloadMcpRuntime(): Promise<{ ok: boolean; skipped?: boolean; toolNames?: string[]; serverStatuses?: McpRuntime["serverStatuses"] }> {
+    if (this._isRunning || this.inner.isStreaming || this.inner.isCompacting) {
+      return { ok: false, skipped: true };
+    }
+
+    const cwd = this.inner.sessionManager.getCwd();
+    const { createMcpRuntime } = await import("./mcp-runtime");
+    const nextRuntime = await createMcpRuntime(cwd);
+    const previousRuntime = this.mcpRuntime;
+    const previousMcpToolNames = new Set(previousRuntime?.toolNames ?? []);
+    const nextMcpToolNames = new Set(nextRuntime.toolNames);
+    const activeBefore = this.inner.getActiveToolNames();
+    const hadActiveMcp = activeBefore.some((name) => previousMcpToolNames.has(name) || name.startsWith("mcp__"));
+    const isFullPreset = ["grep", "find", "ls"].every((name) => activeBefore.includes(name));
+
+    const rawSession = this.inner as unknown as {
+      _customTools?: ToolDefinition[];
+      _allowedToolNames?: Set<string>;
+      _refreshToolRegistry?: (options?: { activeToolNames?: string[]; includeAllExtensionTools?: boolean }) => void;
+    };
+
+    if (!Array.isArray(rawSession._customTools) || typeof rawSession._refreshToolRegistry !== "function") {
+      nextRuntime.close();
+      throw new Error("Current AgentSession does not support runtime MCP reload");
+    }
+
+    if (rawSession._allowedToolNames && rawSession._allowedToolNames.size > 0) {
+      for (const toolName of nextMcpToolNames) rawSession._allowedToolNames.add(toolName);
+    }
+
+    rawSession._customTools = [
+      ...rawSession._customTools.filter((tool) => !previousMcpToolNames.has(tool.name) && !tool.name.startsWith("mcp__")),
+      ...nextRuntime.tools,
+    ];
+
+    const nextActiveToolNames = activeBefore.filter((name) => !previousMcpToolNames.has(name) && !name.startsWith("mcp__"));
+    if (hadActiveMcp || isFullPreset) nextActiveToolNames.push(...nextMcpToolNames);
+
+    this.mcpRuntime = nextRuntime;
+    rawSession._refreshToolRegistry({ activeToolNames: [...new Set(nextActiveToolNames)], includeAllExtensionTools: true });
+    previousRuntime?.close();
+    configureToolExecutionModes(this.inner);
+
+    // _refreshToolRegistry() calls setActiveToolsByName(), which rebuilds the SDK
+    // base system prompt from the newly discovered tool prompt snippets. Keep the
+    // wrapper's cached base prompt in sync before applying role/system-prompt
+    // filters; otherwise applyRolePrompt() would re-apply the stale prompt and
+    // wipe MCP tools from the visible/effective system prompt after MCP reload.
+    if (this.inner.agent.state) {
+      this.baseSystemPrompt = this.inner.agent.state.systemPrompt ?? "";
+    }
+    this.applyRolePrompt();
+
+    return { ok: true, toolNames: nextRuntime.toolNames, serverStatuses: nextRuntime.serverStatuses };
+  }
+
   async send(command: Record<string, unknown>): Promise<unknown> {
     this.resetIdleTimer();
     const type = command.type as string;
@@ -451,7 +564,31 @@ export class AgentSessionWrapper {
         // Fire and forget — events come via subscribe. Track the promise so an
         // abort + follow_up recovery can wait for the old turn to settle.
         const promptImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
-        this.trackTurn(this.inner.prompt(command.message as string, promptImages?.length ? { images: promptImages } : undefined));
+        const prepared = await this.prepareImageFallback(command.message as string, promptImages);
+
+        // 外部远程连接（如微信 Bot）触发 prompt 时，前端没有本地乐观追加 user 消息。
+        // SDK 不一定会通过 subscribe 立即广播 user message，因此这里统一补发一条
+        // message_end/user 事件，让已打开的 session 能第一时间显示远程用户刚发来的消息。
+        // 前端本地输入框发送时已有去重逻辑，会跳过同内容的 user message_end，不会重复。
+        const displayUserContent = prepared.displayContent ?? command.message;
+        for (const l of this.listeners) {
+          l({
+            type: "message_end",
+            message: {
+              role: "user",
+              content: displayUserContent,
+              timestamp: Date.now(),
+            },
+          });
+        }
+
+        if (prepared.displayContent && this.inner.sessionManager.isPersisted()) {
+          try {
+            this.inner.sessionManager.appendCustomEntry("display_user_message", { content: prepared.displayContent });
+          } catch { /* best effort: only affects UI history display */ }
+        }
+        invalidateSessionListCache();
+        this.trackTurn(this.inner.prompt(prepared.message, prepared.images?.length ? { images: prepared.images } : undefined));
         return null;
       }
 
@@ -502,6 +639,10 @@ export class AgentSessionWrapper {
           systemPrompt: this.inner.agent.state?.systemPrompt ?? "",
           thinkingLevel: this.inner.agent.state?.thinkingLevel ?? "off",
           isRunning: this._isRunning,
+          mcp: this.mcpRuntime ? {
+            toolNames: this.mcpRuntime.toolNames,
+            serverStatuses: this.mcpRuntime.serverStatuses,
+          } : null,
         };
       }
 
@@ -604,19 +745,21 @@ export class AgentSessionWrapper {
 
       case "steer": {
         const steerImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
-        await this.inner.steer(command.message as string, steerImages?.length ? steerImages : undefined);
+        const prepared = await this.prepareImageFallback(command.message as string, steerImages);
+        await this.inner.steer(prepared.message, prepared.images?.length ? prepared.images : undefined);
         return null;
       }
 
       case "follow_up": {
         const followImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
-        const imageOptions = followImages?.length ? { images: followImages } : undefined;
-        const message = command.message as string;
+        const prepared = await this.prepareImageFallback(command.message as string, followImages);
+        const imageOptions = prepared.images?.length ? { images: prepared.images } : undefined;
+        const message = prepared.message;
 
         if (this._isRunning || this.inner.isStreaming) {
           // SDK followUp only queues for an already-active turn. It should be
           // sent while the turn is still active so the agent can drain it.
-          await this.inner.followUp(message, followImages?.length ? followImages : undefined);
+          await this.inner.followUp(message, prepared.images?.length ? prepared.images : undefined);
           return null;
         }
 
@@ -624,6 +767,10 @@ export class AgentSessionWrapper {
         // sit in the queue and never trigger a model call. Start a fresh turn.
         this.trackTurn(this.inner.prompt(message, imageOptions));
         return null;
+      }
+
+      case "mcp_reload": {
+        return this.reloadMcpRuntime();
       }
 
       case "get_tools": {
@@ -637,7 +784,12 @@ export class AgentSessionWrapper {
       }
 
       case "set_tools": {
-        this.inner.setActiveToolsByName(command.toolNames as string[]);
+        const requested = Array.isArray(command.toolNames) ? command.toolNames.filter((name): name is string => typeof name === "string") : [];
+        const isFullPreset = ["grep", "find", "ls"].every(name => requested.includes(name));
+        const toolNames = isFullPreset
+          ? [...new Set([...requested, ...(this.mcpRuntime?.toolNames ?? [])])]
+          : requested;
+        this.inner.setActiveToolsByName(toolNames);
         if (this.inner.agent.state) this.baseSystemPrompt = this.inner.agent.state.systemPrompt ?? "";
         this.applyRolePrompt();
         return null;
@@ -668,6 +820,7 @@ export class AgentSessionWrapper {
     // Fire-and-forget: destroy() is called synchronously from idle timeout,
     // fork, and DELETE handler; blocking would delay those callers.
     this.inner.abort().catch(() => {});
+    this.mcpRuntime?.close();
     this.onDestroyCallback?.();
   }
 }
@@ -705,6 +858,19 @@ export function listRpcSessionStates(): Array<{ sessionId: string; isStreaming: 
   return [...getRegistry().values()]
     .filter((session) => session.isAlive())
     .map((session) => session.getStatus());
+}
+
+export function reloadMcpForIdleSessions(): Promise<Array<{ sessionId: string; ok: boolean; skipped?: boolean; error?: string; toolNames?: string[] }>> {
+  return Promise.all([...getRegistry().values()]
+    .filter((session) => session.isAlive())
+    .map(async (session) => {
+      try {
+        const result = await session.send({ type: "mcp_reload" }) as { ok?: boolean; skipped?: boolean; toolNames?: string[] };
+        return { sessionId: session.sessionId, ok: result.ok === true, skipped: result.skipped, toolNames: result.toolNames };
+      } catch (error) {
+        return { sessionId: session.sessionId, ok: false, error: error instanceof Error ? error.message : String(error) };
+      }
+    }));
 }
 
 /**
@@ -765,11 +931,14 @@ export async function startRpcSession(
       },
     }) : null;
     const codeGraphTools = await createCodeGraphTools(cwd);
-    const customTools = [...(codeSearchTool ? [codeSearchTool] : []), ...codeGraphTools];
+    const { createMcpRuntime } = await import("./mcp-runtime");
+    const mcpRuntime = await createMcpRuntime(cwd);
+    const customTools = [...(codeSearchTool ? [codeSearchTool] : []), ...codeGraphTools, ...mcpRuntime.tools];
     const availableToolNames = [
       ...allCodingToolNames,
       ...(codeSearchTool ? ["code_search"] : []),
       ...codeGraphTools.map(tool => tool.name),
+      ...mcpRuntime.toolNames,
     ];
     let toolsOption: string[] | undefined;
     if (toolNames !== undefined) {
@@ -787,10 +956,16 @@ export async function startRpcSession(
     configureToolExecutionModes(inner);
     hardenAutoRetry(inner);
 
-    // If specific tool names were requested (non-empty), narrow active tools now
+    // If specific tool names were requested (non-empty), narrow active tools now.
+    // The frontend preset lists are static, so the "full" preset cannot enumerate
+    // dynamically discovered MCP tool names. Treat the built-in full preset as
+    // "all available runtime tools", including MCP.
     if (toolNames && toolNames.length > 0) {
       const knownTools = new Set(inner.getAllTools().map((tool: ToolInfo) => tool.name));
-      inner.setActiveToolsByName(toolNames.filter(name => knownTools.has(name)));
+      const isFullPreset = ["grep", "find", "ls"].every(name => toolNames.includes(name));
+      const requested = toolNames.filter(name => knownTools.has(name));
+      if (isFullPreset) requested.push(...mcpRuntime.toolNames.filter(name => knownTools.has(name)));
+      inner.setActiveToolsByName([...new Set(requested)]);
     }
 
     // When all tools are disabled, clear the system prompt entirely.
@@ -800,7 +975,7 @@ export async function startRpcSession(
       setEffectiveSystemPrompt(inner, "");
     }
 
-    const wrapper = new AgentSessionWrapper(inner, roleId);
+    const wrapper = new AgentSessionWrapper(inner, roleId, mcpRuntime);
     wrapper.start();
 
     const realSessionId = inner.sessionId as string;

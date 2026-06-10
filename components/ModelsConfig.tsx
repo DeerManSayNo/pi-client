@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
+import { useEscapeClose } from "@/hooks/useEscapeClose";
 // Color icons (have their own fill colors — no background needed)
 import AnthropicIcon from "@lobehub/icons/es/Anthropic/components/Mono";
 import OpenAIIcon from "@lobehub/icons/es/OpenAI/components/Mono";
@@ -1185,6 +1186,9 @@ function AddProviderPicker({
   onSelectOAuth, onSelectApiKey, onAddCustom, onClose,
 }: AddProviderPickerProps) {
   const [search, setSearch] = useState("");
+
+  useEscapeClose(onClose);
+
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => { setTimeout(() => inputRef.current?.focus(), 30); }, []);
@@ -1316,6 +1320,8 @@ export function ModelsConfig({ onClose, onSaved }: { onClose: () => void; onSave
   const [oauthProviders, setOauthProviders] = useState<OAuthProvider[]>([]);
   const [apiKeyProviders, setApiKeyProviders] = useState<ApiKeyProvider[]>([]);
   const [pickerOpen, setPickerOpen] = useState(false);
+
+  useEscapeClose(onClose, !pickerOpen);
 
   const loadOAuthProviders = useCallback(() => {
     fetch("/api/auth/providers")

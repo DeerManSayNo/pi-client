@@ -177,7 +177,24 @@ export function buildSessionContext(entries: SessionEntry[], leafId?: string | n
 
   // DeerHux injects compaction summary as {role:"compactionSummary", summary, tokensBefore}.
   // Convert to {role:"user"} so MessageView can render it the same as before.
-  const messages = (piCtx.messages as AssistantMessage[]).map((msg) => {
+  const stripVisionFallbackContext = (content: string): string => {
+    return content
+      .replace(/\n*<image_context source="mcp-vision-fallback">[\s\S]*?<\/image_context>\n*/g, "\n")
+      .replace(/\n*注意：当前模型配置未勾选图片输入，上面的 image_context 是由 MCP 图片识别服务生成的，请基于该内容回答用户。\s*/g, "")
+      .trim();
+  };
+
+  const getDisplayUserContent = (entryId: string | undefined): unknown => {
+    if (!entryId) return null;
+    const entry = byId.get(entryId);
+    if (!entry?.parentId) return null;
+    const parent = byId.get(entry.parentId);
+    if (parent?.type !== "custom" || (parent as { customType?: string }).customType !== "display_user_message") return null;
+    const data = (parent as { data?: { content?: unknown } }).data;
+    return data?.content ?? null;
+  };
+
+  const messages = (piCtx.messages as AssistantMessage[]).map((msg, index) => {
     const raw = msg as unknown as Record<string, unknown>;
     if (raw.role === "compactionSummary") {
       return {
@@ -186,7 +203,15 @@ export function buildSessionContext(entries: SessionEntry[], leafId?: string | n
         timestamp: raw.timestamp as number | undefined,
       };
     }
-    return normalizeToolCalls(msg);
+    const normalized = normalizeToolCalls(msg);
+    if (normalized.role === "user") {
+      const displayContent = getDisplayUserContent(entryIds[index]);
+      if (displayContent) return { ...normalized, content: displayContent as typeof normalized.content };
+      if (typeof normalized.content === "string" && normalized.content.includes('<image_context source="mcp-vision-fallback">')) {
+        return { ...normalized, content: stripVisionFallbackContext(normalized.content) };
+      }
+    }
+    return normalized;
   });
 
   return {

@@ -109,6 +109,15 @@ body {
   display: none;
 }
 
+/* 隐藏滚动条工具类 */
+.scrollbar-none {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.scrollbar-none::-webkit-scrollbar {
+  display: none;
+}
+
 :root {
   --font-mono: var(--font-noto-mono), 'JetBrains Mono', 'Fira Code', 'Consolas', ui-monospace, 'PingFang SC', 'Microsoft YaHei', monospace;
 }
@@ -284,18 +293,17 @@ span.linenumber {
     flex-shrink: 0;
   }
   .right-panel-container.right-panel-open {
-    width: 42%;
-    min-width: 300px;
+    /* width & min-width controlled by inline style for resizability */
   }
   .right-panel-container.right-panel-closed {
     width: 0;
     min-width: 0;
     border-left: none !important;
   }
-  /* keep inner content at fixed width so it doesn't reflow during animation */
-  .right-panel-container > * {
-    width: 42vw;
-    min-width: 300px;
+  /* inner content fills the resizable panel width */
+  .right-panel-container.right-panel-open > * {
+    width: 100%;
+    min-width: 0;
   }
 }
 
@@ -331,8 +339,8 @@ span.linenumber {
     flex-shrink: 0;
   }
   .right-panel-container.right-panel-open {
-    width: 100%;
-    min-width: 0;
+    width: 100% !important;
+    min-width: 0 !important;
   }
   .right-panel-container.right-panel-closed {
     width: 0 !important;
