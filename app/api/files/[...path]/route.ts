@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import fs from "fs";
 import path from "path";
+import crypto from "crypto";
 import { filePathFromSegments, getAllowedRoots, isPathAllowed } from "@/lib/file-access";
 
 const IGNORED_NAMES = new Set([
@@ -14,6 +15,7 @@ const IGNORED_SUFFIXES = [".pyc"];
 const TEXT_PREVIEW_MAX_BYTES = 256 * 1024;
 const DOCUMENT_PREVIEW_MAX_BYTES = 5 * 1024 * 1024;
 const IMAGE_PREVIEW_MAX_BYTES = 10 * 1024 * 1024;
+const MARKDOWN_IMAGE_UPLOAD_MAX_BYTES = 10 * 1024 * 1024;
 
 const IMAGE_EXT_TO_MIME: Record<string, string> = {
   png: "image/png",
@@ -87,6 +89,45 @@ function getLanguage(filePath: string): string {
   if (base === "makefile" || base === "gnumakefile") return "makefile";
   const ext = base.split(".").pop() ?? "";
   return EXT_TO_LANGUAGE[ext] ?? "text";
+}
+
+async function getAllowedRootsSafe(): Promise<Set<string>> {
+  try {
+    return await getAllowedRoots();
+  } catch {
+    return new Set();
+  }
+}
+
+function isMarkdownFile(filePath: string): boolean {
+  return getLanguage(filePath) === "markdown";
+}
+
+function imageExtFromUpload(file: File): string {
+  const fromName = path.basename(file.name || "").toLowerCase().split(".").pop() ?? "";
+  if (fromName && IMAGE_EXT_TO_MIME[fromName]) return fromName;
+  switch (file.type) {
+    case "image/jpeg":
+      return "jpg";
+    case "image/gif":
+      return "gif";
+    case "image/webp":
+      return "webp";
+    case "image/svg+xml":
+      return "svg";
+    case "image/avif":
+      return "avif";
+    case "image/bmp":
+      return "bmp";
+    case "image/png":
+    default:
+      return "png";
+  }
+}
+
+function toMarkdownRelativePath(fromFilePath: string, targetFilePath: string): string {
+  const rel = path.relative(path.dirname(fromFilePath), targetFilePath).replace(/\\/g, "/");
+  return rel.startsWith(".") ? rel : `./${rel}`;
 }
 
 function createFileBodyStream(filePath: string, range?: { start: number; end: number }): ReadableStream<Uint8Array> {
@@ -196,12 +237,7 @@ export async function GET(
     const filePath = filePathFromSegments(segments);
     const type = request.nextUrl.searchParams.get("type") ?? "list";
 
-    let allowedRoots: Set<string>;
-    try {
-      allowedRoots = await getAllowedRoots();
-    } catch {
-      allowedRoots = new Set();
-    }
+    const allowedRoots = await getAllowedRootsSafe();
     if (!isPathAllowed(filePath, allowedRoots)) {
       return NextResponse.json({ error: "Access denied" }, { status: 403 });
     }
@@ -322,6 +358,107 @@ export async function GET(
       });
 
     return NextResponse.json({ entries, path: filePath });
+  } catch (error) {
+    return NextResponse.json({ error: String(error) }, { status: 500 });
+  }
+}
+
+export async function PUT(
+  request: NextRequest,
+  { params }: { params: Promise<{ path: string[] }> }
+) {
+  try {
+    const { path: segments } = await params;
+    const filePath = filePathFromSegments(segments);
+    const allowedRoots = await getAllowedRootsSafe();
+    if (!isPathAllowed(filePath, allowedRoots)) {
+      return NextResponse.json({ error: "Access denied" }, { status: 403 });
+    }
+
+    let stat: fs.Stats;
+    try {
+      stat = fs.statSync(filePath);
+    } catch {
+      return NextResponse.json({ error: "Not found" }, { status: 404 });
+    }
+    if (!stat.isFile()) {
+      return NextResponse.json({ error: "Not a file" }, { status: 400 });
+    }
+    if (!isMarkdownFile(filePath)) {
+      return NextResponse.json({ error: "Only Markdown files can be edited here" }, { status: 400 });
+    }
+
+    const body = await request.json().catch(() => null) as { content?: unknown } | null;
+    if (!body || typeof body.content !== "string") {
+      return NextResponse.json({ error: "Missing content" }, { status: 400 });
+    }
+
+    fs.writeFileSync(filePath, body.content, "utf-8");
+    const nextStat = fs.statSync(filePath);
+    return NextResponse.json({ ok: true, size: nextStat.size, language: getLanguage(filePath) });
+  } catch (error) {
+    return NextResponse.json({ error: String(error) }, { status: 500 });
+  }
+}
+
+export async function POST(
+  request: NextRequest,
+  { params }: { params: Promise<{ path: string[] }> }
+) {
+  try {
+    const { path: segments } = await params;
+    const filePath = filePathFromSegments(segments);
+    const type = request.nextUrl.searchParams.get("type");
+    if (type !== "upload-markdown-image") {
+      return NextResponse.json({ error: "Unsupported upload type" }, { status: 400 });
+    }
+
+    const allowedRoots = await getAllowedRootsSafe();
+    if (!isPathAllowed(filePath, allowedRoots)) {
+      return NextResponse.json({ error: "Access denied" }, { status: 403 });
+    }
+
+    let stat: fs.Stats;
+    try {
+      stat = fs.statSync(filePath);
+    } catch {
+      return NextResponse.json({ error: "Not found" }, { status: 404 });
+    }
+    if (!stat.isFile()) {
+      return NextResponse.json({ error: "Not a file" }, { status: 400 });
+    }
+    if (!isMarkdownFile(filePath)) {
+      return NextResponse.json({ error: "Images can only be pasted into Markdown files" }, { status: 400 });
+    }
+
+    const form = await request.formData();
+    const image = form.get("image");
+    if (!(image instanceof File)) {
+      return NextResponse.json({ error: "Missing image" }, { status: 400 });
+    }
+    if (!image.type.startsWith("image/")) {
+      return NextResponse.json({ error: "Only image uploads are supported" }, { status: 400 });
+    }
+    if (image.size > MARKDOWN_IMAGE_UPLOAD_MAX_BYTES) {
+      return NextResponse.json({ error: "Image too large (>10MB)" }, { status: 413 });
+    }
+
+    const assetsDir = path.join(path.dirname(filePath), "assets");
+    if (!isPathAllowed(assetsDir, allowedRoots)) {
+      return NextResponse.json({ error: "Access denied" }, { status: 403 });
+    }
+
+    fs.mkdirSync(assetsDir, { recursive: true });
+    const ext = imageExtFromUpload(image);
+    const fileName = `paste-${new Date().toISOString().replace(/[:.]/g, "-")}-${crypto.randomUUID().slice(0, 8)}.${ext}`;
+    const targetPath = path.join(assetsDir, fileName);
+    fs.writeFileSync(targetPath, Buffer.from(await image.arrayBuffer()));
+
+    return NextResponse.json({
+      ok: true,
+      path: targetPath,
+      markdownPath: toMarkdownRelativePath(filePath, targetPath),
+    });
   } catch (error) {
     return NextResponse.json({ error: String(error) }, { status: 500 });
   }

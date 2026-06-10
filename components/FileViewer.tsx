@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useRef, useCallback } from "react";
+import { useEffect, useState, useRef, useCallback, type ClipboardEvent, type FormEvent } from "react";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { vs } from "react-syntax-highlighter/dist/cjs/styles/prism";
 import { vscDarkPlus } from "react-syntax-highlighter/dist/cjs/styles/prism";
@@ -87,6 +87,241 @@ function markdownResourceUrl(src: string | undefined, markdownPath: string, cwd?
   return `/api/files/${encodeFilePathForApi(resolved)}?type=read`;
 }
 
+function escapeHtmlAttr(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function insertHtmlAtSelection(html: string): void {
+  const selection = window.getSelection();
+  if (!selection || selection.rangeCount === 0) return;
+  const range = selection.getRangeAt(0);
+  range.deleteContents();
+
+  const template = document.createElement("template");
+  template.innerHTML = html;
+  const fragment = template.content;
+  const lastNode = fragment.lastChild;
+  range.insertNode(fragment);
+
+  if (lastNode) {
+    range.setStartAfter(lastNode);
+    range.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+}
+
+function normalizeEditableText(text: string): string {
+  return text.replace(/\u00a0/g, " ");
+}
+
+function serializeInlineMarkdown(node: Node): string {
+  if (node.nodeType === Node.TEXT_NODE) {
+    return normalizeEditableText(node.textContent ?? "");
+  }
+  if (!(node instanceof HTMLElement)) return "";
+
+  const tag = node.tagName.toLowerCase();
+  if (tag === "br") return "\n";
+  if (tag === "img") {
+    const src = node.dataset.markdownSrc || node.getAttribute("src") || "";
+    const alt = node.getAttribute("alt") || "";
+    return src ? `![${alt}](${src})` : "";
+  }
+  if (tag === "a") {
+    const href = node.dataset.markdownHref || node.getAttribute("href") || "";
+    const text = Array.from(node.childNodes).map(serializeInlineMarkdown).join("").trim() || href;
+    return href ? `[${text}](${href})` : text;
+  }
+  if (tag === "strong" || tag === "b") {
+    return `**${Array.from(node.childNodes).map(serializeInlineMarkdown).join("")}**`;
+  }
+  if (tag === "em" || tag === "i") {
+    return `*${Array.from(node.childNodes).map(serializeInlineMarkdown).join("")}*`;
+  }
+  if (tag === "code") {
+    return `\`${normalizeEditableText(node.textContent ?? "")}\``;
+  }
+  return Array.from(node.childNodes).map(serializeInlineMarkdown).join("");
+}
+
+function serializeBlockMarkdown(node: Node, listDepth = 0, orderedIndex = 1): string {
+  if (node.nodeType === Node.TEXT_NODE) {
+    return normalizeEditableText(node.textContent ?? "").trim();
+  }
+  if (!(node instanceof HTMLElement)) return "";
+
+  const tag = node.tagName.toLowerCase();
+  if (tag === "h1" || tag === "h2" || tag === "h3" || tag === "h4" || tag === "h5" || tag === "h6") {
+    const level = Number(tag.slice(1));
+    return `${"#".repeat(level)} ${Array.from(node.childNodes).map(serializeInlineMarkdown).join("").trim()}`;
+  }
+  if (tag === "p" || tag === "div") {
+    return Array.from(node.childNodes).map(serializeInlineMarkdown).join("").trim();
+  }
+  if (tag === "blockquote") {
+    const body = Array.from(node.childNodes).map((child) => serializeBlockMarkdown(child, listDepth)).filter(Boolean).join("\n\n");
+    return body.split("\n").map((line) => `> ${line}`).join("\n");
+  }
+  if (tag === "pre") {
+    const code = node.querySelector("code")?.textContent ?? node.textContent ?? "";
+    return `\`\`\`\n${code.replace(/\n$/, "")}\n\`\`\``;
+  }
+  if (tag === "ul" || tag === "ol") {
+    const items = Array.from(node.children).filter((child) => child.tagName.toLowerCase() === "li");
+    return items.map((item, index) => serializeBlockMarkdown(item, listDepth, index + 1)).join("\n");
+  }
+  if (tag === "li") {
+    const prefix = node.parentElement?.tagName.toLowerCase() === "ol" ? `${orderedIndex}. ` : "- ";
+    const indent = "  ".repeat(listDepth);
+    const inlineParts: string[] = [];
+    const nestedParts: string[] = [];
+    Array.from(node.childNodes).forEach((child) => {
+      if (child instanceof HTMLElement && ["ul", "ol"].includes(child.tagName.toLowerCase())) {
+        nestedParts.push(serializeBlockMarkdown(child, listDepth + 1));
+      } else {
+        inlineParts.push(serializeInlineMarkdown(child));
+      }
+    });
+    const firstLine = `${indent}${prefix}${inlineParts.join("").trim()}`;
+    return [firstLine, ...nestedParts].filter(Boolean).join("\n");
+  }
+  if (tag === "hr") return "---";
+  if (tag === "table") {
+    return normalizeEditableText(node.innerText ?? "").trim();
+  }
+
+  return Array.from(node.childNodes).map((child) => serializeBlockMarkdown(child, listDepth)).filter(Boolean).join("\n\n");
+}
+
+function markdownFromEditableElement(root: HTMLElement): string {
+  const blocks = Array.from(root.childNodes)
+    .map((node) => serializeBlockMarkdown(node).trimEnd())
+    .filter((block) => block.length > 0);
+  const content = blocks.join("\n\n").replace(/\n{3,}/g, "\n\n").trimEnd();
+  return content ? `${content}\n` : "";
+}
+
+function getImagesInSelection(root: HTMLElement): HTMLImageElement[] {
+  const selection = window.getSelection();
+  if (!selection || selection.rangeCount === 0) return [];
+  const range = selection.getRangeAt(0);
+  return Array.from(root.querySelectorAll("img")).filter((img) => range.intersectsNode(img));
+}
+
+function selectImageElement(img: HTMLImageElement): void {
+  const range = document.createRange();
+  range.selectNode(img);
+  const selection = window.getSelection();
+  selection?.removeAllRanges();
+  selection?.addRange(range);
+}
+
+function imageElementToDataUrl(img: HTMLImageElement): string | null {
+  if (!img.complete || img.naturalWidth === 0) return null;
+  const canvas = document.createElement("canvas");
+  canvas.width = img.naturalWidth;
+  canvas.height = img.naturalHeight;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return null;
+  try {
+    ctx.drawImage(img, 0, 0);
+    return canvas.toDataURL("image/png");
+  } catch {
+    return null;
+  }
+}
+
+function wrapHtmlClipboardFragment(html: string): string {
+  return `<!DOCTYPE html><html><body><!--StartFragment-->${html}<!--EndFragment--></body></html>`;
+}
+
+function buildRichClipboardFromRange(root: HTMLElement, range: Range): { html: string; plainText: string } {
+  const fragment = range.cloneContents();
+  const container = document.createElement("div");
+  container.appendChild(fragment);
+
+  const dataUrlBySrc = new Map<string, string>();
+  for (const img of getImagesInSelection(root)) {
+    const dataUrl = imageElementToDataUrl(img);
+    if (!dataUrl) continue;
+    const currentSrc = img.currentSrc;
+    const attrSrc = img.getAttribute("src") ?? "";
+    const markdownSrc = img.dataset.markdownSrc ?? "";
+    for (const src of [currentSrc, attrSrc, markdownSrc]) {
+      if (src) dataUrlBySrc.set(src, dataUrl);
+    }
+  }
+
+  container.querySelectorAll("img").forEach((img) => {
+    const src = img.getAttribute("src") ?? "";
+    const dataUrl = dataUrlBySrc.get(src) || dataUrlBySrc.get(img.dataset.markdownSrc ?? "");
+    if (dataUrl) {
+      img.setAttribute("src", dataUrl);
+      img.removeAttribute("data-markdown-src");
+    }
+  });
+
+  return {
+    html: wrapHtmlClipboardFragment(container.innerHTML),
+    plainText: normalizeEditableText(container.innerText),
+  };
+}
+
+async function readClipboardHtml(dataTransfer: DataTransfer): Promise<string> {
+  const htmlItem = Array.from(dataTransfer.items).find((item) => item.type === "text/html");
+  if (htmlItem) {
+    return await new Promise<string>((resolve) => htmlItem.getAsString(resolve));
+  }
+  return dataTransfer.getData("text/html");
+}
+
+function dataUrlToFile(dataUrl: string, fileName: string): File | null {
+  const match = /^data:([^;,]+)?(?:;charset=[^;,]+)?(;base64)?,(.*)$/i.exec(dataUrl);
+  if (!match) return null;
+  const mime = match[1] || "image/png";
+  const isBase64 = Boolean(match[2]);
+  const data = match[3];
+  try {
+    if (isBase64) {
+      const binary = atob(data);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      return new File([bytes], fileName, { type: mime });
+    }
+    return new File([decodeURIComponent(data)], fileName, { type: mime });
+  } catch {
+    return null;
+  }
+}
+
+async function replaceHtmlImagesWithUploadedUrls(
+  html: string,
+  uploadImage: (file: File) => Promise<{ markdownPath: string; url: string }>,
+): Promise<string | null> {
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  const images = Array.from(doc.body.querySelectorAll("img"));
+  if (images.length === 0) return null;
+
+  let imageIndex = 0;
+  for (const img of images) {
+    const src = img.getAttribute("src") ?? "";
+    if (!src.startsWith("data:")) continue;
+    const file = dataUrlToFile(src, `paste-${Date.now()}-${imageIndex++}.png`);
+    if (!file) continue;
+    const uploaded = await uploadImage(file);
+    img.setAttribute("src", uploaded.url);
+    img.setAttribute("data-markdown-src", uploaded.markdownPath);
+    img.removeAttribute("style");
+  }
+
+  return doc.body.innerHTML;
+}
+
 function isVideoResourceSrc(src: string | undefined): boolean {
   return Boolean(src && !isExternalMarkdownResource(src.trim()) && isVideoPath(src));
 }
@@ -95,6 +330,8 @@ type DiffLine =
   | { type: "unchanged"; text: string; lineNo: number }
   | { type: "removed"; text: string; lineNo: number }
   | { type: "added"; text: string; lineNo: number };
+
+type MarkdownSaveState = "idle" | "dirty" | "saving" | "saved" | "error";
 
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -427,6 +664,171 @@ function DiffView({ oldContent, newContent }: { oldContent: string; newContent: 
         diffIdx += seg.lines.length;
         return <div key={si}>{lines}</div>;
       })}
+    </div>
+  );
+}
+
+function EditableMarkdownPreview({
+  content,
+  filePath,
+  cwd,
+  onChange,
+  uploadImage,
+}: {
+  content: string;
+  filePath: string;
+  cwd?: string;
+  onChange: (content: string) => void;
+  uploadImage: (file: File) => Promise<{ markdownPath: string; url: string }>;
+}) {
+  const rootRef = useRef<HTMLDivElement | null>(null);
+
+  const emitChange = useCallback(() => {
+    if (!rootRef.current) return;
+    onChange(markdownFromEditableElement(rootRef.current));
+  }, [onChange]);
+
+  const handleInput = useCallback((event: FormEvent<HTMLDivElement>) => {
+    event.currentTarget.querySelectorAll("img").forEach((img) => {
+      if (!img.dataset.markdownSrc && img.getAttribute("src")) {
+        img.dataset.markdownSrc = img.getAttribute("src") ?? "";
+      }
+    });
+    emitChange();
+  }, [emitChange]);
+
+  const handlePaste = useCallback(async (event: ClipboardEvent<HTMLDivElement>) => {
+    const imageFiles = Array.from(event.clipboardData.items)
+      .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => Boolean(file));
+
+    const html = await readClipboardHtml(event.clipboardData);
+
+    if (imageFiles.length === 0 && html.includes("<img")) {
+      event.preventDefault();
+      try {
+        const processedHtml = await replaceHtmlImagesWithUploadedUrls(html, uploadImage);
+        if (processedHtml) {
+          insertHtmlAtSelection(processedHtml);
+          emitChange();
+          return;
+        }
+      } catch {
+        // Fall through to default paste when rich HTML cannot be processed.
+      }
+    }
+
+    if (imageFiles.length === 0) return;
+
+    event.preventDefault();
+    for (const file of imageFiles) {
+      const uploaded = await uploadImage(file);
+      insertHtmlAtSelection(
+        `<img src="${escapeHtmlAttr(uploaded.url)}" alt="" data-markdown-src="${escapeHtmlAttr(uploaded.markdownPath)}" style="max-width:100%;height:auto;border-radius:6px;margin:8px 0;" />`
+      );
+    }
+    emitChange();
+  }, [emitChange, uploadImage]);
+
+  const handleCopy = useCallback((event: ClipboardEvent<HTMLDivElement>) => {
+    const root = rootRef.current;
+    if (!root) return;
+
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return;
+
+    const range = selection.getRangeAt(0);
+    if (!root.contains(range.commonAncestorContainer)) return;
+
+    const payload = buildRichClipboardFromRange(root, range);
+    if (!payload.html.includes("<img") && !payload.plainText) return;
+
+    event.preventDefault();
+    event.clipboardData.setData("text/html", payload.html);
+    event.clipboardData.setData("text/plain", payload.plainText || selection.toString());
+  }, []);
+
+  return (
+    <div
+      ref={rootRef}
+      className="markdown-body markdown-file-preview markdown-editable-preview"
+      contentEditable
+      suppressContentEditableWarning
+      spellCheck
+      tabIndex={0}
+      onInput={handleInput}
+      onPaste={handlePaste}
+      onCopy={handleCopy}
+      style={{
+        padding: "24px 32px",
+        maxWidth: 800,
+        minHeight: "100%",
+        outline: "none",
+        cursor: "text",
+      }}
+    >
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          img: ({ src, alt }) => {
+            const srcText = typeof src === "string" ? src : undefined;
+            const mediaSrc = markdownResourceUrl(srcText, filePath, cwd);
+            if (isVideoResourceSrc(srcText)) {
+              return (
+                <video
+                  controls
+                  preload="metadata"
+                  src={mediaSrc}
+                  title={alt ?? srcText}
+                  style={{ maxWidth: "100%", borderRadius: 8, background: "#000", margin: "8px 0" }}
+                />
+              );
+            }
+            return (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={mediaSrc}
+                alt={alt ?? ""}
+                data-markdown-src={srcText ?? ""}
+                onClick={(event) => {
+                  event.preventDefault();
+                  selectImageElement(event.currentTarget);
+                }}
+                style={{ maxWidth: "100%", height: "auto", borderRadius: 6, margin: "8px 0", cursor: "pointer" }}
+              />
+            );
+          },
+          a: ({ href, children }) => {
+            const mediaSrc = markdownResourceUrl(href, filePath, cwd);
+            if (isVideoResourceSrc(href)) {
+              return (
+                <video
+                  controls
+                  preload="metadata"
+                  src={mediaSrc}
+                  title={typeof children === "string" ? children : href}
+                  style={{ display: "block", maxWidth: "100%", borderRadius: 8, background: "#000", margin: "8px 0" }}
+                />
+              );
+            }
+            return <a href={href} data-markdown-href={href}>{children}</a>;
+          },
+          ul: ({ children }) => (
+            <ul style={{ listStyleType: "disc", listStylePosition: "outside", paddingLeft: 24, margin: "4px 0 12px" }}>
+              {children}
+            </ul>
+          ),
+          ol: ({ children }) => (
+            <ol style={{ listStyleType: "decimal", listStylePosition: "outside", paddingLeft: 24, margin: "4px 0 12px" }}>
+              {children}
+            </ol>
+          ),
+          li: ({ children }) => <li style={{ display: "list-item", margin: "3px 0" }}>{children}</li>,
+        }}
+      >
+        {content}
+      </ReactMarkdown>
     </div>
   );
 }
@@ -823,8 +1225,12 @@ function TextFileViewer({ filePath, cwd }: Props) {
   const [watching, setWatching] = useState(false);
   const [changeCount, setChangeCount] = useState(0);
   const [copiedFullText, setCopiedFullText] = useState(false);
+  const [saveState, setSaveState] = useState<MarkdownSaveState>("idle");
+  const [saveError, setSaveError] = useState<string | null>(null);
   const esRef = useRef<EventSource | null>(null);
   const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const latestContentRef = useRef("");
 
   const fetchContent = useCallback((filePath: string, isRefresh = false) => {
     const encoded = encodeFilePathForApi(filePath);
@@ -837,6 +1243,9 @@ function TextFileViewer({ filePath, cwd }: Props) {
         }
         if (isRefresh) {
           setData((prev) => {
+            if (prev && d.content === latestContentRef.current) {
+              return { ...prev, language: d.language, size: d.size };
+            }
             if (prev) setPrevContent(prev.content);
             return d;
           });
@@ -844,6 +1253,7 @@ function TextFileViewer({ filePath, cwd }: Props) {
         } else {
           setData(d);
         }
+        latestContentRef.current = d.content;
         return d;
       })
       .catch((e) => {
@@ -855,7 +1265,7 @@ function TextFileViewer({ filePath, cwd }: Props) {
   const copyFullText = useCallback(async () => {
     if (!data) return;
     try {
-      await navigator.clipboard.writeText(data.content);
+      await navigator.clipboard.writeText(latestContentRef.current || data.content);
       setCopiedFullText(true);
       if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
       copyTimerRef.current = setTimeout(() => setCopiedFullText(false), 1500);
@@ -863,6 +1273,60 @@ function TextFileViewer({ filePath, cwd }: Props) {
       // Clipboard can be unavailable outside secure contexts.
     }
   }, [data]);
+
+  const saveMarkdownContent = useCallback(async (content: string) => {
+    const encoded = encodeFilePathForApi(filePath);
+    setSaveState("saving");
+    setSaveError(null);
+    try {
+      const response = await fetch(`/api/files/${encoded}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content }),
+      });
+      const result = await response.json().catch(() => ({})) as { error?: string; size?: number };
+      if (!response.ok || result.error) {
+        throw new Error(result.error ?? `保存失败 (${response.status})`);
+      }
+      setSaveState("saved");
+      setData((prev) => prev ? { ...prev, size: result.size ?? new Blob([content]).size } : prev);
+    } catch (error) {
+      setSaveState("error");
+      setSaveError(error instanceof Error ? error.message : String(error));
+    }
+  }, [filePath]);
+
+  const scheduleMarkdownSave = useCallback((content: string) => {
+    latestContentRef.current = content;
+    setSaveState("dirty");
+    setSaveError(null);
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = setTimeout(() => {
+      saveTimerRef.current = null;
+      void saveMarkdownContent(content);
+    }, 700);
+  }, [saveMarkdownContent]);
+
+  const uploadMarkdownImage = useCallback(async (file: File) => {
+    const encoded = encodeFilePathForApi(filePath);
+    const form = new FormData();
+    form.append("image", file);
+    const response = await fetch(`/api/files/${encoded}?type=upload-markdown-image`, {
+      method: "POST",
+      body: form,
+    });
+    const result = await response.json().catch(() => ({})) as { error?: string; markdownPath?: string };
+    if (!response.ok || result.error || !result.markdownPath) {
+      const message = result.error ?? `图片上传失败 (${response.status})`;
+      setSaveState("error");
+      setSaveError(message);
+      throw new Error(message);
+    }
+    return {
+      markdownPath: result.markdownPath,
+      url: markdownResourceUrl(result.markdownPath, filePath, cwd) ?? result.markdownPath,
+    };
+  }, [cwd, filePath]);
 
   // Initial load + SSE watch setup
   useEffect(() => {
@@ -874,6 +1338,13 @@ function TextFileViewer({ filePath, cwd }: Props) {
     setViewMode("source");
     setChangeCount(0);
     setCopiedFullText(false);
+    setSaveState("idle");
+    setSaveError(null);
+    latestContentRef.current = "";
+    if (saveTimerRef.current) {
+      clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = null;
+    }
     setWatching(false);
 
     if (esRef.current) {
@@ -915,6 +1386,7 @@ function TextFileViewer({ filePath, cwd }: Props) {
   useEffect(() => {
     return () => {
       if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+      if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     };
   }, []);
 
@@ -938,8 +1410,15 @@ function TextFileViewer({ filePath, cwd }: Props) {
 
   const isHtml = data.language === "html";
   const isMarkdown = data.language === "markdown";
-  const lines = data.content.split("\n");
-  const hasDiff = prevContent !== null && prevContent !== data.content;
+  const sourceContent = isMarkdown ? (latestContentRef.current || data.content) : data.content;
+  const lines = sourceContent.split("\n");
+  const hasDiff = prevContent !== null && prevContent !== sourceContent;
+  const saveLabel =
+    saveState === "dirty" ? "未保存"
+    : saveState === "saving" ? "保存中..."
+    : saveState === "saved" ? "已保存"
+    : saveState === "error" ? "保存失败"
+    : null;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
@@ -962,6 +1441,18 @@ function TextFileViewer({ filePath, cwd }: Props) {
         <span style={{ marginLeft: "auto", flexShrink: 0 }}>{data.language}</span>
         {viewMode === "source" && <span style={{ flexShrink: 0, whiteSpace: "nowrap" }}>{lines.length} 行</span>}
         <span style={{ flexShrink: 0, whiteSpace: "nowrap" }}>{formatSize(data.size)}</span>
+        {isMarkdown && saveLabel && (
+          <span
+            title={saveError ?? undefined}
+            style={{
+              flexShrink: 0,
+              whiteSpace: "nowrap",
+              color: saveState === "error" ? "#f87171" : saveState === "saved" ? "#4ade80" : "var(--text-dim)",
+            }}
+          >
+            {saveLabel}
+          </span>
+        )}
 
         {/* Live watch indicator */}
         <span
@@ -1047,7 +1538,7 @@ function TextFileViewer({ filePath, cwd }: Props) {
       {/* Content area */}
       <div style={{ flex: 1, overflow: "auto", background: "var(--bg)" }}>
         {viewMode === "diff" && hasDiff ? (
-          <DiffView oldContent={prevContent!} newContent={data.content} language={data.language} />
+          <DiffView oldContent={prevContent!} newContent={sourceContent} language={data.language} />
         ) : isHtml && previewMode ? (
           <iframe
             srcDoc={data.content}
@@ -1056,67 +1547,13 @@ function TextFileViewer({ filePath, cwd }: Props) {
             title="HTML 预览"
           />
         ) : isMarkdown && previewMode ? (
-          <div
-            className="markdown-body markdown-file-preview"
-            style={{ padding: "24px 32px", maxWidth: 800 }}
-          >
-            <ReactMarkdown
-              remarkPlugins={[remarkGfm]}
-              components={{
-                img: ({ src, alt }) => {
-                  const srcText = typeof src === "string" ? src : undefined;
-                  const mediaSrc = markdownResourceUrl(srcText, filePath, cwd);
-                  if (isVideoResourceSrc(srcText)) {
-                    return (
-                      <video
-                        controls
-                        preload="metadata"
-                        src={mediaSrc}
-                        title={alt ?? srcText}
-                        style={{ maxWidth: "100%", borderRadius: 8, background: "#000", margin: "8px 0" }}
-                      />
-                    );
-                  }
-                  return (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img
-                      src={mediaSrc}
-                      alt={alt ?? ""}
-                      style={{ maxWidth: "100%", height: "auto", borderRadius: 6, margin: "8px 0" }}
-                    />
-                  );
-                },
-                a: ({ href, children }) => {
-                  const mediaSrc = markdownResourceUrl(href, filePath, cwd);
-                  if (isVideoResourceSrc(href)) {
-                    return (
-                      <video
-                        controls
-                        preload="metadata"
-                        src={mediaSrc}
-                        title={typeof children === "string" ? children : href}
-                        style={{ display: "block", maxWidth: "100%", borderRadius: 8, background: "#000", margin: "8px 0" }}
-                      />
-                    );
-                  }
-                  return <a href={href}>{children}</a>;
-                },
-                ul: ({ children }) => (
-                  <ul style={{ listStyleType: "disc", listStylePosition: "outside", paddingLeft: 24, margin: "4px 0 12px" }}>
-                    {children}
-                  </ul>
-                ),
-                ol: ({ children }) => (
-                  <ol style={{ listStyleType: "decimal", listStylePosition: "outside", paddingLeft: 24, margin: "4px 0 12px" }}>
-                    {children}
-                  </ol>
-                ),
-                li: ({ children }) => <li style={{ display: "list-item", margin: "3px 0" }}>{children}</li>,
-              }}
-            >
-              {data.content}
-            </ReactMarkdown>
-          </div>
+          <EditableMarkdownPreview
+            content={data.content}
+            filePath={filePath}
+            cwd={cwd}
+            onChange={scheduleMarkdownSave}
+            uploadImage={uploadMarkdownImage}
+          />
         ) : (
           <SyntaxHighlighter
             language={data.language === "text" ? "plaintext" : data.language}
@@ -1140,7 +1577,7 @@ function TextFileViewer({ filePath, cwd }: Props) {
             codeTagProps={{ style: { fontFamily: "var(--font-mono)" } }}
             wrapLongLines={false}
           >
-            {data.content}
+            {sourceContent}
           </SyntaxHighlighter>
         )}
       </div>

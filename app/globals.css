@@ -196,6 +196,16 @@ pre, code {
   background: none;
   padding: 0;
 }
+.markdown-editable-preview img::selection {
+  background: rgba(37, 99, 235, 0.25);
+}
+.markdown-editable-preview:focus {
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+.markdown-editable-preview:empty::before {
+  content: "开始输入 Markdown 内容...";
+  color: var(--text-dim);
+}
 
 /* syntax highlighter line numbers */
 .markdown-body span.linenumber,
