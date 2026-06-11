@@ -148,7 +148,7 @@ export function AppShell() {
   const [logPanelOpen, setLogPanelOpen] = useState(false);
 
   const handleAtMention = useCallback((relativePath: string) => {
-    chatInputRef.current?.insertText("`" + relativePath + "`");
+    chatInputRef.current?.addReference(relativePath);
   }, []);
 
   const handleProjectsChange = useCallback((projects: { cwd: string; displayName: string }[]) => {

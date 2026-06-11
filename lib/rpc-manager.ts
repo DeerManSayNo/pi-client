@@ -9,6 +9,7 @@ import { applyRolePromptConfigToPrompt, isRoleSystemPromptSectionEnabled, readRo
 import { indexExists } from "./code-index/database";
 import { searchIndex } from "./code-index/search";
 import { createCodeGraphTools } from "./codegraph/tools";
+import type { FileReference } from "./types";
 import type { McpRuntime, McpRuntimeLease } from "./mcp-runtime";
 
 // ============================================================================
@@ -24,6 +25,45 @@ type EventListener = (event: AgentEvent) => void;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function fileReferenceName(filePath: string): string {
+  return filePath.split(/[\\/]/).filter(Boolean).pop() ?? filePath;
+}
+
+function normalizeReferences(value: unknown): FileReference[] {
+  if (!Array.isArray(value)) return [];
+  const references: FileReference[] = [];
+  for (const item of value) {
+    if (!isRecord(item) || typeof item.path !== "string") continue;
+    const filePath = item.path.trim();
+    if (!filePath) continue;
+    references.push({
+      path: filePath,
+      name: typeof item.name === "string" && item.name.trim() ? item.name.trim() : fileReferenceName(filePath),
+    });
+  }
+  return references;
+}
+
+function escapeReferenceText(text: string): string {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function withAvailableReferences(message: string, references: FileReference[]): string {
+  if (references.length === 0) return message;
+  const referenceBlock = [
+    "<available_references>",
+    "The user selected these files or folders as optional context. Use them only if the user's request requires them. Do not summarize or analyze them just because they are listed.",
+    ...references.map((ref) => `- ${escapeReferenceText(ref.path)}`),
+    "</available_references>",
+  ].join("\n");
+  const skillPrefix = message.match(/^(\/skill:[\w-]+)(?:\s|$)([\s\S]*)/);
+  if (skillPrefix) {
+    const rest = skillPrefix[2].trim();
+    return `${skillPrefix[1]} ${rest ? `${referenceBlock}\n\n${rest}` : referenceBlock}`;
+  }
+  return message.trim() ? `${referenceBlock}\n\n${message}` : referenceBlock;
 }
 
 function getNestedString(value: unknown, keys: string[]): string | null {
@@ -535,7 +575,11 @@ export class AgentSessionWrapper {
     }
   }
 
-  private async prepareImageFallback(message: string, images?: Array<{ type: "image"; data: string; mimeType: string }>): Promise<{ message: string; images?: Array<{ type: "image"; data: string; mimeType: string }>; displayContent?: unknown }> {
+  private async prepareImageFallback(
+    message: string,
+    images?: Array<{ type: "image"; data: string; mimeType: string }>,
+    displayMessage = message,
+  ): Promise<{ message: string; images?: Array<{ type: "image"; data: string; mimeType: string }>; displayContent?: unknown }> {
     if (!images?.length) return { message, images };
 
     const supportsImageInput = (this.inner.model as { input?: string[] } | null | undefined)?.input?.includes("image") ?? false;
@@ -549,7 +593,7 @@ export class AgentSessionWrapper {
       ? descriptions.map((text, index) => `图片 ${index + 1}:\n${text}`).join("\n\n")
       : "当前模型未开启图片输入，且没有可用的 MCP 图片识别工具。";
     const displayContent = [
-      ...(message.trim() ? [{ type: "text", text: message }] : []),
+      ...(displayMessage.trim() ? [{ type: "text", text: displayMessage }] : []),
       ...images.map((image) => ({
         type: "image",
         source: { type: "base64", media_type: image.mimeType, data: image.data },
@@ -599,34 +643,41 @@ export class AgentSessionWrapper {
         if (typeof command.roleId === "string") {
           this.setRole(command.roleId);
         }
+        const promptText = typeof command.message === "string" ? command.message : "";
+        const references = normalizeReferences(command.references);
+        const modelMessage = withAvailableReferences(promptText, references);
         // Record prompt text for Live Island display
-        if (command.message) {
-          getLiveIslandClient().recordPrompt(this.inner.sessionId, command.message as string);
+        if (promptText) {
+          getLiveIslandClient().recordPrompt(this.inner.sessionId, promptText);
         }
         // Fire and forget — events come via subscribe. Track the promise so an
         // abort + follow_up recovery can wait for the old turn to settle.
         const promptImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
-        const prepared = await this.prepareImageFallback(command.message as string, promptImages);
+        const prepared = await this.prepareImageFallback(modelMessage, promptImages, promptText);
 
         // 外部远程连接（如微信 Bot）触发 prompt 时，前端没有本地乐观追加 user 消息。
         // SDK 不一定会通过 subscribe 立即广播 user message，因此这里统一补发一条
         // message_end/user 事件，让已打开的 session 能第一时间显示远程用户刚发来的消息。
         // 前端本地输入框发送时已有去重逻辑，会跳过同内容的 user message_end，不会重复。
-        const displayUserContent = prepared.displayContent ?? command.message;
+        const displayUserContent = prepared.displayContent ?? promptText;
         for (const l of this.listeners) {
           l({
             type: "message_end",
             message: {
               role: "user",
               content: displayUserContent,
+              ...(references.length ? { references } : {}),
               timestamp: Date.now(),
             },
           });
         }
 
-        if (prepared.displayContent && this.inner.sessionManager.isPersisted()) {
+        if ((prepared.displayContent || references.length) && this.inner.sessionManager.isPersisted()) {
           try {
-            this.inner.sessionManager.appendCustomEntry("display_user_message", { content: prepared.displayContent });
+            this.inner.sessionManager.appendCustomEntry("display_user_message", {
+              content: displayUserContent,
+              ...(references.length ? { references } : {}),
+            });
           } catch { /* best effort: only affects UI history display */ }
         }
         invalidateSessionListCache();
@@ -787,14 +838,18 @@ export class AgentSessionWrapper {
 
       case "steer": {
         const steerImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
-        const prepared = await this.prepareImageFallback(command.message as string, steerImages);
+        const steerText = typeof command.message === "string" ? command.message : "";
+        const references = normalizeReferences(command.references);
+        const prepared = await this.prepareImageFallback(withAvailableReferences(steerText, references), steerImages, steerText);
         await this.inner.steer(prepared.message, prepared.images?.length ? prepared.images : undefined);
         return null;
       }
 
       case "follow_up": {
         const followImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
-        const prepared = await this.prepareImageFallback(command.message as string, followImages);
+        const followText = typeof command.message === "string" ? command.message : "";
+        const references = normalizeReferences(command.references);
+        const prepared = await this.prepareImageFallback(withAvailableReferences(followText, references), followImages, followText);
         const imageOptions = prepared.images?.length ? { images: prepared.images } : undefined;
         const message = prepared.message;
 

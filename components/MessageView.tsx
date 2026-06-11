@@ -9,6 +9,7 @@ import { vscDarkPlus } from "react-syntax-highlighter/dist/cjs/styles/prism";
 import { useTheme } from "@/hooks/useTheme";
 import type {
   AgentMessage,
+  FileReference,
   UserMessage,
   AssistantMessage,
   ToolResultMessage,
@@ -107,6 +108,33 @@ function parseSkillPrefix(text: string): { skillName: string; rest: string } | n
   return { skillName: match[1], rest: match[2] };
 }
 
+function fileReferenceName(path: string): string {
+  return path.split(/[\\/]/).filter(Boolean).pop() ?? path;
+}
+
+function unescapeInlineCode(text: string): string {
+  return text.replace(/\\`/g, "`");
+}
+
+/** Parse the reference block prepended by ChatInput, keeping the visible message body clean. */
+function parseReferencePrefix(text: string): { references: string[]; rest: string } | null {
+  const lines = text.split(/\r?\n/);
+  if (lines[0] !== "引用文件/文件夹：") return null;
+
+  const references: string[] = [];
+  let index = 1;
+  while (index < lines.length) {
+    const match = lines[index].match(/^- `((?:\\`|[^`])*)`$/);
+    if (!match) break;
+    references.push(unescapeInlineCode(match[1]));
+    index += 1;
+  }
+
+  if (references.length === 0) return null;
+  if (lines[index] === "") index += 1;
+  return { references, rest: lines.slice(index).join("\n") };
+}
+
 function UserMessageView({ message, entryId, onResend }: {
   message: UserMessage;
   entryId?: string;
@@ -127,9 +155,15 @@ function UserMessageView({ message, entryId, onResend }: {
       ? []
       : message.content.filter((b): b is ImageContent => b.type === "image");
 
-  // Extract /skill:name prefix for tag display
-  const skillPrefix = useMemo(() => parseSkillPrefix(content), [content]);
-  const displayContent = skillPrefix ? skillPrefix.rest : content;
+  // Extract sent-time references and /skill:name prefix for tag display.
+  const referencePrefix = useMemo(() => parseReferencePrefix(content), [content]);
+  const displayReferences: FileReference[] = useMemo(() => {
+    if (message.references?.length) return message.references;
+    return referencePrefix?.references.map((path) => ({ path, name: fileReferenceName(path) })) ?? [];
+  }, [message.references, referencePrefix]);
+  const contentWithoutReferences = message.references?.length ? content : referencePrefix ? referencePrefix.rest : content;
+  const skillPrefix = useMemo(() => parseSkillPrefix(contentWithoutReferences), [contentWithoutReferences]);
+  const displayContent = skillPrefix ? skillPrefix.rest : contentWithoutReferences;
 
   const [expanded, setExpanded] = useState(false);
   const [editValue, setEditValue] = useState(content);
@@ -246,6 +280,41 @@ function UserMessageView({ message, entryId, onResend }: {
           }}
         >
           {renderImages()}
+          {displayReferences.length > 0 && (
+            <div style={{ display: "flex", alignItems: "flex-start", gap: 8, marginBottom: displayContent ? 8 : 0 }}>
+              <span style={{ flexShrink: 0, paddingTop: 3, fontSize: 11, color: "var(--text-dim)" }}>引用</span>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6, minWidth: 0 }}>
+                {displayReferences.map((ref) => (
+                  <span
+                    key={ref.path}
+                    title={ref.path}
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 5,
+                      maxWidth: 220,
+                      height: 24,
+                      padding: "0 8px",
+                      borderRadius: 999,
+                      background: "color-mix(in srgb, var(--accent) 6%, var(--bg))",
+                      border: "1px solid color-mix(in srgb, var(--accent) 16%, var(--border))",
+                      color: "color-mix(in srgb, var(--accent) 62%, var(--text-muted))",
+                      fontSize: 12,
+                      fontWeight: 500,
+                    }}
+                  >
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+                      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                      <polyline points="14 2 14 8 20 8" />
+                    </svg>
+                    <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {ref.name}
+                    </span>
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
           <div
             style={{
               fontSize: 14,

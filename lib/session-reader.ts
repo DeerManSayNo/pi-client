@@ -1,5 +1,5 @@
 import { SessionManager, buildSessionContext as piBuildSessionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
-import type { SessionEntry, SessionInfo, SessionContext, AssistantMessage } from "./types";
+import type { SessionEntry, SessionInfo, SessionContext, AssistantMessage, FileReference } from "./types";
 import type { SessionEntry as PiSessionEntry, SessionInfo as PiSessionInfo } from "@earendil-works/pi-coding-agent";
 import { normalizeToolCalls } from "./normalize";
 
@@ -184,14 +184,34 @@ export function buildSessionContext(entries: SessionEntry[], leafId?: string | n
       .trim();
   };
 
-  const getDisplayUserContent = (entryId: string | undefined): unknown => {
+  const normalizeReferences = (value: unknown): FileReference[] => {
+    if (!Array.isArray(value)) return [];
+    return value.flatMap((item): FileReference[] => {
+      if (typeof item !== "object" || item === null) return [];
+      const record = item as Record<string, unknown>;
+      if (typeof record.path !== "string" || !record.path.trim()) return [];
+      const path = record.path.trim();
+      const fallbackName = path.split(/[\\/]/).filter(Boolean).pop() ?? path;
+      return [{
+        path,
+        name: typeof record.name === "string" && record.name.trim() ? record.name.trim() : fallbackName,
+      }];
+    });
+  };
+
+  const getDisplayUserMessage = (entryId: string | undefined): { content: unknown; references?: FileReference[] } | null => {
     if (!entryId) return null;
     const entry = byId.get(entryId);
     if (!entry?.parentId) return null;
     const parent = byId.get(entry.parentId);
     if (parent?.type !== "custom" || (parent as { customType?: string }).customType !== "display_user_message") return null;
-    const data = (parent as { data?: { content?: unknown } }).data;
-    return data?.content ?? null;
+    const data = (parent as { data?: { content?: unknown; references?: unknown } }).data;
+    if (!data || !("content" in data)) return null;
+    const references = normalizeReferences(data.references);
+    return {
+      content: data.content,
+      ...(references.length ? { references } : {}),
+    };
   };
 
   const messages = (piCtx.messages as AssistantMessage[]).map((msg, index) => {
@@ -205,8 +225,12 @@ export function buildSessionContext(entries: SessionEntry[], leafId?: string | n
     }
     const normalized = normalizeToolCalls(msg);
     if (normalized.role === "user") {
-      const displayContent = getDisplayUserContent(entryIds[index]);
-      if (displayContent) return { ...normalized, content: displayContent as typeof normalized.content };
+      const displayMessage = getDisplayUserMessage(entryIds[index]);
+      if (displayMessage) return {
+        ...normalized,
+        content: displayMessage.content as typeof normalized.content,
+        ...(displayMessage.references ? { references: displayMessage.references } : {}),
+      };
       if (typeof normalized.content === "string" && normalized.content.includes('<image_context source="mcp-vision-fallback">')) {
         return { ...normalized, content: stripVisionFallbackContext(normalized.content) };
       }

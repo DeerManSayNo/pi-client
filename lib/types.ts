@@ -31,6 +31,11 @@ export interface ImageContent {
   };
 }
 
+export interface FileReference {
+  path: string;
+  name: string;
+}
+
 export interface ThinkingContent {
   type: "thinking";
   thinking: string;
@@ -48,6 +53,7 @@ export type AssistantContentBlock = TextContent | ImageContent | ThinkingContent
 export interface UserMessage {
   role: "user";
   content: string | (TextContent | ImageContent)[];
+  references?: FileReference[];
   timestamp?: number;
 }
 

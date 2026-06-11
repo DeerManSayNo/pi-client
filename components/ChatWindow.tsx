@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { AgentMessage, SessionInfo } from "@/lib/types";
+import type { AgentMessage, FileReference, SessionInfo } from "@/lib/types";
 import { MessageView } from "./MessageView";
 import { ChatInput, type ChatInputHandle, type ChatInputState, type AttachedImage } from "./ChatInput";
 import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
@@ -382,10 +382,10 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, onAgentEnd, on
     return { roleId: role.id, roleName: role.name, block, setting: setting.length > 160 ? setting.slice(0, 160) + "…" : setting };
   }, [roles, currentRoleId]);
 
-  const sendWithRole = useCallback((message: string, images?: AttachedImage[]) => {
+  const sendWithRole = useCallback((message: string, images?: AttachedImage[], references?: FileReference[]) => {
     const detected = detectSetting(message);
     if (detected) setPendingRoleSetting(detected);
-    handleSend(message, images, currentRoleId);
+    handleSend(message, images, currentRoleId, references);
   }, [detectSetting, handleSend, currentRoleId]);
 
   const confirmRoleSetting = useCallback(async (mode: "save" | "temporary" | "cancel") => {
@@ -760,6 +760,21 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, onAgentEnd, on
   // Input state cache — preserves text / images / selected skill across tab switches
   const inputStateCache = useRef<Map<string, ChatInputState>>(new Map());
   const currentInputKey = session?.id ?? `new:${newSessionCwd ?? ""}:${activeTabId ?? ""}`;
+  const previousInputKeyRef = useRef(currentInputKey);
+  if (previousInputKeyRef.current !== currentInputKey) {
+    const previousKey = previousInputKeyRef.current;
+    const previousState = inputStateCache.current.get(previousKey);
+    const currentState = inputStateCache.current.get(currentInputKey);
+    if (previousKey.startsWith("new:") && session?.id && previousState?.fileReferences?.length && !currentState?.fileReferences?.length) {
+      inputStateCache.current.set(currentInputKey, {
+        value: currentState?.value ?? "",
+        attachedImages: currentState?.attachedImages ?? [],
+        selectedSkill: currentState?.selectedSkill ?? null,
+        fileReferences: previousState.fileReferences,
+      });
+    }
+    previousInputKeyRef.current = currentInputKey;
+  }
   const savedInputState = inputStateCache.current.get(currentInputKey) ?? null;
   const currentInputKeyRef = useRef(currentInputKey);
   currentInputKeyRef.current = currentInputKey;

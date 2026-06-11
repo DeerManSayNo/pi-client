@@ -2,7 +2,7 @@
 
 import { useState, useCallback, useRef, useEffect, useReducer, useMemo } from "react";
 import { getLocalStorageItem } from "@/lib/client-storage";
-import type { AgentMessage, SessionInfo } from "@/lib/types";
+import type { AgentMessage, FileReference, SessionInfo } from "@/lib/types";
 import { normalizeCompletedMessage, normalizeCompletedMessages, normalizeToolCalls } from "@/lib/normalize";
 import { agentEventBus } from "@/lib/agent-event-bus";
 import { sendAgentCommand } from "@/lib/agent-client";
@@ -146,6 +146,7 @@ export interface ChatInputHandle {
   insertText: (text: string) => void;
   insertIfEmpty: (content: string) => void;
   addImages: (files: File[]) => void;
+  addReference: (path: string) => void;
 }
 
 export interface AttachedImage {
@@ -193,6 +194,70 @@ function userContentKey(msg: AgentMessage | Partial<AgentMessage>): string | nul
     return block;
   });
   return JSON.stringify(parts);
+}
+
+function fileReferenceName(filePath: string): string {
+  return filePath.split(/[\\/]/).filter(Boolean).pop() ?? filePath;
+}
+
+function unescapeReferenceText(text: string): string {
+  return text.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+}
+
+function stripAvailableReferencesText(text: string): { text: string; references: FileReference[] } | null {
+  const skillPrefix = text.match(/^(\/skill:[\w-]+)(?:\s|$)([\s\S]*)/);
+  const prefix = skillPrefix ? skillPrefix[1] : "";
+  const body = skillPrefix ? skillPrefix[2] : text;
+  const match = body.match(/^<available_references>\n[\s\S]*?\n((?:- .+\n?)*)<\/available_references>\n*(?:\n)?([\s\S]*)$/);
+  if (!match) return null;
+
+  const references = match[1]
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("- "))
+    .map((line) => {
+      const path = unescapeReferenceText(line.slice(2).trim());
+      return { path, name: fileReferenceName(path) };
+    })
+    .filter((ref) => ref.path.length > 0);
+
+  if (references.length === 0) return null;
+  const rest = match[2].trim();
+  return {
+    text: prefix ? `${prefix}${rest ? ` ${rest}` : ""}` : rest,
+    references,
+  };
+}
+
+function normalizeVisibleUserMessage(msg: AgentMessage): AgentMessage {
+  if (msg.role !== "user") return msg;
+  if (typeof msg.content === "string") {
+    const stripped = stripAvailableReferencesText(msg.content);
+    if (!stripped) return msg;
+    return {
+      ...msg,
+      content: stripped.text,
+      references: msg.references?.length ? msg.references : stripped.references,
+    };
+  }
+  if (!Array.isArray(msg.content)) return msg;
+
+  let references: FileReference[] | undefined;
+  let changed = false;
+  const content = msg.content.map((block) => {
+    if (block.type !== "text") return block;
+    const stripped = stripAvailableReferencesText(block.text);
+    if (!stripped) return block;
+    changed = true;
+    references = stripped.references;
+    return { ...block, text: stripped.text };
+  });
+  if (!changed) return msg;
+  return {
+    ...msg,
+    content,
+    references: msg.references?.length ? msg.references : references,
+  };
 }
 
 function getStreamingContentLength(msg: Partial<AgentMessage> | null | undefined): number {
@@ -653,7 +718,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const completed = event.message as AgentMessage | undefined;
         if (completed) {
           if (completed.role === "assistant") receivedAssistantMessageRef.current = true;
-          const normalized = normalizeCompletedMessage(completed);
+          const normalized = normalizeVisibleUserMessage(normalizeCompletedMessage(completed));
           setMessages((prev) => {
             // We optimistically append the user's prompt in handleSend/handleFollowUp.
             // DeerHux may later emit a message_end for that same user message; don't append it again.
@@ -736,8 +801,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [loadSession, onAgentEnd]);
   handleAgentEventRef.current = handleAgentEvent;
 
-  const handleSend = useCallback(async (message: string, images?: AttachedImage[], roleId?: string) => {
-    if (!message.trim() && !images?.length) return;
+  const handleSend = useCallback(async (message: string, images?: AttachedImage[], roleId?: string, references?: FileReference[]) => {
+    const sentReferences = references?.length ? references : undefined;
+    if (!message.trim() && !images?.length && !sentReferences?.length) return;
     if (agentRunningRef.current) return;
     // Set the ref immediately to prevent duplicate sends before React re-renders
     agentRunningRef.current = true;
@@ -755,6 +821,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       content: imageBlocks?.length
         ? [...(message.trim() ? [{ type: "text" as const, text: message }] : []), ...imageBlocks]
         : message,
+      ...(sentReferences ? { references: sentReferences } : {}),
       timestamp: Date.now(),
     };
     setMessages((prev) => [...prev, userMsg]);
@@ -827,6 +894,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         await sendAgentCommand(realId, {
           type: "prompt",
           message,
+          ...(sentReferences ? { references: sentReferences } : {}),
           ...(piImages?.length ? { images: piImages } : {}),
         });
       } else if (session) {
@@ -834,6 +902,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         await sendAgentCommand(session.id, {
           type: "prompt",
           message,
+          ...(sentReferences ? { references: sentReferences } : {}),
           ...(piImages?.length ? { images: piImages } : {}),
           ...(roleId ? { roleId } : {}),
         });
@@ -934,15 +1003,22 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [isCompacting, loadSession]);
 
-  const handleSteer = useCallback(async (message: string, images?: AttachedImage[]) => {
+  const handleSteer = useCallback(async (message: string, images?: AttachedImage[], references?: FileReference[]) => {
     const sid = sessionIdRef.current;
     if (!sid) return;
-    setMessages((prev) => [...prev, { role: "user", content: `[steer] ${message}`, timestamp: Date.now() } as AgentMessage]);
+    const sentReferences = references?.length ? references : undefined;
+    setMessages((prev) => [...prev, {
+      role: "user",
+      content: `[steer] ${message}`,
+      ...(sentReferences ? { references: sentReferences } : {}),
+      timestamp: Date.now(),
+    } as AgentMessage]);
     const piImages = images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
     try {
       await sendAgentCommand(sid, {
         type: "steer",
         message,
+        ...(sentReferences ? { references: sentReferences } : {}),
         ...(piImages?.length ? { images: piImages } : {}),
       });
     } catch (e) {
@@ -950,10 +1026,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, []);
 
-  const handleFollowUp = useCallback(async (message: string, images?: AttachedImage[]) => {
+  const handleFollowUp = useCallback(async (message: string, images?: AttachedImage[], references?: FileReference[]) => {
     const sid = sessionIdRef.current;
     if (!sid) return;
-    setMessages((prev) => [...prev, { role: "user", content: message, timestamp: Date.now() } as AgentMessage]);
+    const sentReferences = references?.length ? references : undefined;
+    setMessages((prev) => [...prev, {
+      role: "user",
+      content: message,
+      ...(sentReferences ? { references: sentReferences } : {}),
+      timestamp: Date.now(),
+    } as AgentMessage]);
     // Explicitly clear recovery state — a user-initiated follow_up always starts a fresh turn
     autoContinueSentRef.current = false;
     autoContinueInProgressRef.current = false;
@@ -964,6 +1046,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       await sendAgentCommand(sid, {
         type: "follow_up",
         message,
+        ...(sentReferences ? { references: sentReferences } : {}),
         ...(piImages?.length ? { images: piImages } : {}),
       });
     } catch (e) {
