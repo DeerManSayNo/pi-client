@@ -16,6 +16,7 @@ import { ExtensionsConfig } from "./ExtensionsConfig";
 import { LogPanel } from "./LogPanel";
 import { WeChatConfig } from "./WeChatConfig";
 import { getLocalStorageItem } from "@/lib/client-storage";
+import { getRelativeFilePath } from "@/lib/file-paths";
 import { useTheme } from "@/hooks/useTheme";
 import { useEscapeClose } from "@/hooks/useEscapeClose";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -23,7 +24,7 @@ import type { SessionInfo } from "@/lib/types";
 import type { ChatInputHandle } from "./ChatInput";
 
 type DraggableStyle = CSSProperties & { WebkitAppRegion?: "drag" | "no-drag" };
-type SidebarMode = "open" | "compact" | "closed";
+type SidebarMode = "open" | "closed";
 type RunningSessionStatus = {
   sessionId: string;
   isStreaming: boolean;
@@ -93,9 +94,7 @@ export function AppShell() {
   // so handleSelectSession knows when to show a new-session UI vs load from API.
   const placeholderTabIdsRef = useRef<Set<string>>(new Set());
   const [sidebarMode, setSidebarMode] = useState<SidebarMode>("open");
-  const sidebarOpen = sidebarMode !== "closed";
-  const sidebarCompact = sidebarMode === "compact";
-  const SIDEBAR_COMPACT = 56;
+  const sidebarOpen = sidebarMode === "open";
   const SIDEBAR_MIN = 180;
   const SIDEBAR_MAX = 500;
   const [sidebarWidth, setSidebarWidth] = useState<number>(260);
@@ -466,8 +465,17 @@ export function AppShell() {
   }, []);
 
   // ── Sidebar resize handlers ──
-  const handleResizeStart = useCallback((e: React.MouseEvent) => {
+  const finishSidebarResize = useCallback(() => {
+    setIsResizing(false);
+    setSidebarWidth((w) => {
+      if (typeof window !== "undefined") window.localStorage.setItem("deerhux.sidebar-width", String(w));
+      return w;
+    });
+  }, []);
+
+  const handleResizeStart = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
     e.preventDefault();
+    e.currentTarget.setPointerCapture(e.pointerId);
     setIsResizing(true);
     resizeStartX.current = e.clientX;
     resizeStartWidth.current = sidebarWidth;
@@ -475,29 +483,40 @@ export function AppShell() {
 
   useEffect(() => {
     if (!isResizing) return;
-    const handleMove = (e: MouseEvent) => {
+    const handleMove = (e: PointerEvent) => {
       const delta = e.clientX - resizeStartX.current;
       const next = Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, resizeStartWidth.current + delta));
       setSidebarWidth(next);
     };
-    const handleUp = () => {
-      setIsResizing(false);
-      setSidebarWidth((w) => {
-        if (typeof window !== "undefined") window.localStorage.setItem("deerhux.sidebar-width", String(w));
-        return w;
-      });
+    const handleVisibilityChange = () => {
+      if (document.hidden) finishSidebarResize();
     };
-    window.addEventListener("mousemove", handleMove);
-    window.addEventListener("mouseup", handleUp);
+    window.addEventListener("pointermove", handleMove);
+    window.addEventListener("pointerup", finishSidebarResize);
+    window.addEventListener("pointercancel", finishSidebarResize);
+    window.addEventListener("blur", finishSidebarResize);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
     return () => {
-      window.removeEventListener("mousemove", handleMove);
-      window.removeEventListener("mouseup", handleUp);
+      window.removeEventListener("pointermove", handleMove);
+      window.removeEventListener("pointerup", finishSidebarResize);
+      window.removeEventListener("pointercancel", finishSidebarResize);
+      window.removeEventListener("blur", finishSidebarResize);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [isResizing]);
+  }, [finishSidebarResize, isResizing]);
 
   // ── Right panel resize handlers ──
-  const handleRightPanelResizeStart = useCallback((e: React.MouseEvent) => {
+  const finishRightPanelResize = useCallback(() => {
+    setIsResizingRightPanel(false);
+    setRightPanelWidth((w) => {
+      if (typeof window !== "undefined") window.localStorage.setItem("deerhux.right-panel-width", String(w));
+      return w;
+    });
+  }, []);
+
+  const handleRightPanelResizeStart = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
     e.preventDefault();
+    e.currentTarget.setPointerCapture(e.pointerId);
     setIsResizingRightPanel(true);
     rightPanelResizeStartX.current = e.clientX;
     rightPanelResizeStartWidth.current = rightPanelWidth;
@@ -505,25 +524,27 @@ export function AppShell() {
 
   useEffect(() => {
     if (!isResizingRightPanel) return;
-    const handleMove = (e: MouseEvent) => {
+    const handleMove = (e: PointerEvent) => {
       const delta = rightPanelResizeStartX.current - e.clientX;
       const next = Math.min(RIGHT_PANEL_MAX, Math.max(RIGHT_PANEL_MIN, rightPanelResizeStartWidth.current + delta));
       setRightPanelWidth(next);
     };
-    const handleUp = () => {
-      setIsResizingRightPanel(false);
-      setRightPanelWidth((w) => {
-        if (typeof window !== "undefined") window.localStorage.setItem("deerhux.right-panel-width", String(w));
-        return w;
-      });
+    const handleVisibilityChange = () => {
+      if (document.hidden) finishRightPanelResize();
     };
-    window.addEventListener("mousemove", handleMove);
-    window.addEventListener("mouseup", handleUp);
+    window.addEventListener("pointermove", handleMove);
+    window.addEventListener("pointerup", finishRightPanelResize);
+    window.addEventListener("pointercancel", finishRightPanelResize);
+    window.addEventListener("blur", finishRightPanelResize);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
     return () => {
-      window.removeEventListener("mousemove", handleMove);
-      window.removeEventListener("mouseup", handleUp);
+      window.removeEventListener("pointermove", handleMove);
+      window.removeEventListener("pointerup", finishRightPanelResize);
+      window.removeEventListener("pointercancel", finishRightPanelResize);
+      window.removeEventListener("blur", finishRightPanelResize);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [isResizingRightPanel]);
+  }, [finishRightPanelResize, isResizingRightPanel]);
 
   const handleSessionDeleted = useCallback((sessionId: string) => {
     setRefreshKey((k) => k + 1);
@@ -544,6 +565,17 @@ export function AppShell() {
     setActiveFileTabId(tabId);
     setRightPanelOpen(true);
   }, []);
+
+  const handleSelectFileTab = useCallback((tabId: string) => {
+    if (rightPanelOpen && tabId === activeFileTabId && tabId !== "__log__") {
+      const tab = fileTabs.find((t) => t.id === tabId);
+      if (tab) {
+        chatInputRef.current?.toggleReference(getRelativeFilePath(tab.filePath, effectiveProjectCwd ?? undefined));
+        return;
+      }
+    }
+    setActiveFileTabId(tabId);
+  }, [activeFileTabId, effectiveProjectCwd, fileTabs, rightPanelOpen]);
 
   const handleAgentEnd = useCallback((sessionId: string, changedFiles?: string[]) => {
     setSessionRunning(sessionId, false);
@@ -696,8 +728,8 @@ export function AppShell() {
   const sidebarContent = (
     <div
       style={{
-        width: sidebarCompact ? SIDEBAR_COMPACT : "100%",
-        minWidth: sidebarCompact ? SIDEBAR_COMPACT : "100%",
+        width: "100%",
+        minWidth: "100%",
         height: "100%",
         display: "flex",
         flexDirection: "column",
@@ -720,10 +752,9 @@ export function AppShell() {
         onOpenFile={handleOpenFile}
         explorerRefreshKey={explorerRefreshKey}
         onAtMention={handleAtMention}
-        compact={sidebarCompact}
         onProjectsChange={handleProjectsChange}
       />
-      <div style={{ padding: sidebarCompact ? "8px 0" : "8px", flexShrink: 0, display: "flex", flexDirection: sidebarCompact ? "column" : "row", alignItems: "center", justifyContent: sidebarCompact ? "center" : "space-between", gap: 4 }}>
+      <div style={{ padding: "8px", flexShrink: 0, display: "flex", flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 4 }}>
         {([
           {
             label: "模型配置",
@@ -809,19 +840,18 @@ export function AppShell() {
             title={label}
             aria-label={label}
             style={{
-              flex: sidebarCompact ? "0 0 auto" : 1,
-              width: sidebarCompact ? 30 : undefined,
-              height: sidebarCompact ? 30 : 32,
-              display: "flex", alignItems: "center", justifyContent: "center", gap: sidebarCompact ? 0 : 6,
+              flex: 1,
+              height: 32,
+              display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
               padding: 0,
-              background: sidebarCompact ? "var(--bg-hover)" : "none",
-              border: sidebarCompact ? "1px solid var(--border)" : "none",
-              borderRadius: sidebarCompact ? 999 : 9, color: "var(--text-muted)", cursor: disabled ? "default" : "pointer",
+              background: "none",
+              border: "none",
+              borderRadius: 9, color: "var(--text-muted)", cursor: disabled ? "default" : "pointer",
               fontSize: 12, opacity: disabled ? 0.35 : 1,
               transition: "background 0.12s, color 0.12s",
             }}
             onMouseEnter={(e) => { if (!disabled) { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text)"; } }}
-            onMouseLeave={(e) => { e.currentTarget.style.background = sidebarCompact ? "var(--bg-hover)" : "none"; e.currentTarget.style.color = "var(--text-muted)"; }}
+            onMouseLeave={(e) => { e.currentTarget.style.background = "none"; e.currentTarget.style.color = "var(--text-muted)"; }}
           >
             {icon}
           </button>
@@ -908,9 +938,9 @@ export function AppShell() {
       <div data-tauri-drag-region style={{ fontSize: 13, fontWeight: 700, color: "var(--text)", opacity: 0.85, pointerEvents: "none" }}>DeerHux</div>
       <button
         data-tauri-drag-region="false"
-        onClick={() => setSidebarMode((mode) => mode === "open" ? "compact" : mode === "compact" ? "closed" : "open")}
-        title={sidebarMode === "open" ? "收缩侧边栏" : sidebarMode === "compact" ? "隐藏侧边栏" : "显示侧边栏"}
-        aria-label={sidebarMode === "open" ? "收缩侧边栏" : sidebarMode === "compact" ? "隐藏侧边栏" : "显示侧边栏"}
+        onClick={() => setSidebarMode((mode) => mode === "open" ? "closed" : "open")}
+        title={sidebarOpen ? "收起侧边栏" : "展开侧边栏"}
+        aria-label={sidebarOpen ? "收起侧边栏" : "展开侧边栏"}
         aria-pressed={sidebarOpen}
         style={{
           position: "absolute",
@@ -933,13 +963,9 @@ export function AppShell() {
         onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; e.currentTarget.style.background = "var(--bg-hover)"; }}
         onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-muted)"; e.currentTarget.style.background = "transparent"; }}
       >
-        {sidebarMode === "closed" ? (
+        {!sidebarOpen ? (
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
             <line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="18" x2="21" y2="18" />
-          </svg>
-        ) : sidebarMode === "compact" ? (
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="6.5" y1="3" x2="6.5" y2="21" />
           </svg>
         ) : (
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -1345,10 +1371,10 @@ export function AppShell() {
 
       {/* Left sidebar */}
       <div
-        className={`sidebar-container${sidebarOpen ? " sidebar-open" : " sidebar-closed"}${sidebarCompact ? " sidebar-compact" : ""}`}
+        className={`sidebar-container${sidebarOpen ? " sidebar-open" : " sidebar-closed"}`}
         style={{
-          width: sidebarMode === "closed" ? 0 : sidebarCompact ? SIDEBAR_COMPACT : sidebarWidth,
-          minWidth: sidebarMode === "closed" ? 0 : sidebarCompact ? SIDEBAR_COMPACT : SIDEBAR_MIN,
+          width: sidebarOpen ? sidebarWidth : 0,
+          minWidth: sidebarOpen ? SIDEBAR_MIN : 0,
           background: "var(--bg-panel)",
           borderRight: "1px solid var(--border)",
           display: "flex",
@@ -1364,10 +1390,11 @@ export function AppShell() {
       {/* Resize handle */}
       {sidebarMode === "open" && (
         <div
-          onMouseDown={handleResizeStart}
+          onPointerDown={handleResizeStart}
           style={{
             width: 5,
             cursor: "col-resize",
+            touchAction: "none",
             flexShrink: 0,
             background: isResizing ? "var(--accent)" : "transparent",
             transition: isResizing ? "none" : "background 0.15s",
@@ -1938,10 +1965,11 @@ export function AppShell() {
       {/* Right panel resize handle */}
       {rightPanelOpen && (
         <div
-          onMouseDown={handleRightPanelResizeStart}
+          onPointerDown={handleRightPanelResizeStart}
           style={{
             width: 5,
             cursor: "col-resize",
+            touchAction: "none",
             flexShrink: 0,
             background: isResizingRightPanel ? "var(--accent)" : "transparent",
             transition: isResizingRightPanel ? "none" : "background 0.15s",
@@ -1975,7 +2003,7 @@ export function AppShell() {
               ...fileTabs,
             ]}
             activeTabId={activeFileTabId ?? (logPanelOpen ? "__log__" : "")}
-            onSelectTab={(id) => setActiveFileTabId(id)}
+            onSelectTab={handleSelectFileTab}
             onCloseTab={handleCloseFileTab}
             onCloseTabs={handleCloseFileTabs}
             cwd={effectiveProjectCwd ?? undefined}

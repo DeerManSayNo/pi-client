@@ -687,6 +687,8 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, onAgentEnd, on
   const shouldAutoScrollRef = useRef(true);
   const userScrollIntentRef = useRef(false);
   const userScrollIntentTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const prevScrollTopRef = useRef(0);
+  const scrollDirectionRef = useRef<"content-up" | "content-down" | null>(null);
 
   const markUserScrollIntent = useCallback(() => {
     userScrollIntentRef.current = true;
@@ -738,6 +740,13 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, onAgentEnd, on
     const container = scrollContainerRef.current;
     if (!container) return;
 
+    const currentScrollTop = container.scrollTop;
+    const scrollDelta = currentScrollTop - prevScrollTopRef.current;
+    if (scrollDelta > 0) scrollDirectionRef.current = "content-up";
+    if (scrollDelta < 0) scrollDirectionRef.current = "content-down";
+    const isContentMovingDown = scrollDirectionRef.current === "content-down";
+    prevScrollTopRef.current = currentScrollTop;
+
     const nearBottom = isNearBottom();
     if (nearBottom) {
       setAutoScroll(true);
@@ -754,31 +763,36 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, onAgentEnd, on
       setAutoScroll(false);
     }
 
+    const containerTop = container.getBoundingClientRect().top;
+
+    if (isContentMovingDown) {
+      // 内容往下回滚时，视野内第一条 user 消息出现后，显示它前面的 user 消息。
+      const containerBottom = container.getBoundingClientRect().bottom;
+      for (let i = 0; i < userMsgIndices.length; i++) {
+        const msgIdx = userMsgIndices[i];
+        const refIdx = userMsgIdxToRefIdx.get(msgIdx);
+        if (refIdx === undefined) continue;
+        const el = messageRefs.current[refIdx];
+        if (!el) continue;
+
+        const rect = el.getBoundingClientRect();
+        if (rect.bottom > containerTop && rect.top < containerBottom) {
+          const previousMsgIdx = userMsgIndices[Math.max(0, i - 1)];
+          setPinnedUserMsgIdx((prev) => prev !== previousMsgIdx ? previousMsgIdx : prev);
+          return;
+        }
+      }
+    }
+
     // 根据滚动位置更新钉住的 user 消息：
     // 从旧到新遍历，找第一条顶部仍在容器顶部之下的消息
-    const containerTop = container.getBoundingClientRect().top;
     for (let i = 0; i < userMsgIndices.length; i++) {
       const msgIdx = userMsgIndices[i];
       const refIdx = userMsgIdxToRefIdx.get(msgIdx);
       if (refIdx === undefined) continue;
       const el = messageRefs.current[refIdx];
       if (el && el.getBoundingClientRect().top >= containerTop) {
-        // 第一条满足条件的就是最旧的 user 消息
-        if (i === 0) {
-          // 还需确认最后一条也在容器下方 → 用户确实在底部附近
-          const lastIdx = userMsgIndices[userMsgIndices.length - 1];
-          const lastRefIdx = userMsgIdxToRefIdx.get(lastIdx);
-          const lastEl = lastRefIdx !== undefined ? messageRefs.current[lastRefIdx] : null;
-          if (lastEl && lastEl.getBoundingClientRect().top >= containerTop) {
-            // 最后一条也在下方 → 用户在底部，显示最后一条
-            setPinnedUserMsgIdx((prev) => prev !== lastIdx ? lastIdx : prev);
-          } else {
-            // 只有第一条在下方 → 用户真的滚到了第一条
-            setPinnedUserMsgIdx((prev) => prev !== msgIdx ? msgIdx : prev);
-          }
-        } else {
-          setPinnedUserMsgIdx((prev) => prev !== msgIdx ? msgIdx : prev);
-        }
+        setPinnedUserMsgIdx((prev) => prev !== msgIdx ? msgIdx : prev);
         return;
       }
     }
@@ -792,6 +806,8 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, onAgentEnd, on
 
   useEffect(() => {
     setAutoScroll(true);
+    prevScrollTopRef.current = scrollContainerRef.current?.scrollTop ?? 0;
+    scrollDirectionRef.current = null;
   }, [session?.id, isNew, setAutoScroll]);
 
   useEffect(() => {
