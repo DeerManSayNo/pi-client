@@ -121,7 +121,7 @@ function fetchModels(): Promise<ModelsResponse> {
 }
 
 export type AgentPhase =
-  | { kind: "waiting_model" }
+  | { kind: "waiting_model"; reason: "initial" | "after_message" | "after_tool" | "restored" | "recovery" }
   | { kind: "running_tools"; tools: { id: string; name: string }[] }
   | null;
 
@@ -619,7 +619,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         resetTurnTracking();
         awaitingAgentStartRef.current = false;
         setAgentRunning(true);
-        setAgentPhase({ kind: "waiting_model" });
+        setAgentPhase({ kind: "waiting_model", reason: "initial" });
         dispatch({ type: "start" });
         break;
       case "agent_end": {
@@ -716,8 +716,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       case "message_end": {
         const completed = event.message as AgentMessage | undefined;
+        const completedRole = completed?.role;
         if (completed) {
-          if (completed.role === "assistant") receivedAssistantMessageRef.current = true;
+          if (completedRole === "assistant") receivedAssistantMessageRef.current = true;
           const normalized = normalizeVisibleUserMessage(normalizeCompletedMessage(completed));
           setMessages((prev) => {
             // We optimistically append the user's prompt in handleSend/handleFollowUp.
@@ -733,7 +734,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           });
         }
         dispatch({ type: "reset" });
-        setAgentPhase({ kind: "waiting_model" });
+        setAgentPhase({ kind: "waiting_model", reason: completedRole === "assistant" ? "after_message" : "initial" });
         break;
       }
       case "tool_execution_start": {
@@ -751,7 +752,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         setAgentPhase((prev) => {
           if (prev?.kind !== "running_tools") return prev;
           const tools = prev.tools.filter((t) => t.id !== id);
-          if (tools.length === 0) return { kind: "waiting_model" };
+          if (tools.length === 0) return { kind: "waiting_model", reason: "after_tool" };
           return { kind: "running_tools", tools };
         });
         break;
@@ -826,7 +827,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     };
     setMessages((prev) => [...prev, userMsg]);
     setAgentRunning(true);
-    setAgentPhase({ kind: "waiting_model" });
+    setAgentPhase({ kind: "waiting_model", reason: "initial" });
     dispatch({ type: "start" });
     pendingScrollToUserRef.current = true;
 
@@ -1093,7 +1094,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     turnIdRef.current += 1;
     resetTurnTracking();
     setRetryInfo(null);
-    setAgentPhase({ kind: "waiting_model" });
+    setAgentPhase({ kind: "waiting_model", reason: "recovery" });
     dispatch({ type: "reset" });
     dispatch({ type: "start" });
 
@@ -1492,7 +1493,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (agentState.state?.isRunning !== false) {
           agentRunningRef.current = true;
           setAgentRunning(true);
-          setAgentPhase({ kind: "waiting_model" });
+          setAgentPhase({ kind: "waiting_model", reason: "restored" });
         }
       }
       if (agentState?.state) {

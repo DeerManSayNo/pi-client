@@ -40,7 +40,21 @@ interface Props {
   onOpenRoleConfig?: () => void;
 }
 
-function phaseLabel(phase: AgentPhase): string {
+function phaseLabel(
+  phase: AgentPhase,
+  opts: {
+    serverStatus: ServerStatus | null;
+    retryInfo: { attempt: number; maxAttempts: number; errorMessage?: string } | null;
+    isCompacting: boolean;
+    stallLevel: string | null;
+  }
+): string {
+  const { serverStatus, retryInfo, isCompacting, stallLevel } = opts;
+  if (isCompacting) return "正在压缩上下文...";
+  if (retryInfo) return `模型连接异常，正在第 ${retryInfo.attempt}/${retryInfo.maxAttempts} 次重试...`;
+  if (stallLevel === "recovering") return "正在恢复连接并续写...";
+  if (stallLevel === "warning") return "响应停滞，正在检查连接...";
+
   if (phase?.kind === "running_tools") {
     const names = phase.tools.map((t) => t.name);
     if (names.length === 0) return "正在运行工具...";
@@ -48,7 +62,52 @@ function phaseLabel(phase: AgentPhase): string {
     if (names.length <= 3) return `正在运行 ${names.join(", ")}...`;
     return `正在运行 ${names.slice(0, 2).join(", ")} (+${names.length - 2})...`;
   }
-  if (phase?.kind === "waiting_model") return "正在等待模型响应...";
+
+  if (phase?.kind === "waiting_model") {
+    switch (phase.reason) {
+      case "initial":
+        return "已发送请求，等待模型开始输出...";
+      case "after_message":
+        return "回复已生成，正在等待回合收尾...";
+      case "after_tool":
+        return "工具已完成，等待模型继续...";
+      case "recovery":
+        return "正在恢复连接并续写...";
+      case "restored":
+        break;
+    }
+
+    switch (serverStatus?.lastEventType) {
+      case "agent_start":
+      case "connected":
+        return "已发送请求，等待模型开始输出...";
+      case "message_start":
+      case "message_update":
+        return "正在接收模型输出...";
+      case "message_end":
+        return "回复已生成，正在等待回合收尾...";
+      case "tool_execution_start":
+        return "工具已启动，等待执行结果...";
+      case "tool_execution_end":
+        return "工具已完成，等待模型继续...";
+      case "agent_end":
+        return "回合已结束，正在刷新界面状态...";
+      case "auto_retry_start":
+        return "模型连接异常，等待自动重试...";
+      case "auto_retry_end":
+        return "自动重试结束，正在同步状态...";
+      case "compaction_start":
+      case "auto_compaction_start":
+        return "正在压缩上下文...";
+      case "compaction_end":
+      case "auto_compaction_end":
+        return "上下文压缩完成，正在继续回合...";
+      default:
+        if (serverStatus?.isStreaming) return "正在接收模型事件...";
+        if (serverStatus?.isRunning) return "正在等待下一步事件...";
+        return "正在刷新会话状态...";
+    }
+  }
   return "正在思考...";
 }
 
@@ -1170,7 +1229,7 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, onAgentEnd, on
             {agentRunning && !streamState.streamingMessage && (
               <div className="py-2 text-[13px] text-text-muted">
                 <div className="flex items-center gap-0 flex-wrap">
-                  <span className="animate-[pulse_1.5s_infinite] shrink-0">{phaseLabel(agentPhase)}</span>
+                  <span className="animate-[pulse_1.5s_infinite] shrink-0">{phaseLabel(agentPhase, { serverStatus, retryInfo, isCompacting, stallLevel })}</span>
                   <AgentStatusTicker
                     serverStatus={serverStatus}
                     watchdog={watchdogInfo}
