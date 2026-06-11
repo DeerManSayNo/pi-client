@@ -119,6 +119,11 @@ function normalizeEditableText(text: string): string {
   return text.replace(/\u00a0/g, " ");
 }
 
+function normalizeRenderedPlainText(text: string): string {
+  const normalized = normalizeEditableText(text).replace(/\n{3,}/g, "\n\n").trimEnd();
+  return normalized ? `${normalized}\n` : "";
+}
+
 function serializeInlineMarkdown(node: Node): string {
   if (node.nodeType === Node.TEXT_NODE) {
     return normalizeEditableText(node.textContent ?? "");
@@ -674,14 +679,23 @@ function EditableMarkdownPreview({
   cwd,
   onChange,
   uploadImage,
+  previewRootRef,
 }: {
   content: string;
   filePath: string;
   cwd?: string;
   onChange: (content: string) => void;
   uploadImage: (file: File) => Promise<{ markdownPath: string; url: string }>;
+  previewRootRef?: { current: HTMLDivElement | null };
 }) {
   const rootRef = useRef<HTMLDivElement | null>(null);
+
+  const setRootElement = useCallback((element: HTMLDivElement | null) => {
+    rootRef.current = element;
+    if (previewRootRef) {
+      previewRootRef.current = element;
+    }
+  }, [previewRootRef]);
 
   const emitChange = useCallback(() => {
     if (!rootRef.current) return;
@@ -751,7 +765,7 @@ function EditableMarkdownPreview({
 
   return (
     <div
-      ref={rootRef}
+      ref={setRootElement}
       className="markdown-body markdown-file-preview markdown-editable-preview"
       contentEditable
       suppressContentEditableWarning
@@ -1231,6 +1245,8 @@ function TextFileViewer({ filePath, cwd }: Props) {
   const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const latestContentRef = useRef("");
+  const markdownPreviewRootRef = useRef<HTMLDivElement | null>(null);
+  const htmlPreviewFrameRef = useRef<HTMLIFrameElement | null>(null);
 
   const fetchContent = useCallback((filePath: string, isRefresh = false) => {
     const encoded = encodeFilePathForApi(filePath);
@@ -1265,7 +1281,13 @@ function TextFileViewer({ filePath, cwd }: Props) {
   const copyFullText = useCallback(async () => {
     if (!data) return;
     try {
-      await navigator.clipboard.writeText(latestContentRef.current || data.content);
+      const renderedText =
+        data.language === "markdown" && previewMode && markdownPreviewRootRef.current
+          ? normalizeRenderedPlainText(markdownPreviewRootRef.current.innerText)
+          : data.language === "html" && previewMode
+          ? normalizeRenderedPlainText(htmlPreviewFrameRef.current?.contentDocument?.body?.innerText ?? "")
+          : "";
+      await navigator.clipboard.writeText(renderedText || latestContentRef.current || data.content);
       setCopiedFullText(true);
       if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
       copyTimerRef.current = setTimeout(() => setCopiedFullText(false), 1500);
@@ -1541,6 +1563,7 @@ function TextFileViewer({ filePath, cwd }: Props) {
           <DiffView oldContent={prevContent!} newContent={sourceContent} language={data.language} />
         ) : isHtml && previewMode ? (
           <iframe
+            ref={htmlPreviewFrameRef}
             srcDoc={data.content}
             sandbox="allow-scripts"
             style={{ width: "100%", height: "100%", border: "none", background: "var(--bg)" }}
@@ -1553,6 +1576,7 @@ function TextFileViewer({ filePath, cwd }: Props) {
             cwd={cwd}
             onChange={scheduleMarkdownSave}
             uploadImage={uploadMarkdownImage}
+            previewRootRef={markdownPreviewRootRef}
           />
         ) : (
           <SyntaxHighlighter
