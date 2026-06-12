@@ -1,0 +1,187 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1260" viewBox="0 0 1600 1260" role="img" aria-labelledby="title desc">
+  <title id="title">DeerHux Prompt &#32452;&#35013;&#26550;&#26500;&#22270;</title>
+  <desc id="desc">&#30475;&#28165; system prompt&#12289;turn_context &#21644; user prompt &#22914;&#20309;&#36827;&#20837; inner.prompt()</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#f8fafc"/>
+      <stop offset="100%" stop-color="#eef2ff"/>
+    </linearGradient>
+    <filter id="shadow" x="-8%" y="-8%" width="116%" height="124%">
+      <feDropShadow dx="0" dy="8" stdDeviation="8" flood-color="#0f172a" flood-opacity="0.12"/>
+    </filter>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#334155"/>
+    </marker>
+    <marker id="arrow-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#2563eb"/>
+    </marker>
+    <marker id="arrow-pink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#db2777"/>
+    </marker>
+    <style>
+      .page { fill: url(#bg); }
+      .lane { fill: rgba(255,255,255,0.64); stroke: #cbd5e1; stroke-width: 1; }
+      .box { rx: 18; filter: url(#shadow); stroke-width: 1.4; }
+      .input { fill: #dbeafe; stroke: #60a5fa; }
+      .base { fill: #dcfce7; stroke: #22c55e; }
+      .turn { fill: #fef3c7; stroke: #f59e0b; }
+      .final { fill: #fce7f3; stroke: #f472b6; }
+      .note { fill: #ffffff; stroke: #94a3b8; stroke-width: 1.2; filter: url(#shadow); }
+      .title { font: 800 32px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #0f172a; }
+      .subtitle { font: 500 16px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #475569; }
+      .lane-title { font: 800 17px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #334155; letter-spacing: .04em; }
+      .box-title { font: 800 17px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #0f172a; }
+      .box-text { font: 13px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #334155; }
+      .small { font: 12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #64748b; }
+      .mono { font: 12px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; fill: #334155; }
+      .arrow { fill: none; stroke: #334155; stroke-width: 2.1; marker-end: url(#arrow); }
+      .arrow-blue { fill: none; stroke: #2563eb; stroke-width: 2.3; marker-end: url(#arrow-blue); }
+      .arrow-pink { fill: none; stroke: #db2777; stroke-width: 2.3; marker-end: url(#arrow-pink); }
+      .dash { stroke-dasharray: 7 6; }
+      .num-bg { fill: #eff6ff; stroke: #93c5fd; }
+      .num { fill: #1d4ed8; font: 800 12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    </style>
+  </defs>
+
+  <rect class="page" x="0" y="0" width="1600" height="1260"/>
+  <text class="title" x="60" y="58">DeerHux Prompt &#32452;&#35013;&#26550;&#26500;&#22270;</text>
+  <text class="subtitle" x="60" y="88">&#30475;&#28165; system prompt&#12289;turn_context &#21644; user prompt &#22914;&#20309;&#36827;&#20837; inner.prompt()</text>
+
+  <rect class="lane" x="40" y="125" width="350" height="950" rx="26"/>
+  <rect class="lane" x="420" y="125" width="390" height="950" rx="26"/>
+  <rect class="lane" x="840" y="125" width="360" height="950" rx="26"/>
+  <rect class="lane" x="1230" y="125" width="330" height="950" rx="26"/>
+
+  <text class="lane-title" x="70" y="160">&#21069;&#31471;&#36755;&#20837;</text>
+  <text class="lane-title" x="450" y="160">&#38271;&#26399; SYSTEM PROMPT</text>
+  <text class="lane-title" x="870" y="160">&#26412;&#36718;&#32452;&#35013;</text>
+  <text class="lane-title" x="1260" y="160">&#26368;&#32456;&#27169;&#22411;&#35843;&#29992;</text>
+
+  <rect class="box input" x="70" y="195" width="290" height="190"/>
+  <text class="box-title" x="94" y="228">ChatInput / useAgentSession</text>
+  <text class="box-text" x="94" y="258">&#29992;&#25143;&#36755;&#20837;&#23383;&#27573;</text>
+  <text class="mono" x="112" y="283">message &#21407;&#25991;</text>
+  <text class="mono" x="112" y="307">images &#38468;&#20214;</text>
+  <text class="mono" x="112" y="331">references &#25991;&#20214;&#24341;&#29992;</text>
+  <text class="mono" x="112" y="355">skill &#36873;&#25321;</text>
+  <text class="mono" x="112" y="379">roleId / agentMode / model</text>
+
+  <rect class="box input" x="70" y="430" width="290" height="160"/>
+  <text class="box-title" x="94" y="463">&#21457;&#36865;&#36335;&#24452;</text>
+  <text class="box-text" x="94" y="493">&#26032;&#20250;&#35805;: &#20808; POST /api/agent/new</text>
+  <text class="mono" x="112" y="518">type=create</text>
+  <text class="box-text" x="94" y="548">&#24050;&#26377;&#20250;&#35805;: POST /api/agent/[id]</text>
+  <text class="mono" x="112" y="573">type=prompt</text>
+
+  <rect class="box input" x="70" y="650" width="290" height="170"/>
+  <text class="box-title" x="94" y="683">UI / &#21382;&#21490;&#26174;&#31034;&#19981;&#26159;&#27169;&#22411;&#36755;&#20837;</text>
+  <text class="box-text" x="94" y="713">&#21069;&#31471;&#20808;&#20048;&#35266;&#36861;&#21152; userMsg</text>
+  <text class="box-text" x="94" y="738">appendDisplayUserMessage(...)</text>
+  <text class="box-text" x="94" y="763">&#34917;&#21457; message_end/user &#20107;&#20214;&#21435;&#37325;</text>
+  <text class="small" x="94" y="792">displayMessage &#21487;&#33021;&#21644;&#30495;&#27491;&#21457;&#32473;&#27169;&#22411;&#30340; message &#19981;&#19968;&#33268;</text>
+
+  <rect class="box base" x="450" y="195" width="330" height="190"/>
+  <text class="box-title" x="474" y="228">&#21019;&#24314; / &#22797;&#29992; AgentSession</text>
+  <text class="mono" x="474" y="258">startRpcSession()</text>
+  <text class="box-text" x="492" y="283">SessionManager create/open</text>
+  <text class="box-text" x="492" y="307">toolsOption + customTools</text>
+  <text class="box-text" x="492" y="331">createAgentSession()</text>
+  <text class="box-text" x="492" y="355">SDK &#29983;&#25104;&#21021;&#22987; system prompt</text>
+  <text class="small" x="492" y="379">all tools off &#26102;&#28165;&#31354; system prompt</text>
+
+  <rect class="box base" x="450" y="430" width="330" height="150"/>
+  <text class="box-title" x="474" y="463">Wrapper &#26500;&#36896;&#26102;&#20445;&#23384;&#22522;&#24231;</text>
+  <text class="mono" x="474" y="493">baseSystemPrompt =</text>
+  <text class="mono" x="492" y="517">stripModePrompt(inner.agent.state.systemPrompt)</text>
+  <text class="small" x="474" y="548">&#20043;&#21518;&#27599;&#27425; applyRolePrompt() &#37117;&#20174;&#36825;&#20010;&#22522;&#24231;&#37325;&#24314;</text>
+
+  <rect class="box base" x="450" y="630" width="330" height="310"/>
+  <text class="box-title" x="474" y="663">&#38271;&#26399; system prompt &#37325;&#24314;&#39034;&#24207;</text>
+  <text class="box-text" x="474" y="693">1. applyRolePromptConfigToPrompt(base, roleId)</text>
+  <text class="small" x="494" y="717">&#25353;&#35282;&#33394;&#37197;&#32622;&#24320;&#20851; sections</text>
+  <text class="small" x="494" y="740">identity / tools / guidelines / project_context</text>
+  <text class="small" x="494" y="763">skills / mcp_tools / date_cwd / global_memory</text>
+  <text class="box-text" x="474" y="793">2. applyModePrompt()</text>
+  <text class="small" x="494" y="817">&#27880;&#20837; Ask / Plan / Agent &#27169;&#24335;&#32422;&#26463;</text>
+  <text class="box-text" x="474" y="847">3. applyRolePromptToSystemPrompt()</text>
+  <text class="small" x="494" y="871">&#36861;&#21152;&#35282;&#33394;&#35774;&#23450;&#12289;&#35282;&#33394; blocks&#12289;&#20020;&#26102;&#35774;&#23450;</text>
+  <text class="box-text" x="474" y="901">4. setEffectiveSystemPrompt()</text>
+  <text class="small" x="494" y="925">&#21516;&#26102;&#20889; agent.state.systemPrompt &#21644; _baseSystemPrompt</text>
+
+  <rect class="box turn" x="870" y="195" width="300" height="120"/>
+  <text class="box-title" x="894" y="228">send({ type: prompt })</text>
+  <text class="box-text" x="894" y="258">&#22914;&#26524;&#24102; roleId&#65292;&#20808; set_role</text>
+  <text class="box-text" x="894" y="283">&#24182;&#37325;&#24314;&#38271;&#26399; system prompt</text>
+
+  <rect class="box turn" x="870" y="365" width="300" height="190"/>
+  <text class="box-title" x="894" y="398">prepareTurnContext()</text>
+  <text class="box-text" x="894" y="428">&#35299;&#26512; /skill:name</text>
+  <text class="box-text" x="894" y="452">&#21152;&#36733; skill &#25991;&#20214;&#20869;&#23481;</text>
+  <text class="box-text" x="894" y="476">&#35268;&#33539;&#21270; references</text>
+  <text class="box-text" x="894" y="500">&#29983;&#25104; displayMessage</text>
+  <text class="box-text" x="894" y="524">&#29983;&#25104;&#23454;&#38469; message</text>
+
+  <rect class="box turn" x="870" y="600" width="300" height="230"/>
+  <text class="box-title" x="894" y="633">buildTurnSystemPromptBlock()</text>
+  <text class="mono" x="894" y="663">&lt;turn_context&gt;</text>
+  <text class="mono" x="912" y="687">Current turn mode</text>
+  <text class="mono" x="912" y="711">selected references</text>
+  <text class="mono" x="912" y="735">selected_skill &#20840;&#25991;</text>
+  <text class="mono" x="894" y="759">&lt;/turn_context&gt;</text>
+  <text class="small" x="894" y="790">&#27880;&#24847;: &#24341;&#29992;&#21644;&#25216;&#33021;&#20869;&#23481;&#36827;&#20837;&#26412;&#36718; system prompt</text>
+  <text class="small" x="894" y="812">&#19981;&#30452;&#25509;&#25340;&#21040; user message</text>
+
+  <rect class="box turn" x="870" y="875" width="300" height="140"/>
+  <text class="box-title" x="894" y="908">prepareImageFallback()</text>
+  <text class="box-text" x="894" y="938">&#27169;&#22411;&#25903;&#25345;&#22270;&#29255;: images option</text>
+  <text class="box-text" x="894" y="963">&#27169;&#22411;&#19981;&#25903;&#25345;&#22270;&#29255;:</text>
+  <text class="small" x="912" y="988">&#35843; MCP &#35782;&#22270;&#24182;&#25226; &lt;image_context&gt; &#36861;&#21152;&#21040; user message</text>
+
+  <rect class="box final" x="1260" y="195" width="270" height="170"/>
+  <text class="box-title" x="1284" y="228">withTemporarySystemPrompt()</text>
+  <text class="box-text" x="1284" y="258">currentSystemPrompt</text>
+  <text class="box-text" x="1284" y="282">+ turn_context</text>
+  <text class="box-text" x="1284" y="312">&#20020;&#26102; setEffectiveSystemPrompt(next)</text>
+  <text class="small" x="1284" y="342">finally applyRolePrompt() &#24674;&#22797;&#38271;&#26399; system prompt</text>
+
+  <rect class="box final" x="1260" y="430" width="270" height="300"/>
+  <text class="box-title" x="1284" y="463">inner.prompt(prepared.message, { images? })</text>
+  <text class="box-text" x="1284" y="498">System &#36755;&#20837;</text>
+  <text class="small" x="1304" y="522">&#38271;&#26399; system prompt</text>
+  <text class="small" x="1304" y="545">+ &#26412;&#36718; turn_context</text>
+  <text class="box-text" x="1284" y="585">User &#36755;&#20837;</text>
+  <text class="small" x="1304" y="609">&#28165;&#29702;&#21518;&#30340; message</text>
+  <text class="small" x="1304" y="632">+ &#21487;&#36873; image_context</text>
+  <text class="box-text" x="1284" y="672">Images &#36755;&#20837;</text>
+  <text class="small" x="1304" y="696">&#27169;&#22411;&#25903;&#25345;&#22270;&#29255;&#26102;&#20316;&#20026; options.images &#20256;&#20837;</text>
+
+  <rect class="note" x="1260" y="805" width="270" height="190" rx="18"/>
+  <text class="box-title" x="1284" y="838">&#20851;&#38190;&#32467;&#35770;</text>
+  <text class="small" x="1284" y="868">System prompt = SDK &#21021;&#22987; prompt + sections &#37197;&#32622;</text>
+  <text class="small" x="1284" y="891">+ mode &#32422;&#26463; + role profile + &#26412;&#36718; turn_context</text>
+  <text class="small" x="1284" y="925">User prompt = &#29992;&#25143;&#25991;&#26412;&#21435;&#25481; /skill &#21069;&#32512;</text>
+  <text class="small" x="1284" y="948">+ &#21487;&#36873; MCP &#29983;&#25104;&#30340; image_context</text>
+  <text class="small" x="1284" y="980">&#27599;&#36718;&#32467;&#26463;&#21518;&#65292;turn_context &#34987;&#31227;&#38500;</text>
+
+  <circle class="num-bg" cx="405" cy="505" r="14"/><text class="num" x="401" y="510">1</text>
+  <path class="arrow-blue" d="M 360 505 C 390 505, 415 290, 450 290"/>
+
+  <circle class="num-bg" cx="825" cy="255" r="14"/><text class="num" x="821" y="260">2</text>
+  <path class="arrow" d="M 780 290 C 810 290, 830 255, 870 255"/>
+
+  <circle class="num-bg" cx="825" cy="700" r="14"/><text class="num" x="821" y="705">3</text>
+  <path class="arrow" d="M 780 785 C 815 785, 830 700, 870 700"/>
+
+  <circle class="num-bg" cx="1215" cy="288" r="14"/><text class="num" x="1211" y="293">4</text>
+  <path class="arrow-pink" d="M 1170 715 C 1215 650, 1215 288, 1260 288"/>
+
+  <circle class="num-bg" cx="1215" cy="580" r="14"/><text class="num" x="1211" y="585">5</text>
+  <path class="arrow-pink" d="M 1170 945 C 1210 920, 1215 580, 1260 580"/>
+
+  <path class="arrow-pink dash" d="M 1395 365 L 1395 430"/>
+
+  <rect class="note" x="70" y="1110" width="1460" height="95" rx="20"/>
+  <text class="box-title" x="96" y="1144">&#23454;&#38469;&#25340;&#25509;&#20844;&#24335;</text>
+  <text class="box-text" x="96" y="1175">effectiveSystemPrompt = applyRolePrompt( baseSystemPrompt ) + buildTurnSystemPromptBlock(references, skill, agentMode)</text>
+  <text class="box-text" x="96" y="1198">prepared.message = stripSkillCommand(rawMessage) + optional &lt;image_context source="mcp-vision-fallback"&gt; ... &lt;/image_context&gt;</text>
+</svg>

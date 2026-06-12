@@ -2,11 +2,12 @@
 
 import { useState, useCallback, useRef, useEffect, useReducer, useMemo } from "react";
 import { getLocalStorageItem } from "@/lib/client-storage";
-import type { AgentMessage, FileReference, SessionInfo } from "@/lib/types";
+import type { AgentMessage, FileReference, SessionInfo, SkillReference } from "@/lib/types";
 import { normalizeCompletedMessage, normalizeCompletedMessages, normalizeToolCalls } from "@/lib/normalize";
 import { agentEventBus } from "@/lib/agent-event-bus";
 import { sendAgentCommand } from "@/lib/agent-client";
 import type { ToolEntry } from "@/components/ToolPanel";
+import { extractTurnMode, normalizeAgentMode, stripTurnModeContext, type AgentMode } from "@/lib/agent-modes";
 
 type ToolPreset = "none" | "default" | "full" | "custom";
 const AUTO_CONTINUE_MESSAGE = "请从刚才中断的位置继续，不要重复已经完成的内容。如果上一步有未完成的工具调用或代码修改，请继续完成。";
@@ -65,6 +66,7 @@ export interface SessionData {
     thinkingLevel: string;
     model: { provider: string; modelId: string } | null;
     roleId?: string | null;
+    agentMode?: AgentMode;
   };
 }
 
@@ -159,7 +161,7 @@ function userContentKey(msg: AgentMessage | Partial<AgentMessage>): string | nul
   if (msg.role !== "user") return null;
   const content = (msg as { content?: unknown }).content;
   if (typeof content === "string") {
-    return JSON.stringify([{ type: "text", text: compressSkillText(content).trim() }]);
+    return JSON.stringify([{ type: "text", text: compressSkillText(stripTurnModeContext(content)).trim() }]);
   }
   if (!Array.isArray(content)) return null;
 
@@ -167,7 +169,7 @@ function userContentKey(msg: AgentMessage | Partial<AgentMessage>): string | nul
     if (typeof block !== "object" || block === null || !("type" in block)) return block;
     const blockRecord = block as Record<string, unknown>;
     if (blockRecord.type === "text" && typeof blockRecord.text === "string") {
-      return { type: "text", text: compressSkillText(blockRecord.text).trim() };
+      return { type: "text", text: compressSkillText(stripTurnModeContext(blockRecord.text)).trim() };
     }
     if (blockRecord.type === "image") {
       const source = typeof blockRecord.source === "object" && blockRecord.source !== null
@@ -229,34 +231,57 @@ function stripAvailableReferencesText(text: string): { text: string; references:
   };
 }
 
+function normalizeVisibleUserText(text: string): { text: string; references?: FileReference[]; agentMode?: AgentMode; changed: boolean } {
+  const agentMode = extractTurnMode(text) ?? undefined;
+  const withoutTurnMode = stripTurnModeContext(text);
+  const stripped = stripAvailableReferencesText(withoutTurnMode);
+  if (stripped) {
+    return {
+      text: stripped.text,
+      references: stripped.references,
+      agentMode,
+      changed: true,
+    };
+  }
+  return {
+    text: withoutTurnMode,
+    agentMode,
+    changed: withoutTurnMode !== text,
+  };
+}
+
 function normalizeVisibleUserMessage(msg: AgentMessage): AgentMessage {
   if (msg.role !== "user") return msg;
   if (typeof msg.content === "string") {
-    const stripped = stripAvailableReferencesText(msg.content);
-    if (!stripped) return msg;
+    const normalized = normalizeVisibleUserText(msg.content);
+    if (!normalized.changed && !normalized.agentMode) return msg;
     return {
       ...msg,
-      content: stripped.text,
-      references: msg.references?.length ? msg.references : stripped.references,
+      content: normalized.text,
+      references: msg.references?.length ? msg.references : normalized.references,
+      ...(normalized.agentMode ? { agentMode: normalized.agentMode } : {}),
     };
   }
   if (!Array.isArray(msg.content)) return msg;
 
   let references: FileReference[] | undefined;
+  let agentMode: AgentMode | undefined;
   let changed = false;
   const content = msg.content.map((block) => {
     if (block.type !== "text") return block;
-    const stripped = stripAvailableReferencesText(block.text);
-    if (!stripped) return block;
+    const normalized = normalizeVisibleUserText(block.text);
+    if (normalized.agentMode) agentMode = normalized.agentMode;
+    if (!normalized.changed) return block;
     changed = true;
-    references = stripped.references;
-    return { ...block, text: stripped.text };
+    references = normalized.references;
+    return { ...block, text: normalized.text };
   });
-  if (!changed) return msg;
+  if (!changed && !agentMode) return msg;
   return {
     ...msg,
     content,
     references: msg.references?.length ? msg.references : references,
+    ...(agentMode ? { agentMode } : {}),
   };
 }
 
@@ -322,6 +347,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [autoRecoveryModels, setAutoRecoveryModels] = useState<({ provider: string; modelId: string } | null)[]>([]);
   const [newSessionModel, setNewSessionModelState] = useState<{ provider: string; modelId: string } | null>(null);
   const [toolPreset, setToolPreset] = useState<ToolPreset>("default");
+  const [agentMode, setAgentMode] = useState<AgentMode>("agent");
+  const agentModeRef = useRef<AgentMode>("agent");
+  const [planReady, setPlanReady] = useState(false);
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevelOption>("auto");
   const [retryInfo, setRetryInfo] = useState<{ attempt: number; maxAttempts: number; errorMessage?: string } | null>(null);
   const [contextUsage, setContextUsage] = useState<{ percent: number | null; contextWindow: number; tokens: number | null } | null>(null);
@@ -339,9 +367,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   // Auto-recovery mode persisted in localStorage
   const [autoRecoveryMode, setAutoRecoveryModeState] = useState<AutoRecoveryMode>(() => {
-    if (typeof window === "undefined") return "conservative";
+    if (typeof window === "undefined") return "aggressive";
     const stored = getLocalStorageItem("deerhux.auto-recovery-mode");
-    return (stored === "off" || stored === "aggressive") ? stored : "conservative";
+    return (stored === "off" || stored === "conservative" || stored === "aggressive") ? stored : "aggressive";
   });
   const [stallLevel, setStallLevel] = useState<StallLevel>(null);
   const stallDismissedRef = useRef(false);
@@ -447,12 +475,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         return null;
       }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const d = await res.json() as SessionData & { agentState?: { running: boolean; state?: { isStreaming?: boolean; isCompacting?: boolean; isRunning?: boolean; contextUsage?: { percent: number | null; contextWindow: number; tokens: number | null } | null; systemPrompt?: string; thinkingLevel?: string } } };
+      const d = await res.json() as SessionData & { agentState?: { running: boolean; state?: { isStreaming?: boolean; isCompacting?: boolean; isRunning?: boolean; contextUsage?: { percent: number | null; contextWindow: number; tokens: number | null } | null; systemPrompt?: string; thinkingLevel?: string; agentMode?: AgentMode } } };
       if (sid !== sessionIdRef.current) return null;
       setData(d);
       setMessages(normalizeCompletedMessages(d.context.messages.map(compressMessageContent)));
       setEntryIds(d.context.entryIds ?? []);
       setCurrentModelOverride(null);
+      setAgentMode(normalizeAgentMode(d.context.agentMode));
       setError(null);
       // If no live agent state, fall back to thinking level from session file
       if (!d.agentState?.state?.thinkingLevel && d.context.thinkingLevel && d.context.thinkingLevel !== "off") {
@@ -596,6 +625,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [agentRunning]);
 
   useEffect(() => {
+    agentModeRef.current = agentMode;
+  }, [agentMode]);
+
+  useEffect(() => {
     agentPhaseRef.current = agentPhase;
   }, [agentPhase]);
 
@@ -679,6 +712,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         setAgentPhase(null);
         if (!endedWithError) setRetryInfo(null);
         dispatch({ type: "end" });
+        setPlanReady(!endedWithError && agentModeRef.current === "plan");
         if (sessionIdRef.current && !endedWithError) {
           loadSession(sessionIdRef.current);
           fetch(`/api/agent/${encodeURIComponent(sessionIdRef.current)}`)
@@ -802,7 +836,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [loadSession, onAgentEnd]);
   handleAgentEventRef.current = handleAgentEvent;
 
-  const handleSend = useCallback(async (message: string, images?: AttachedImage[], roleId?: string, references?: FileReference[]) => {
+  const handleSend = useCallback(async (message: string, images?: AttachedImage[], roleId?: string, references?: FileReference[], skill?: SkillReference) => {
     const sentReferences = references?.length ? references : undefined;
     if (!message.trim() && !images?.length && !sentReferences?.length) return;
     if (agentRunningRef.current) return;
@@ -815,6 +849,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     resetTurnTracking();
     autoRecoveryAttemptsRef.current = 0;
     awaitingAgentStartRef.current = true;
+    setPlanReady(false);
 
     const imageBlocks = images?.map((img) => ({ type: "image" as const, source: { type: "base64" as const, media_type: img.mimeType, data: img.data } }));
     const userMsg: AgentMessage = {
@@ -823,6 +858,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         ? [...(message.trim() ? [{ type: "text" as const, text: message }] : []), ...imageBlocks]
         : message,
       ...(sentReferences ? { references: sentReferences } : {}),
+      ...(skill ? { skill } : {}),
       timestamp: Date.now(),
     };
     setMessages((prev) => [...prev, userMsg]);
@@ -855,15 +891,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (isNew && newSessionCwd) {
         const selectedModel = newSessionModel;
         if (selectedModel) setPendingModel(selectedModel);
-        const { PRESET_NONE, PRESET_DEFAULT, PRESET_FULL } = await import("@/components/ToolPanel");
-        const toolNames = toolPreset === "none" ? PRESET_NONE : toolPreset === "default" ? PRESET_DEFAULT : PRESET_FULL;
         const res = await fetch("/api/agent/new", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             cwd: newSessionCwd,
             type: "create",
-            toolNames,
+            agentMode,
             ...(piImages?.length ? { images: piImages } : {}),
             ...(selectedModel ? { provider: selectedModel.provider, modelId: selectedModel.modelId } : {}),
             ...(thinkingLevel !== "auto" ? { thinkingLevel } : {}),
@@ -897,6 +931,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           message,
           ...(sentReferences ? { references: sentReferences } : {}),
           ...(piImages?.length ? { images: piImages } : {}),
+          ...(skill ? { skillName: skill.name } : {}),
         });
       } else if (session) {
         ensureEventsConnected(session.id);
@@ -906,6 +941,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           ...(sentReferences ? { references: sentReferences } : {}),
           ...(piImages?.length ? { images: piImages } : {}),
           ...(roleId ? { roleId } : {}),
+          ...(skill ? { skillName: skill.name } : {}),
         });
       }
     } catch (e) {
@@ -942,7 +978,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       eventSourceRef.current?.close();
       eventSourceRef.current = null;
     }
-  }, [isNew, newSessionCwd, newSessionModel, toolPreset, thinkingLevel, session, connectEvents, ensureEventsConnected, waitForEventsReady, onSessionCreated, onSessionStarted]);
+  }, [isNew, newSessionCwd, newSessionModel, agentMode, thinkingLevel, session, connectEvents, ensureEventsConnected, waitForEventsReady, onSessionCreated, onSessionStarted]);
 
   const handleAbort = useCallback(async () => {
     const sid = sessionIdRef.current;
@@ -1004,7 +1040,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [isCompacting, loadSession]);
 
-  const handleSteer = useCallback(async (message: string, images?: AttachedImage[], references?: FileReference[]) => {
+  const handleSteer = useCallback(async (message: string, images?: AttachedImage[], references?: FileReference[], skill?: SkillReference) => {
     const sid = sessionIdRef.current;
     if (!sid) return;
     const sentReferences = references?.length ? references : undefined;
@@ -1012,6 +1048,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       role: "user",
       content: `[steer] ${message}`,
       ...(sentReferences ? { references: sentReferences } : {}),
+      ...(skill ? { skill } : {}),
       timestamp: Date.now(),
     } as AgentMessage]);
     const piImages = images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
@@ -1021,13 +1058,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         message,
         ...(sentReferences ? { references: sentReferences } : {}),
         ...(piImages?.length ? { images: piImages } : {}),
+        ...(skill ? { skillName: skill.name } : {}),
       });
     } catch (e) {
       console.error("Failed to steer:", e);
     }
   }, []);
 
-  const handleFollowUp = useCallback(async (message: string, images?: AttachedImage[], references?: FileReference[]) => {
+  const handleFollowUp = useCallback(async (message: string, images?: AttachedImage[], references?: FileReference[], skill?: SkillReference) => {
     const sid = sessionIdRef.current;
     if (!sid) return;
     const sentReferences = references?.length ? references : undefined;
@@ -1035,6 +1073,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       role: "user",
       content: message,
       ...(sentReferences ? { references: sentReferences } : {}),
+      ...(skill ? { skill } : {}),
       timestamp: Date.now(),
     } as AgentMessage]);
     // Explicitly clear recovery state — a user-initiated follow_up always starts a fresh turn
@@ -1049,6 +1088,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         message,
         ...(sentReferences ? { references: sentReferences } : {}),
         ...(piImages?.length ? { images: piImages } : {}),
+        ...(skill ? { skillName: skill.name } : {}),
       });
     } catch (e) {
       console.error("Failed to follow up:", e);
@@ -1386,6 +1426,62 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [setToolPresetState, toolPreset]);
 
+  const handleAgentModeChange = useCallback(async (mode: AgentMode) => {
+    const nextMode = normalizeAgentMode(mode);
+    const previousMode = agentModeRef.current;
+    setAgentMode(nextMode);
+    agentModeRef.current = nextMode;
+    setPlanReady(false);
+    setToolPresetState(nextMode === "agent" ? "default" : "custom");
+    const sid = sessionIdRef.current;
+    if (!sid) return;
+    try {
+      const result = await sendAgentCommand<{ mode?: AgentMode; systemPrompt?: string }>(sid, { type: "set_mode", mode: nextMode });
+      if (result?.mode) {
+        const normalized = normalizeAgentMode(result.mode);
+        setAgentMode(normalized);
+        agentModeRef.current = normalized;
+      }
+      if (result?.systemPrompt !== undefined) setSystemPrompt(result.systemPrompt ?? null);
+    } catch (e) {
+      console.error("Failed to set agent mode:", e);
+      setAgentMode(previousMode);
+      agentModeRef.current = previousMode;
+    }
+  }, [setToolPresetState]);
+
+  const handleBuildPlan = useCallback(async () => {
+    const sid = sessionIdRef.current;
+    if (!sid || agentRunningRef.current) return;
+    await handleAgentModeChange("agent");
+    setPlanReady(false);
+    agentRunningRef.current = true;
+    turnIdRef.current += 1;
+    autoContinueSentRef.current = false;
+    autoContinueInProgressRef.current = false;
+    resetTurnTracking();
+    autoRecoveryAttemptsRef.current = 0;
+    setAgentRunning(true);
+    setAgentPhase({ kind: "waiting_model", reason: "initial" });
+    dispatch({ type: "start" });
+    setMessages((prev) => [...prev, {
+      role: "user",
+      content: "请按刚才用户批准的计划开始实施。",
+      timestamp: Date.now(),
+    } as AgentMessage]);
+    try {
+      connectEvents(sid);
+      await sendAgentCommand(sid, { type: "follow_up", message: "请按刚才用户批准的计划开始实施。" });
+    } catch (e) {
+      console.error("Failed to build plan:", e);
+      agentRunningRef.current = false;
+      setAgentRunning(false);
+      setAgentPhase(null);
+      dispatch({ type: "end" });
+      setLastModelError(e instanceof Error ? e.message : String(e));
+    }
+  }, [connectEvents, handleAgentModeChange]);
+
   const scrollToBottom = useCallback((behavior: ScrollBehavior = "smooth") => {
     messagesEndRef.current?.scrollIntoView({ behavior });
   }, []);
@@ -1460,6 +1556,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setEntryIds([]);
       setCurrentModelOverride(null);
       setPendingModel(null);
+      setAgentMode("agent");
+      agentModeRef.current = "agent";
+      setPlanReady(false);
       setAgentRunning(false);
       setError(null);
       setLoading(false);
@@ -1472,6 +1571,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setEntryIds([]);
     setCurrentModelOverride(null);
     setPendingModel(null);
+    setPlanReady(false);
     setAgentRunning(false);
     setError(null);
 
@@ -1501,6 +1601,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (agentState.state.contextUsage !== undefined) setContextUsage(agentState.state.contextUsage ?? null);
         if (agentState.state.systemPrompt !== undefined) setSystemPrompt(agentState.state.systemPrompt ?? null);
         if (agentState.state.thinkingLevel !== undefined) setThinkingLevel((agentState.state.thinkingLevel as ThinkingLevelOption) ?? "auto");
+        if (agentState.state.agentMode !== undefined) setAgentMode(normalizeAgentMode(agentState.state.agentMode));
       }
     });
 
@@ -1539,6 +1640,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           setMessages(normalizeCompletedMessages(d.context.messages.map(compressMessageContent)));
           setEntryIds(nextEntryIds);
           setCurrentModelOverride(null);
+          setAgentMode(normalizeAgentMode(d.context.agentMode));
           setError(null);
         }
       } catch {
@@ -1613,7 +1715,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   return {
     // State
     data, loading, error, messages, entryIds, streamState,
-    agentRunning, modelNames, modelList, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, toolPreset, thinkingLevel,
+    agentRunning, modelNames, modelList, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, toolPreset, agentMode, planReady, thinkingLevel,
     retryInfo, contextUsage, systemPrompt, forkingEntryId,
     isCompacting, compactError, lastModelError, currentModel, displayModel, sessionStats,
     agentPhase, watchdogInfo, stallLevel, autoRecoveryMode,
@@ -1624,7 +1726,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // Actions
     handleSend, handleAbort, handleFork, handleModelChange,
     handleCompact, handleSteer, handleFollowUp, handleAbortCompaction,
-    handleToolPresetChange, handleThinkingLevelChange, loadTools, setData, setMessages,
+    handleToolPresetChange, handleAgentModeChange, handleBuildPlan, handleThinkingLevelChange, loadTools, setData, setMessages,
     setSystemPrompt, setLastModelError, handleAutoRecover, handleDismissStall, handleAutoRecoveryModeChange,
     dispatch, setAgentRunning, setForkingEntryId,
   };

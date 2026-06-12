@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { AgentMessage, FileReference, SessionInfo } from "@/lib/types";
+import type { AgentMessage, FileReference, SessionInfo, SkillReference } from "@/lib/types";
 import { MessageView } from "./MessageView";
 import { ChatInput, type ChatInputHandle, type ChatInputState, type AttachedImage } from "./ChatInput";
 import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
@@ -370,7 +370,7 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, onAgentEnd, on
 
   const {
     loading, error, data, messages, entryIds, streamState,
-    agentRunning, modelNames, modelList, modelThinkingLevels, modelThinkingLevelMaps, toolPreset, thinkingLevel,
+    agentRunning, modelNames, modelList, modelThinkingLevels, modelThinkingLevelMaps, agentMode, planReady, thinkingLevel,
     retryInfo, contextUsage, forkingEntryId, watchdogInfo,
     isCompacting, compactError, lastModelError, displayModel: displayModelValue, sessionStats,
     agentPhase,
@@ -381,7 +381,7 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, onAgentEnd, on
     lastUserMsgRef,
     handleSend, handleAbort, handleFork, handleModelChange,
     handleCompact, handleSteer, handleFollowUp, handleAbortCompaction,
-    handleToolPresetChange, handleThinkingLevelChange,
+    handleAgentModeChange, handleBuildPlan, handleThinkingLevelChange,
     systemPrompt, setSystemPrompt, setLastModelError,
   } = useAgentSession({
     session, newSessionCwd, onAgentEnd: wrappedOnAgentEnd, onSessionCreated, onSessionStarted, onSessionForked,
@@ -441,10 +441,10 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, onAgentEnd, on
     return { roleId: role.id, roleName: role.name, block, setting: setting.length > 160 ? setting.slice(0, 160) + "…" : setting };
   }, [roles, currentRoleId]);
 
-  const sendWithRole = useCallback((message: string, images?: AttachedImage[], references?: FileReference[]) => {
+  const sendWithRole = useCallback((message: string, images?: AttachedImage[], references?: FileReference[], skill?: SkillReference) => {
     const detected = detectSetting(message);
     if (detected) setPendingRoleSetting(detected);
-    handleSend(message, images, currentRoleId, references);
+    handleSend(message, images, currentRoleId, references, skill);
   }, [detectSetting, handleSend, currentRoleId]);
 
   const confirmRoleSetting = useCallback(async (mode: "save" | "temporary" | "cancel") => {
@@ -473,11 +473,11 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, onAgentEnd, on
     }
   }, [pendingRoleSetting, currentCwd, session?.id, applyRoleToSession, setSystemPrompt]);
 
-  const handleResend = useCallback((message: string) => {
+  const handleResend = useCallback((message: string, _entryId?: string, references?: FileReference[], skill?: SkillReference) => {
     if (agentRunning && handleSteer) {
-      handleSteer(message);
+      handleSteer(message, undefined, references, skill);
     } else if (!agentRunning) {
-      handleSend(message, undefined, currentRoleId);
+      handleSend(message, undefined, currentRoleId, references, skill);
     }
   }, [agentRunning, handleSteer, handleSend, currentRoleId]);
 
@@ -895,8 +895,10 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, onAgentEnd, on
       compactError={compactError}
       lastModelError={lastModelError}
       onClearModelError={() => setLastModelError(null)}
-      toolPreset={toolPreset}
-      onToolPresetChange={session || isNew ? handleToolPresetChange : undefined}
+      agentMode={agentMode}
+      onAgentModeChange={session || isNew ? handleAgentModeChange : undefined}
+      planReady={planReady}
+      onBuildPlan={handleBuildPlan}
       thinkingLevel={thinkingLevel}
       onThinkingLevelChange={session || isNew ? handleThinkingLevelChange : undefined}
       availableThinkingLevels={availableThinkingLevels}

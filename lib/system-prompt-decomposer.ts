@@ -3,6 +3,7 @@ import path from "path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { composeGlobalMemoryPrompt } from "./memory";
 import { loadEnabledMcpServers } from "./mcp-runtime";
+import { getDefaultModePromptSectionContent } from "./agent-modes";
 
 /**
  * Decompose DeerHux's built-in system prompt into structured, configurable sections.
@@ -73,6 +74,12 @@ const SECTION_SPECS: Omit<SystemPromptSection, "content" | "enabled">[] = [
     editable: true,
   },
   {
+    id: "mode_control",
+    label: "模式控制",
+    description: "Ask / Plan / Agent 三种模式的运行时行为约束（根据当前模式自动生成）",
+    editable: false,
+  },
+  {
     id: "project_context",
     label: "项目上下文",
     description: "来自 AGENTS.md 等项目文件的项目级指令",
@@ -114,6 +121,7 @@ const DEFAULT_SECTION_CONTENT: Record<string, string> = {
   identity: "You are an expert coding assistant operating inside DeerHux, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.",
   tools: "Available tools:\n[自动生成：根据当前会话启用的工具生成工具列表]",
   guidelines: "Guidelines:\n- Be concise in your responses and thinking all use chinese language\n- Show file paths clearly when working with files",
+  mode_control: getDefaultModePromptSectionContent(),
   project_context: "<project_context>\n[自动生成：来自 AGENTS.md 等项目上下文文件]\n</project_context>",
   skills: "<available_skills>\n[自动生成：当前可用 skills 列表]\n</available_skills>",
   mcp_tools: "MCP runtime tools:\n[自动生成：来自 MCP 配置窗口；会话启动/重载时动态发现具体工具]",
@@ -243,10 +251,24 @@ export function decomposeSystemPrompt(fullPrompt: string): SystemPromptSection[]
 
       case "guidelines": {
         // Guidelines section: "Guidelines:" to next major section
-        const glMatch = remaining.match(/Guidelines:\n([\s\S]*?)(?=\n\n<project_context>|\n\n<available_skills>|\n\nCurrent date:|\n\n<!-- PI_ROLE|$)/);
+        const glMatch = remaining.match(/Guidelines:\n([\s\S]*?)(?=\n\n<deerhux_mode>|\n\n<project_context>|\n\n<available_skills>|\n\nCurrent date:|\n\n<!-- PI_ROLE|$)/);
         if (glMatch) {
           content = `Guidelines:\n${glMatch[1].trim()}`;
           remaining = remaining.slice(glMatch[0].length);
+          found = true;
+        }
+        break;
+      }
+
+      case "mode_control": {
+        const modeContent = extractBetweenTags(remaining, "deerhux_mode");
+        if (modeContent !== null) {
+          content = `<deerhux_mode>\n${modeContent}\n</deerhux_mode>`;
+          const closeTag = "</deerhux_mode>";
+          const endIdx = remaining.indexOf(closeTag);
+          if (endIdx !== -1) {
+            remaining = remaining.slice(endIdx + closeTag.length);
+          }
           found = true;
         }
         break;

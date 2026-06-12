@@ -1,6 +1,6 @@
 import path from "path";
 import { addAllowedRoot } from "@/lib/file-access";
-import { resolveSessionPath } from "@/lib/session-reader";
+import { buildSessionContext, resolveSessionPath } from "@/lib/session-reader";
 import { getRpcSession, startRpcSession } from "@/lib/rpc-manager";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 
@@ -20,9 +20,11 @@ export async function GET(
     if (!filePath) {
       return new Response("Session not found", { status: 404 });
     }
-    const cwd = SessionManager.open(filePath).getHeader()?.cwd ?? process.cwd();
+    const sm = SessionManager.open(filePath);
+    const cwd = sm.getHeader()?.cwd ?? process.cwd();
+    const context = buildSessionContext(sm.getEntries() as never, sm.getLeafId());
     try {
-      ({ session } = await startRpcSession(id, filePath, cwd));
+      ({ session } = await startRpcSession(id, filePath, cwd, undefined, context.roleId ?? null, context.agentMode ?? "agent"));
       addAllowedRoot(cwd);
     } catch (error) {
       return new Response(`Failed to start agent: ${error}`, { status: 500 });

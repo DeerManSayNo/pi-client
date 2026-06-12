@@ -38,7 +38,7 @@ interface Props {
   forking?: boolean;
   showTimestamp?: boolean;
   prevTimestamp?: number;
-  onResend?: (message: string, entryId?: string) => void;
+  onResend?: (message: string, entryId?: string, references?: FileReference[], skill?: UserMessage["skill"]) => void;
 }
 
 function formatTime(ts?: number): string | null {
@@ -140,7 +140,7 @@ function UserMessageView({ message, entryId, onResend }: {
   entryId?: string;
   onFork?: (entryId: string) => void;
   forking?: boolean;
-  onResend?: (message: string, entryId?: string) => void;
+  onResend?: (message: string, entryId?: string, references?: FileReference[], skill?: UserMessage["skill"]) => void;
 }) {
   const content =
     typeof message.content === "string"
@@ -163,6 +163,7 @@ function UserMessageView({ message, entryId, onResend }: {
   }, [message.references, referencePrefix]);
   const contentWithoutReferences = message.references?.length ? content : referencePrefix ? referencePrefix.rest : content;
   const skillPrefix = useMemo(() => parseSkillPrefix(contentWithoutReferences), [contentWithoutReferences]);
+  const displaySkillName = message.skill?.name ?? skillPrefix?.skillName;
   const displayContent = skillPrefix ? skillPrefix.rest : contentWithoutReferences;
 
   const [expanded, setExpanded] = useState(false);
@@ -210,7 +211,7 @@ function UserMessageView({ message, entryId, onResend }: {
   const handleSendEdit = () => {
     const trimmed = editValue.trim();
     if (!trimmed) return;
-    onResend?.(trimmed, entryId);
+    onResend?.(trimmed, entryId, displayReferences.length ? displayReferences : undefined, message.skill);
     setExpanded(false);
   };
 
@@ -324,9 +325,9 @@ function UserMessageView({ message, entryId, onResend }: {
               wordBreak: "break-word",
             }}
           >
-            {skillPrefix && (
+            {displaySkillName && (
               <span
-                title={`使用了技能: ${skillPrefix.skillName}`}
+                title={`使用了技能: ${displaySkillName}`}
                 style={{
                   display: "inline-flex",
                   alignItems: "center",
@@ -355,7 +356,7 @@ function UserMessageView({ message, entryId, onResend }: {
                     flexShrink: 0,
                   }}
                 />
-                {skillPrefix.skillName}
+                {displaySkillName}
               </span>
             )}
             {displayContent}

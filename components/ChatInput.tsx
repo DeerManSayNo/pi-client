@@ -2,7 +2,8 @@
 
 import React, { useRef, useState, useCallback, useEffect, useLayoutEffect, useImperativeHandle, useMemo, forwardRef, KeyboardEvent } from "react";
 import type { AutoRecoveryMode, StallLevel } from "@/hooks/useAgentSession";
-import type { FileReference } from "@/lib/types";
+import type { AgentMode } from "@/lib/agent-modes";
+import type { FileReference, SkillReference } from "@/lib/types";
 
 export interface AttachedImage {
   data: string;   // base64, no prefix
@@ -47,10 +48,10 @@ interface AgentRole {
 }
 
 interface Props {
-  onSend: (message: string, images?: AttachedImage[], references?: FileReference[]) => void;
+  onSend: (message: string, images?: AttachedImage[], references?: FileReference[], skill?: SkillReference) => void;
   onAbort: () => void;
-  onSteer?: (message: string, images?: AttachedImage[], references?: FileReference[]) => void;
-  onFollowUp?: (message: string, images?: AttachedImage[], references?: FileReference[]) => void;
+  onSteer?: (message: string, images?: AttachedImage[], references?: FileReference[], skill?: SkillReference) => void;
+  onFollowUp?: (message: string, images?: AttachedImage[], references?: FileReference[], skill?: SkillReference) => void;
   isStreaming: boolean;
   /** Saved input state to restore when the component mounts */
   initialInputState?: ChatInputState | null;
@@ -66,8 +67,10 @@ interface Props {
   compactError?: string | null;
   lastModelError?: string | null;
   onClearModelError?: () => void;
-  toolPreset?: "none" | "default" | "full" | "custom";
-  onToolPresetChange?: (preset: "none" | "default" | "full") => void;
+  agentMode?: AgentMode;
+  onAgentModeChange?: (mode: AgentMode) => void;
+  planReady?: boolean;
+  onBuildPlan?: () => void;
   thinkingLevel?: "auto" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
   onThinkingLevelChange?: (level: "auto" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh") => void;
   availableThinkingLevels?: string[] | null;
@@ -95,8 +98,11 @@ export interface ChatInputHandle {
   toggleReference: (path: string) => void;
 }
 
-const TOOL_PRESETS = ["off", "default", "full"] as const;
-const TOOL_PRESET_MAP: Record<"off" | "default" | "full", "none" | "default" | "full"> = { off: "none", default: "default", full: "full" };
+const AGENT_MODES: { id: AgentMode; label: string; desc: string }[] = [
+  { id: "ask", label: "Ask", desc: "只读问答" },
+  { id: "plan", label: "Plan", desc: "先研究再 Build" },
+  { id: "agent", label: "Agent", desc: "可修改和执行" },
+];
 
 const THINKING_LEVELS = ["auto", "off", "minimal", "low", "medium", "high", "xhigh"] as const;
 const THINKING_LEVEL_DESC: Record<typeof THINKING_LEVELS[number], string> = {
@@ -129,7 +135,8 @@ function skillPickerModeForValue(value: string): "all" | "project" | null {
 
 export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   onSend, onAbort, onSteer, onFollowUp, isStreaming, model, modelNames, modelList, onModelChange,
-  onCompact, onAbortCompaction, isCompacting, compactError, lastModelError, onClearModelError, toolPreset, onToolPresetChange,
+  onCompact, onAbortCompaction, isCompacting, compactError, lastModelError, onClearModelError,
+  agentMode = "agent", onAgentModeChange, planReady, onBuildPlan,
   thinkingLevel, onThinkingLevelChange, availableThinkingLevels, thinkingLevelMap,
   retryInfo,
   soundEnabled, onSoundToggle,
@@ -328,9 +335,10 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     if (shouldBlock) return;
 
     const currentValue = textareaRef.current?.value ?? value;
-    const msg = (selectedSkill ? `/skill:${selectedSkill.name} ${currentValue}` : currentValue).trim();
+    const msg = currentValue.trim();
     const references = fileReferences.length ? [...fileReferences] : undefined;
-    if (!msg && !attachedImages.length) return;
+    const skill = selectedSkill ? { name: selectedSkill.name } : undefined;
+    if (!msg && !attachedImages.length && !skill) return;
     if (isStreamingRef.current) return;
     if (sendInFlightRef.current) return;
     sendInFlightRef.current = true;
@@ -344,7 +352,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     // The remount reads from the cache via initialInputState — if we clear first,
     // the fresh mount sees empty input.
     saveInputStateRef?.current?.({ value: "", attachedImages: [], selectedSkill: null, fileReferences });
-    onSend(msg, attachedImages.length ? attachedImages : undefined, references);
+    onSend(msg, attachedImages.length ? attachedImages : undefined, references, skill);
     setValue("");
     setSelectedSkill(null);
     clearImages();
@@ -354,14 +362,15 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   }, [value, selectedSkill, attachedImages, fileReferences, onSend, clearImages, cancelPendingEnterSend, saveInputStateRef]);
 
   const sendQueued = useCallback((mode: "steer" | "followup") => {
-    const msg = (selectedSkill ? `/skill:${selectedSkill.name} ${value}` : value).trim();
+    const msg = value.trim();
     const references = fileReferences.length ? [...fileReferences] : undefined;
-    if (!msg && !attachedImages.length) return;
+    const skill = selectedSkill ? { name: selectedSkill.name } : undefined;
+    if (!msg && !attachedImages.length && !skill) return;
     saveInputStateRef?.current?.({ value: "", attachedImages: [], selectedSkill: null, fileReferences });
     if (mode === "steer" && onSteer) {
-      onSteer(msg, attachedImages.length ? attachedImages : undefined, references);
+      onSteer(msg, attachedImages.length ? attachedImages : undefined, references, skill);
     } else if (mode === "followup" && onFollowUp) {
-      onFollowUp(msg, attachedImages.length ? attachedImages : undefined, references);
+      onFollowUp(msg, attachedImages.length ? attachedImages : undefined, references, skill);
     }
     setValue("");
     setSelectedSkill(null);
@@ -1428,6 +1437,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
               type="button"
               onClick={handleSend}
               disabled={!hasSendableContent}
+              title={agentMode === "plan" ? "生成计划" : agentMode === "ask" ? "发送 Ask" : "发送 Agent"}
               style={{
                 flexShrink: 0,
                 alignSelf: "flex-end",
@@ -1768,12 +1778,12 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 )}
               </div>
             )}
-            {!isStreaming && onToolPresetChange && (
+            {!isStreaming && onAgentModeChange && (
               <div ref={toolDropdownRef} style={{ position: "relative" }}>
                 <button
                   onClick={() => !isStreaming && setToolDropdownOpen((v) => !v)}
                   disabled={isStreaming}
-                  title="切换工具预设"
+                  title="切换 Ask / Plan / Agent 模式"
                   style={{
                     display: "flex", alignItems: "center", gap: 5,
                     padding: "8px 12px",
@@ -1800,26 +1810,24 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
                   </svg>
-                  <span>{toolPreset === "custom" ? "custom" : Object.entries(TOOL_PRESET_MAP).find(([, v]) => v === (toolPreset ?? "default"))?.[0] ?? "default"}</span>
+                  <span>{AGENT_MODES.find((mode) => mode.id === agentMode)?.label ?? "Agent"}</span>
                 </button>
                 {toolDropdownOpen && (
                   <div style={{
                     position: "absolute", bottom: "calc(100% + 6px)", right: 0,
                     zIndex: 100, background: "var(--bg)", border: "1px solid var(--border)",
                     borderRadius: 8, boxShadow: "0 -4px 16px rgba(0,0,0,0.10)",
-                    overflow: "hidden", minWidth: 120,
+                    overflow: "hidden", minWidth: 210,
                   }}>
-                    {TOOL_PRESETS.map((lvl) => {
-                      const preset = TOOL_PRESET_MAP[lvl];
-                      const isActive = (toolPreset ?? "default") === preset;
-                      const desc = lvl === "off" ? "无工具，纯聊天" : lvl === "default" ? "基础 + CodeGraph" : "全部内置工具";
+                    {AGENT_MODES.map((mode) => {
+                      const isActive = agentMode === mode.id;
                       return (
                         <button
-                          key={lvl}
-                          onClick={() => { setToolDropdownOpen(false); if (!isActive) onToolPresetChange(preset); }}
+                          key={`desc-${mode.id}`}
+                          onClick={() => { setToolDropdownOpen(false); if (!isActive) onAgentModeChange(mode.id); }}
                           style={{
                             display: "flex", alignItems: "center", gap: 8,
-                            width: "100%", padding: "7px 12px",
+                            width: "100%", padding: "8px 12px",
                             background: isActive ? "var(--bg-selected)" : "none",
                             border: "none",
                             color: isActive ? "var(--text)" : "var(--text-muted)",
@@ -1833,14 +1841,36 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                           {isActive
                             ? <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}><polyline points="1.5 5 4 7.5 8.5 2.5" /></svg>
                             : <span style={{ width: 10, flexShrink: 0 }} />}
-                          <span style={{ flex: 1 }}>{lvl}</span>
-                          <span style={{ fontSize: 11, color: "var(--text-dim)", marginLeft: 8 }}>{desc}</span>
+                          <span style={{ flex: 1 }}>{mode.label}</span>
+                          <span style={{ fontSize: 11, color: "var(--text-dim)", marginLeft: 8 }}>{mode.desc}</span>
                         </button>
                       );
                     })}
                   </div>
                 )}
               </div>
+            )}
+
+            {!isStreaming && planReady && onBuildPlan && (
+              <button
+                onClick={onBuildPlan}
+                title="按已批准的计划开始实施"
+                style={{
+                  display: "flex", alignItems: "center", gap: 5,
+                  padding: "8px 12px",
+                  height: 32,
+                  background: "var(--accent)",
+                  border: "none",
+                  borderRadius: 9,
+                  color: "#fff",
+                  cursor: "pointer",
+                  fontSize: 12,
+                  fontWeight: 700,
+                  boxShadow: "0 1px 3px rgba(37,99,235,0.25)",
+                }}
+              >
+                Build
+              </button>
             )}
 
             {!isStreaming && onCompact && (

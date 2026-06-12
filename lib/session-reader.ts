@@ -1,7 +1,8 @@
 import { SessionManager, buildSessionContext as piBuildSessionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
-import type { SessionEntry, SessionInfo, SessionContext, AssistantMessage, FileReference } from "./types";
+import type { SessionEntry, SessionInfo, SessionContext, AssistantMessage, FileReference, SkillReference } from "./types";
 import type { SessionEntry as PiSessionEntry, SessionInfo as PiSessionInfo } from "@earendil-works/pi-coding-agent";
 import { normalizeToolCalls } from "./normalize";
+import { extractTurnMode, normalizeAgentMode, stripTurnModeContext, type AgentMode } from "./agent-modes";
 
 const SESSION_LIST_TTL_MS = 5_000;
 
@@ -120,13 +121,28 @@ export function buildSessionContext(entries: SessionEntry[], leafId?: string | n
   // Needed for fork and navigate_tree calls from the UI.
   let targetLeaf: SessionEntry | undefined;
   if (leafId === null) {
-    return { messages: [], entryIds: [], thinkingLevel: piCtx.thinkingLevel, model: piCtx.model, roleId: null };
+    return { messages: [], entryIds: [], thinkingLevel: piCtx.thinkingLevel, model: piCtx.model, roleId: null, agentMode: "agent" };
   }
   if (leafId) targetLeaf = byId.get(leafId);
   if (!targetLeaf) targetLeaf = entries[entries.length - 1];
   if (!targetLeaf) {
-    return { messages: [], entryIds: [], thinkingLevel: piCtx.thinkingLevel, model: piCtx.model, roleId: null };
+    return { messages: [], entryIds: [], thinkingLevel: piCtx.thinkingLevel, model: piCtx.model, roleId: null, agentMode: "agent" };
   }
+
+  const normalizeReferences = (value: unknown): FileReference[] => {
+    if (!Array.isArray(value)) return [];
+    return value.flatMap((item): FileReference[] => {
+      if (typeof item !== "object" || item === null) return [];
+      const record = item as Record<string, unknown>;
+      if (typeof record.path !== "string" || !record.path.trim()) return [];
+      const path = record.path.trim();
+      const fallbackName = path.split(/[\\/]/).filter(Boolean).pop() ?? path;
+      return [{
+        path,
+        name: typeof record.name === "string" && record.name.trim() ? record.name.trim() : fallbackName,
+      }];
+    });
+  };
 
   // Walk path from target leaf to root
   const path: SessionEntry[] = [];
@@ -137,10 +153,33 @@ export function buildSessionContext(entries: SessionEntry[], leafId?: string | n
   }
 
   let roleId: string | null = null;
+  let agentMode: AgentMode = "agent";
+  const turnContextByMessageId = new Map<string, { agentMode?: AgentMode; references?: FileReference[]; skill?: SkillReference }>();
+  let pendingTurnContext: { agentMode?: AgentMode; references?: FileReference[]; skill?: SkillReference } | null = null;
   for (const e of path) {
     if (e.type === "custom" && (e as { customType?: string }).customType === "role_profile") {
       const data = (e as { data?: { roleId?: unknown } }).data;
       roleId = typeof data?.roleId === "string" && data.roleId.trim() ? data.roleId.trim() : null;
+    }
+    if (e.type === "custom" && (e as { customType?: string }).customType === "agent_mode") {
+      const data = (e as { data?: { mode?: unknown } }).data;
+      agentMode = normalizeAgentMode(data?.mode);
+    }
+    if (e.type === "custom" && (e as { customType?: string }).customType === "turn_context") {
+      const data = (e as { data?: { mode?: unknown; references?: unknown; skill?: { name?: unknown } } }).data;
+      const references = normalizeReferences(data?.references);
+      const skillName = typeof data?.skill?.name === "string" && data.skill.name.trim() ? data.skill.name.trim() : null;
+      pendingTurnContext = {
+        agentMode: normalizeAgentMode(data?.mode),
+        ...(references.length ? { references } : {}),
+        ...(skillName ? { skill: { name: skillName } } : {}),
+      };
+    }
+    if (e.type === "message" && (e as { message?: { role?: unknown } }).message?.role === "user") {
+      if (pendingTurnContext) {
+        turnContextByMessageId.set(e.id, pendingTurnContext);
+        pendingTurnContext = null;
+      }
     }
   }
 
@@ -177,40 +216,28 @@ export function buildSessionContext(entries: SessionEntry[], leafId?: string | n
 
   // DeerHux injects compaction summary as {role:"compactionSummary", summary, tokensBefore}.
   // Convert to {role:"user"} so MessageView can render it the same as before.
-  const stripVisionFallbackContext = (content: string): string => {
-    return content
+  const stripInternalUserContext = (content: string): string => {
+    return stripTurnModeContext(content)
       .replace(/\n*<image_context source="mcp-vision-fallback">[\s\S]*?<\/image_context>\n*/g, "\n")
       .replace(/\n*注意：当前模型配置未勾选图片输入，上面的 image_context 是由 MCP 图片识别服务生成的，请基于该内容回答用户。\s*/g, "")
       .trim();
   };
 
-  const normalizeReferences = (value: unknown): FileReference[] => {
-    if (!Array.isArray(value)) return [];
-    return value.flatMap((item): FileReference[] => {
-      if (typeof item !== "object" || item === null) return [];
-      const record = item as Record<string, unknown>;
-      if (typeof record.path !== "string" || !record.path.trim()) return [];
-      const path = record.path.trim();
-      const fallbackName = path.split(/[\\/]/).filter(Boolean).pop() ?? path;
-      return [{
-        path,
-        name: typeof record.name === "string" && record.name.trim() ? record.name.trim() : fallbackName,
-      }];
-    });
-  };
-
-  const getDisplayUserMessage = (entryId: string | undefined): { content: unknown; references?: FileReference[] } | null => {
+  const getDisplayUserMessage = (entryId: string | undefined): { content: unknown; references?: FileReference[]; agentMode?: AgentMode; skill?: SkillReference } | null => {
     if (!entryId) return null;
     const entry = byId.get(entryId);
     if (!entry?.parentId) return null;
     const parent = byId.get(entry.parentId);
     if (parent?.type !== "custom" || (parent as { customType?: string }).customType !== "display_user_message") return null;
-    const data = (parent as { data?: { content?: unknown; references?: unknown } }).data;
+    const data = (parent as { data?: { content?: unknown; references?: unknown; agentMode?: unknown; skill?: { name?: unknown } } }).data;
     if (!data || !("content" in data)) return null;
     const references = normalizeReferences(data.references);
+    const skillName = typeof data.skill?.name === "string" && data.skill.name.trim() ? data.skill.name.trim() : null;
     return {
       content: data.content,
       ...(references.length ? { references } : {}),
+      ...(data.agentMode ? { agentMode: normalizeAgentMode(data.agentMode) } : {}),
+      ...(skillName ? { skill: { name: skillName } } : {}),
     };
   };
 
@@ -225,15 +252,32 @@ export function buildSessionContext(entries: SessionEntry[], leafId?: string | n
     }
     const normalized = normalizeToolCalls(msg);
     if (normalized.role === "user") {
+      const rawContent = typeof normalized.content === "string" ? normalized.content : "";
+      const messageMode = extractTurnMode(rawContent) ?? undefined;
+      const turnContext = entryIds[index] ? turnContextByMessageId.get(entryIds[index]) : undefined;
       const displayMessage = getDisplayUserMessage(entryIds[index]);
       if (displayMessage) return {
         ...normalized,
         content: displayMessage.content as typeof normalized.content,
-        ...(displayMessage.references ? { references: displayMessage.references } : {}),
+        ...(displayMessage.references ?? turnContext?.references ? { references: displayMessage.references ?? turnContext?.references } : {}),
+        ...(displayMessage.skill ?? turnContext?.skill ? { skill: displayMessage.skill ?? turnContext?.skill } : {}),
+        agentMode: displayMessage.agentMode ?? turnContext?.agentMode ?? messageMode,
       };
-      if (typeof normalized.content === "string" && normalized.content.includes('<image_context source="mcp-vision-fallback">')) {
-        return { ...normalized, content: stripVisionFallbackContext(normalized.content) };
+      if (typeof normalized.content === "string" && (normalized.content.includes('<deerhux_turn_mode') || normalized.content.includes('<image_context source="mcp-vision-fallback">'))) {
+        return {
+          ...normalized,
+          content: stripInternalUserContext(normalized.content),
+          ...(turnContext?.references ? { references: turnContext.references } : {}),
+          ...(turnContext?.skill ? { skill: turnContext.skill } : {}),
+          ...(turnContext?.agentMode || messageMode ? { agentMode: turnContext?.agentMode ?? messageMode } : {}),
+        };
       }
+      if (turnContext || messageMode) return {
+        ...normalized,
+        ...(turnContext?.references ? { references: turnContext.references } : {}),
+        ...(turnContext?.skill ? { skill: turnContext.skill } : {}),
+        ...(turnContext?.agentMode || messageMode ? { agentMode: turnContext?.agentMode ?? messageMode } : {}),
+      };
     }
     return normalized;
   });
@@ -244,6 +288,7 @@ export function buildSessionContext(entries: SessionEntry[], leafId?: string | n
     thinkingLevel: piCtx.thinkingLevel,
     model: piCtx.model,
     roleId,
+    agentMode,
   };
 }
 

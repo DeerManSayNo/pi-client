@@ -30,7 +30,7 @@ export async function POST(
     const cwd = sm.getHeader()?.cwd ?? process.cwd();
     const context = buildSessionContext(sm.getEntries() as never, sm.getLeafId());
 
-    const { session } = await startRpcSession(id, filePath, cwd, undefined, context.roleId ?? null);
+    const { session } = await startRpcSession(id, filePath, cwd, undefined, context.roleId ?? null, context.agentMode ?? "agent");
     addAllowedRoot(cwd);
     const result = await session.send(body);
 

@@ -68,7 +68,7 @@ export function SystemPromptConfig({ onClose, roleId, roleName, cwd }: Props) {
   useEscapeClose(onClose, !saveOpen);
 
   // Expanded sections
-  const [expanded, setExpanded] = useState<Set<string>>(() => new Set(["identity", "guidelines"]));
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set(["identity", "guidelines", "mode_control"]));
 
   const toggleExpanded = (id: string) => {
     setExpanded((prev) => {

@@ -1,4 +1,5 @@
 // Types mirrored from DeerHux coding-agent session-manager
+import type { AgentMode } from "./agent-modes";
 
 export interface SessionHeader {
   type: "session";
@@ -36,6 +37,10 @@ export interface FileReference {
   name: string;
 }
 
+export interface SkillReference {
+  name: string;
+}
+
 export interface ThinkingContent {
   type: "thinking";
   thinking: string;
@@ -54,6 +59,8 @@ export interface UserMessage {
   role: "user";
   content: string | (TextContent | ImageContent)[];
   references?: FileReference[];
+  skill?: SkillReference;
+  agentMode?: AgentMode;
   timestamp?: number;
 }
 
@@ -189,6 +196,7 @@ export interface SessionContext {
   thinkingLevel: string;
   model: { provider: string; modelId: string } | null;
   roleId?: string | null;
+  agentMode?: AgentMode;
 }
 
 // RPC types

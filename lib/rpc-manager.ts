@@ -1,4 +1,5 @@
 import path from "path";
+import { existsSync, readFileSync } from "fs";
 import { createAgentSession, defineTool, SessionManager, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { cacheSessionPath, invalidateSessionListCache } from "./session-reader";
@@ -9,8 +10,16 @@ import { applyRolePromptConfigToPrompt, isRoleSystemPromptSectionEnabled, readRo
 import { indexExists } from "./code-index/database";
 import { searchIndex } from "./code-index/search";
 import { createCodeGraphTools } from "./codegraph/tools";
-import type { FileReference } from "./types";
+import type { FileReference, SkillReference } from "./types";
 import type { McpRuntime, McpRuntimeLease } from "./mcp-runtime";
+import {
+  applyModePrompt,
+  getToolNamesForAgentMode,
+  isReadOnlyAgentMode,
+  normalizeAgentMode,
+  stripModePrompt,
+  type AgentMode,
+} from "./agent-modes";
 
 // ============================================================================
 // Types
@@ -23,12 +32,35 @@ export interface AgentEvent {
 
 type EventListener = (event: AgentEvent) => void;
 
+interface SkillInvocation {
+  name: string;
+  content?: string;
+}
+
+interface PreparedTurnContext {
+  message: string;
+  displayMessage: string;
+  references: FileReference[];
+  skill?: SkillReference;
+  systemPromptBlock: string;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function fileReferenceName(filePath: string): string {
   return filePath.split(/[\\/]/).filter(Boolean).pop() ?? filePath;
+}
+
+function escapeTurnContextText(text: string): string {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function parseSkillCommand(message: string): { skillName: string; message: string } | null {
+  const match = message.match(/^\/skill:([\w-]+)(?:\s|$)([\s\S]*)/);
+  if (!match) return null;
+  return { skillName: match[1], message: match[2].trim() };
 }
 
 function normalizeReferences(value: unknown): FileReference[] {
@@ -44,26 +76,6 @@ function normalizeReferences(value: unknown): FileReference[] {
     });
   }
   return references;
-}
-
-function escapeReferenceText(text: string): string {
-  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
-
-function withAvailableReferences(message: string, references: FileReference[]): string {
-  if (references.length === 0) return message;
-  const referenceBlock = [
-    "<available_references>",
-    "The user selected these files or folders as optional context. Use them only if the user's request requires them. Do not summarize or analyze them just because they are listed.",
-    ...references.map((ref) => `- ${escapeReferenceText(ref.path)}`),
-    "</available_references>",
-  ].join("\n");
-  const skillPrefix = message.match(/^(\/skill:[\w-]+)(?:\s|$)([\s\S]*)/);
-  if (skillPrefix) {
-    const rest = skillPrefix[2].trim();
-    return `${skillPrefix[1]} ${rest ? `${referenceBlock}\n\n${rest}` : referenceBlock}`;
-  }
-  return message.trim() ? `${referenceBlock}\n\n${message}` : referenceBlock;
 }
 
 function getNestedString(value: unknown, keys: string[]): string | null {
@@ -215,7 +227,7 @@ const TOOL_EXECUTION_MODES: Record<string, "parallel" | "sequential"> = {
   write: "sequential",
 };
 
-const FULL_PRESET_MARKERS = ["grep", "find", "ls"];
+const FULL_PRESET_MARKERS = ["bash", "edit", "write", "grep", "find", "ls"];
 
 function isFullToolPreset(toolNames: string[]): boolean {
   return FULL_PRESET_MARKERS.every((name) => toolNames.includes(name));
@@ -264,6 +276,8 @@ export class AgentSessionWrapper {
   private onDestroyCallback: (() => void) | null = null;
   private _alive = true;
   private roleId: string | null = null;
+  private agentMode: AgentMode = "agent";
+  private modePromptEnabled = false;
   private temporaryRoleSettings: string[] = [];
   private baseSystemPrompt = "";
   private lastEventType = "";
@@ -280,9 +294,11 @@ export class AgentSessionWrapper {
   private activeTurnPromise: Promise<void> | null = null;
   private sawAssistantEventInTurn = false;
 
-  constructor(public readonly inner: AgentSessionLike, roleId?: string | null, private mcpRuntimeLease?: McpRuntimeLease | null) {
+  constructor(public readonly inner: AgentSessionLike, roleId?: string | null, private mcpRuntimeLease?: McpRuntimeLease | null, agentMode?: AgentMode | null) {
     this.roleId = roleId ?? null;
-    this.baseSystemPrompt = inner.agent.state?.systemPrompt ?? "";
+    this.agentMode = normalizeAgentMode(agentMode);
+    this.modePromptEnabled = agentMode !== undefined && agentMode !== null;
+    this.baseSystemPrompt = stripModePrompt(inner.agent.state?.systemPrompt ?? "");
     this.applyRolePrompt();
   }
 
@@ -312,18 +328,135 @@ export class AgentSessionWrapper {
     if (currentKey === nextKey) return;
 
     this.inner.setActiveToolsByName(nextActive);
-    if (this.inner.agent.state) this.baseSystemPrompt = this.inner.agent.state.systemPrompt ?? "";
+    if (this.inner.agent.state) this.baseSystemPrompt = stripModePrompt(this.inner.agent.state.systemPrompt ?? "");
   }
 
   private applyRolePrompt(): void {
     if (!this.inner.agent.state) return;
     this.syncRoleMcpActiveTools();
-    const basePrompt = this.baseSystemPrompt;
-    const configuredPrompt = applyRolePromptConfigToPrompt(basePrompt, this.roleId);
+    const configuredPrompt = applyRolePromptConfigToPrompt(this.baseSystemPrompt, this.roleId);
+    const shouldApplyModePrompt = this.modePromptEnabled && isRoleSystemPromptSectionEnabled(this.roleId, "mode_control");
+    const promptWithMode = shouldApplyModePrompt ? applyModePrompt(configuredPrompt, this.agentMode) : configuredPrompt;
     const nextPrompt = isRoleSystemPromptSectionEnabled(this.roleId, "role_profile")
-      ? applyRolePromptToSystemPrompt(configuredPrompt, this.roleId, this.temporaryRoleSettings, this.inner.sessionManager.getCwd())
-      : configuredPrompt;
+      ? applyRolePromptToSystemPrompt(promptWithMode, this.roleId, this.temporaryRoleSettings, this.inner.sessionManager.getCwd())
+      : promptWithMode;
     setEffectiveSystemPrompt(this.inner, nextPrompt);
+  }
+
+  private persistAgentMode(): void {
+    if (!this.inner.sessionManager.isPersisted()) return;
+    try {
+      this.inner.sessionManager.appendCustomEntry("agent_mode", { mode: this.agentMode });
+    } catch { /* best effort */ }
+  }
+
+  private async setAgentMode(mode: AgentMode, persist = true): Promise<void> {
+    this.agentMode = normalizeAgentMode(mode);
+    this.modePromptEnabled = true;
+    if (this.agentMode === "agent" && this.mcpRuntime) {
+      this.inner.setActiveToolsByName([...new Set([...getToolNamesForAgentMode(this.agentMode), ...this.mcpRuntime.toolNames])]);
+    } else {
+      this.inner.setActiveToolsByName(getToolNamesForAgentMode(this.agentMode));
+    }
+    if (this.inner.agent.state) this.baseSystemPrompt = stripModePrompt(this.inner.agent.state.systemPrompt ?? "");
+    this.applyRolePrompt();
+    if (persist) this.persistAgentMode();
+  }
+
+  private appendDisplayUserMessage(content: unknown, references: FileReference[], skill?: SkillReference): void {
+    if (!this.inner.sessionManager.isPersisted()) return;
+    try {
+      this.inner.sessionManager.appendCustomEntry("display_user_message", {
+        content,
+        ...(references.length ? { references } : {}),
+        ...(skill ? { skill } : {}),
+        agentMode: this.agentMode,
+      });
+    } catch { /* best effort: only affects UI history display */ }
+  }
+
+  private appendTurnContextMetadata(references: FileReference[], skill?: SkillReference): void {
+    if (!this.inner.sessionManager.isPersisted()) return;
+    try {
+      this.inner.sessionManager.appendCustomEntry("turn_context", {
+        mode: this.agentMode,
+        ...(references.length ? { references } : {}),
+        ...(skill ? { skill } : {}),
+      });
+    } catch { /* best effort: only affects UI metadata */ }
+  }
+
+  private async resolveSkillInvocation(name: string | undefined): Promise<SkillInvocation | undefined> {
+    const skillName = name?.trim();
+    if (!skillName) return undefined;
+    const cwd = this.inner.sessionManager.getCwd();
+    try {
+      const { DefaultResourceLoader, getAgentDir } = await import("@earendil-works/pi-coding-agent");
+      const loader = new DefaultResourceLoader({ cwd, agentDir: getAgentDir() });
+      await loader.reload();
+      const skill = loader.getSkills().skills.find((item: { name?: string }) => item.name === skillName);
+      const filePath = (skill as { filePath?: unknown } | undefined)?.filePath;
+      if (typeof filePath === "string" && existsSync(filePath)) {
+        return { name: skillName, content: readFileSync(filePath, "utf8") };
+      }
+    } catch { /* fall through to DeerHux builtins */ }
+
+    const builtinPath = path.join(process.cwd(), "lib", "builtin-skills", skillName, "SKILL.md");
+    if (existsSync(builtinPath)) {
+      return { name: skillName, content: readFileSync(builtinPath, "utf8") };
+    }
+    return { name: skillName };
+  }
+
+  private buildTurnSystemPromptBlock(ctx: { references: FileReference[]; skill?: SkillInvocation }): string {
+    const lines = ["<turn_context>"];
+    lines.push(`Current turn mode: ${this.agentMode}`);
+    if (ctx.references.length > 0) {
+      lines.push("");
+      lines.push("User-selected references for this turn:");
+      lines.push("Use these files or folders only if the user's request requires them. Do not summarize or analyze them just because they are listed.");
+      for (const ref of ctx.references) lines.push(`- ${escapeTurnContextText(ref.path)}`);
+    }
+    if (ctx.skill) {
+      lines.push("");
+      lines.push(`Selected skill for this turn: ${ctx.skill.name}`);
+      if (ctx.skill.content?.trim()) {
+        lines.push("<selected_skill>");
+        lines.push(ctx.skill.content.trim());
+        lines.push("</selected_skill>");
+      } else {
+        lines.push("The selected skill content could not be loaded; proceed using the skill name as metadata only.");
+      }
+    }
+    lines.push("</turn_context>");
+    return lines.join("\n");
+  }
+
+  private async prepareTurnContext(rawMessage: string, rawReferences: unknown, rawSkillName: unknown): Promise<PreparedTurnContext> {
+    const references = normalizeReferences(rawReferences);
+    const parsedSkill = parseSkillCommand(rawMessage);
+    const explicitSkillName = typeof rawSkillName === "string" ? rawSkillName : undefined;
+    const skillName = explicitSkillName ?? parsedSkill?.skillName;
+    const message = parsedSkill ? parsedSkill.message : rawMessage;
+    const skillInvocation = await this.resolveSkillInvocation(skillName);
+    const skill = skillInvocation ? { name: skillInvocation.name } : undefined;
+    const displayMessage = message.trim() || (skill ? `使用技能：${skill.name}` : rawMessage);
+    return {
+      message: message.trim() || (skill ? `Use the selected skill: ${skill.name}.` : rawMessage),
+      displayMessage,
+      references,
+      skill,
+      systemPromptBlock: this.buildTurnSystemPromptBlock({ references, skill: skillInvocation }),
+    };
+  }
+
+  private withTemporarySystemPrompt<T>(turnPromptBlock: string, run: () => Promise<T>): Promise<T> {
+    const currentPrompt = this.inner.agent.state?.systemPrompt ?? "";
+    const nextPrompt = turnPromptBlock.trim() ? `${currentPrompt}\n\n${turnPromptBlock.trim()}` : currentPrompt;
+    if (turnPromptBlock.trim()) setEffectiveSystemPrompt(this.inner, nextPrompt);
+    return run().finally(() => {
+      this.applyRolePrompt();
+    });
   }
 
   private setRole(roleId: string | null, persist = true): void {
@@ -644,44 +777,41 @@ export class AgentSessionWrapper {
           this.setRole(command.roleId);
         }
         const promptText = typeof command.message === "string" ? command.message : "";
-        const references = normalizeReferences(command.references);
-        const modelMessage = withAvailableReferences(promptText, references);
+        const turnContext = await this.prepareTurnContext(promptText, command.references, command.skillName);
         // Record prompt text for Live Island display
-        if (promptText) {
-          getLiveIslandClient().recordPrompt(this.inner.sessionId, promptText);
+        if (turnContext.displayMessage) {
+          getLiveIslandClient().recordPrompt(this.inner.sessionId, turnContext.displayMessage);
         }
         // Fire and forget — events come via subscribe. Track the promise so an
         // abort + follow_up recovery can wait for the old turn to settle.
         const promptImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
-        const prepared = await this.prepareImageFallback(modelMessage, promptImages, promptText);
+        const prepared = await this.prepareImageFallback(turnContext.message, promptImages, turnContext.displayMessage);
 
         // 外部远程连接（如微信 Bot）触发 prompt 时，前端没有本地乐观追加 user 消息。
         // SDK 不一定会通过 subscribe 立即广播 user message，因此这里统一补发一条
         // message_end/user 事件，让已打开的 session 能第一时间显示远程用户刚发来的消息。
         // 前端本地输入框发送时已有去重逻辑，会跳过同内容的 user message_end，不会重复。
-        const displayUserContent = prepared.displayContent ?? promptText;
+        const displayUserContent = prepared.displayContent ?? turnContext.displayMessage;
         for (const l of this.listeners) {
           l({
             type: "message_end",
             message: {
               role: "user",
               content: displayUserContent,
-              ...(references.length ? { references } : {}),
+              ...(turnContext.references.length ? { references: turnContext.references } : {}),
+              ...(turnContext.skill ? { skill: turnContext.skill } : {}),
+              agentMode: this.agentMode,
               timestamp: Date.now(),
             },
           });
         }
 
-        if ((prepared.displayContent || references.length) && this.inner.sessionManager.isPersisted()) {
-          try {
-            this.inner.sessionManager.appendCustomEntry("display_user_message", {
-              content: displayUserContent,
-              ...(references.length ? { references } : {}),
-            });
-          } catch { /* best effort: only affects UI history display */ }
-        }
+        this.appendTurnContextMetadata(turnContext.references, turnContext.skill);
+        this.appendDisplayUserMessage(displayUserContent, turnContext.references, turnContext.skill);
         invalidateSessionListCache();
-        this.trackTurn(this.inner.prompt(prepared.message, prepared.images?.length ? { images: prepared.images } : undefined));
+        this.trackTurn(this.withTemporarySystemPrompt(turnContext.systemPromptBlock, () => (
+          this.inner.prompt(prepared.message, prepared.images?.length ? { images: prepared.images } : undefined)
+        )));
         return null;
       }
 
@@ -693,7 +823,7 @@ export class AgentSessionWrapper {
       case "set_system_prompt": {
         const rawPrompt = typeof command.prompt === "string" ? command.prompt : "";
         if (this.inner.agent.state) {
-          this.baseSystemPrompt = rawPrompt;
+          this.baseSystemPrompt = stripModePrompt(rawPrompt);
           setEffectiveSystemPrompt(this.inner, rawPrompt);
         }
         this.applyRolePrompt();
@@ -731,6 +861,7 @@ export class AgentSessionWrapper {
             : null,
           systemPrompt: this.inner.agent.state?.systemPrompt ?? "",
           thinkingLevel: this.inner.agent.state?.thinkingLevel ?? "off",
+          agentMode: this.agentMode,
           isRunning: this._isRunning,
           mcp: this.mcpRuntime ? {
             toolNames: this.mcpRuntime.toolNames,
@@ -839,30 +970,40 @@ export class AgentSessionWrapper {
       case "steer": {
         const steerImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
         const steerText = typeof command.message === "string" ? command.message : "";
-        const references = normalizeReferences(command.references);
-        const prepared = await this.prepareImageFallback(withAvailableReferences(steerText, references), steerImages, steerText);
-        await this.inner.steer(prepared.message, prepared.images?.length ? prepared.images : undefined);
+        const turnContext = await this.prepareTurnContext(steerText, command.references, command.skillName);
+        const prepared = await this.prepareImageFallback(turnContext.message, steerImages, turnContext.displayMessage);
+        this.appendTurnContextMetadata(turnContext.references, turnContext.skill);
+        this.appendDisplayUserMessage(prepared.displayContent ?? turnContext.displayMessage, turnContext.references, turnContext.skill);
+        await this.withTemporarySystemPrompt(turnContext.systemPromptBlock, () => (
+          this.inner.steer(prepared.message, prepared.images?.length ? prepared.images : undefined)
+        ));
         return null;
       }
 
       case "follow_up": {
         const followImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
         const followText = typeof command.message === "string" ? command.message : "";
-        const references = normalizeReferences(command.references);
-        const prepared = await this.prepareImageFallback(withAvailableReferences(followText, references), followImages, followText);
+        const turnContext = await this.prepareTurnContext(followText, command.references, command.skillName);
+        const prepared = await this.prepareImageFallback(turnContext.message, followImages, turnContext.displayMessage);
+        this.appendTurnContextMetadata(turnContext.references, turnContext.skill);
+        this.appendDisplayUserMessage(prepared.displayContent ?? turnContext.displayMessage, turnContext.references, turnContext.skill);
         const imageOptions = prepared.images?.length ? { images: prepared.images } : undefined;
         const message = prepared.message;
 
         if (this._isRunning || this.inner.isStreaming) {
           // SDK followUp only queues for an already-active turn. It should be
           // sent while the turn is still active so the agent can drain it.
-          await this.inner.followUp(message, prepared.images?.length ? prepared.images : undefined);
+          await this.withTemporarySystemPrompt(turnContext.systemPromptBlock, () => (
+            this.inner.followUp(message, prepared.images?.length ? prepared.images : undefined)
+          ));
           return null;
         }
 
         // If the previous turn was already aborted/stopped, followUp would only
         // sit in the queue and never trigger a model call. Start a fresh turn.
-        this.trackTurn(this.inner.prompt(message, imageOptions));
+        this.trackTurn(this.withTemporarySystemPrompt(turnContext.systemPromptBlock, () => (
+          this.inner.prompt(message, imageOptions)
+        )));
         return null;
       }
 
@@ -882,6 +1023,12 @@ export class AgentSessionWrapper {
 
       case "set_tools": {
         const requested = Array.isArray(command.toolNames) ? command.toolNames.filter((name): name is string => typeof name === "string") : [];
+        if (isReadOnlyAgentMode(this.agentMode)) {
+          this.inner.setActiveToolsByName(getToolNamesForAgentMode(this.agentMode));
+          if (this.inner.agent.state) this.baseSystemPrompt = stripModePrompt(this.inner.agent.state.systemPrompt ?? "");
+          this.applyRolePrompt();
+          return null;
+        }
         const isFullPreset = isFullToolPreset(requested);
         if (isFullPreset || includesMcpTool(requested)) {
           await this.ensureMcpRuntimeLoaded(true);
@@ -890,9 +1037,19 @@ export class AgentSessionWrapper {
           ? [...new Set([...requested, ...(this.mcpRuntime?.toolNames ?? [])])]
           : requested;
         this.inner.setActiveToolsByName(toolNames);
-        if (this.inner.agent.state) this.baseSystemPrompt = this.inner.agent.state.systemPrompt ?? "";
+        if (this.inner.agent.state) this.baseSystemPrompt = stripModePrompt(this.inner.agent.state.systemPrompt ?? "");
         this.applyRolePrompt();
         return null;
+      }
+
+      case "get_mode": {
+        return { mode: this.agentMode, systemPrompt: this.inner.agent.state?.systemPrompt ?? "" };
+      }
+
+      case "set_mode": {
+        const nextMode = normalizeAgentMode(command.mode);
+        await this.setAgentMode(nextMode);
+        return { mode: this.agentMode, systemPrompt: this.inner.agent.state?.systemPrompt ?? "" };
       }
 
       case "abort_compaction": {
@@ -984,7 +1141,8 @@ export async function startRpcSession(
   sessionFile: string,
   cwd: string,
   toolNames?: string[],
-  roleId?: string | null
+  roleId?: string | null,
+  agentMode?: AgentMode | null
 ): Promise<{ session: AgentSessionWrapper; realSessionId: string }> {
   const registry = getRegistry();
   const locks = getLocks();
@@ -1032,8 +1190,10 @@ export async function startRpcSession(
       },
     }) : null;
     const codeGraphTools = await createCodeGraphTools(cwd);
-    const requestedToolNames = toolNames ?? [];
-    const shouldLoadMcpAtStartup = isFullToolPreset(requestedToolNames) || includesMcpTool(requestedToolNames);
+    const hasExplicitMode = agentMode !== undefined && agentMode !== null;
+    const effectiveMode = normalizeAgentMode(agentMode);
+    const requestedToolNames = toolNames ?? (hasExplicitMode ? getToolNamesForAgentMode(effectiveMode) : []);
+    const shouldLoadMcpAtStartup = (!hasExplicitMode && isFullToolPreset(requestedToolNames)) || includesMcpTool(requestedToolNames);
     const mcpRuntimeLease = shouldLoadMcpAtStartup
       ? await import("./mcp-runtime").then(({ acquireMcpRuntime }) => acquireMcpRuntime(cwd))
       : null;
@@ -1046,8 +1206,15 @@ export async function startRpcSession(
       ...(mcpRuntime?.toolNames ?? []),
     ];
     let toolsOption: string[] | undefined;
-    if (toolNames !== undefined) {
-      toolsOption = toolNames.length === 0 ? [] : availableToolNames;
+    if (toolNames !== undefined || hasExplicitMode) {
+      if (requestedToolNames.length === 0) {
+        toolsOption = [];
+      } else if (!hasExplicitMode && isFullToolPreset(requestedToolNames)) {
+        toolsOption = availableToolNames;
+      } else {
+        const available = new Set(availableToolNames);
+        toolsOption = requestedToolNames.filter((name) => available.has(name));
+      }
     }
 
     let inner: AgentSessionLike;
@@ -1071,10 +1238,10 @@ export async function startRpcSession(
     // The frontend preset lists are static, so the "full" preset cannot enumerate
     // dynamically discovered MCP tool names. Treat the built-in full preset as
     // "all available runtime tools", including MCP.
-    if (toolNames && toolNames.length > 0) {
+    if (requestedToolNames.length > 0 && (toolNames !== undefined || hasExplicitMode)) {
       const knownTools = new Set(inner.getAllTools().map((tool: ToolInfo) => tool.name));
-      const isFullPreset = isFullToolPreset(toolNames);
-      const requested = toolNames.filter(name => knownTools.has(name));
+      const isFullPreset = !hasExplicitMode && isFullToolPreset(requestedToolNames);
+      const requested = requestedToolNames.filter(name => knownTools.has(name));
       if (isFullPreset) requested.push(...(mcpRuntime?.toolNames ?? []).filter(name => knownTools.has(name)));
       inner.setActiveToolsByName([...new Set(requested)]);
     }
@@ -1086,7 +1253,7 @@ export async function startRpcSession(
       setEffectiveSystemPrompt(inner, "");
     }
 
-    const wrapper = new AgentSessionWrapper(inner, roleId, mcpRuntimeLease);
+    const wrapper = new AgentSessionWrapper(inner, roleId, mcpRuntimeLease, hasExplicitMode ? effectiveMode : undefined);
     wrapper.start();
 
     const realSessionId = inner.sessionId as string;

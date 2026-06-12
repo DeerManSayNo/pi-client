@@ -3,6 +3,7 @@ import { existsSync } from "fs";
 import { addAllowedRoot } from "@/lib/file-access";
 import { startRpcSession } from "@/lib/rpc-manager";
 import { invalidateSessionListCache } from "@/lib/session-reader";
+import { normalizeAgentMode, type AgentMode } from "@/lib/agent-modes";
 
 // POST /api/agent/new  body: { cwd: string; type: string; message?: string; ... }
 // Spawns a brand-new DeerHux session. For type="create", returns the session id
@@ -21,12 +22,17 @@ export async function POST(req: Request) {
     }
 
     // Use a one-time key so startRpcSession's lock doesn't conflict with real session ids
-    const { provider, modelId, toolNames, thinkingLevel, roleId, ...promptCommand } = command as { provider?: string; modelId?: string; toolNames?: string[]; thinkingLevel?: string; roleId?: string; [key: string]: unknown };
+    const { provider, modelId, toolNames, thinkingLevel, roleId, agentMode, ...promptCommand } = command as { provider?: string; modelId?: string; toolNames?: string[]; thinkingLevel?: string; roleId?: string; agentMode?: AgentMode; [key: string]: unknown };
 
     const tempKey = `__new__${Date.now()}`;
-    const { session, realSessionId } = await startRpcSession(tempKey, "", cwd, toolNames);
+    const mode = agentMode === undefined ? undefined : normalizeAgentMode(agentMode);
+    const { session, realSessionId } = await startRpcSession(tempKey, "", cwd, toolNames, undefined, mode);
 
     addAllowedRoot(cwd);
+
+    if (mode) {
+      await session.send({ type: "set_mode", mode });
+    }
 
     // Apply pre-selected model before sending the prompt
     if (provider && modelId) {
