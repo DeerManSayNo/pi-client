@@ -83,6 +83,7 @@ interface Props {
   onRoleChange?: (roleId: string) => void;
   onRolesLoaded?: (roles: AgentRole[]) => void;
   onOpenRoleConfig?: () => void;
+  compact?: boolean;
   stallLevel?: StallLevel;
   autoRecoveryMode?: AutoRecoveryMode;
   onAutoRecover?: () => void;
@@ -145,6 +146,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   onRoleChange,
   onRolesLoaded,
   onOpenRoleConfig,
+  compact = false,
   stallLevel,
   autoRecoveryMode,
   onAutoRecover,
@@ -157,12 +159,15 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
   const [modelDropdownRect, setModelDropdownRect] = useState<{ top: number; left: number; width: number } | null>(null);
   const [toolDropdownOpen, setToolDropdownOpen] = useState(false);
+  const [moreMenuOpen, setMoreMenuOpen] = useState(false);
   const [roleDropdownOpen, setRoleDropdownOpen] = useState(false);
   const [roleDropdownRect, setRoleDropdownRect] = useState<{ top: number; left: number; width: number } | null>(null);
   const [roles, setRoles] = useState<AgentRole[]>([]);
   const [thinkingDropdownOpen, setThinkingDropdownOpen] = useState(false);
   const [attachedImages, setAttachedImages] = useState<AttachedImage[]>(initialInputState?.attachedImages ?? []);
   const [fileReferences, setFileReferences] = useState<FileReference[]>(initialInputState?.fileReferences ?? []);
+  const inputMaxWidth = compact ? 640 : 820;
+  const inputHorizontalPadding = compact ? 12 : 16;
 
   // Skill picker state
   const [skillPickerOpen, setSkillPickerOpen] = useState(false);
@@ -180,6 +185,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const dropdownRef = useRef<HTMLDivElement>(null);
   const modelDropdownPanelRef = useRef<HTMLDivElement>(null);
   const toolDropdownRef = useRef<HTMLDivElement>(null);
+  const moreMenuRef = useRef<HTMLDivElement>(null);
   const roleDropdownRef = useRef<HTMLDivElement>(null);
   const roleDropdownPanelRef = useRef<HTMLDivElement>(null);
   const thinkingDropdownRef = useRef<HTMLDivElement>(null);
@@ -726,6 +732,9 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       if (toolDropdownRef.current && !toolDropdownRef.current.contains(e.target as Node)) {
         setToolDropdownOpen(false);
       }
+      if (moreMenuRef.current && !moreMenuRef.current.contains(e.target as Node)) {
+        setMoreMenuOpen(false);
+      }
       if (thinkingDropdownRef.current && !thinkingDropdownRef.current.contains(e.target as Node)) {
         setThinkingDropdownOpen(false);
       }
@@ -739,6 +748,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       setModelDropdownOpen(false);
       setRoleDropdownOpen(false);
       setToolDropdownOpen(false);
+      setMoreMenuOpen(false);
       setThinkingDropdownOpen(false);
       setSkillPickerOpen(false);
     };
@@ -780,8 +790,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       style={{
         flexShrink: 0,
         background: "transparent",
-        padding: "0 16px 8px",
-        paddingRight: 52, // 16px base + 36px for ChatMinimap alignment
+        padding: `0 ${inputHorizontalPadding}px ${compact ? 10 : 8}px`,
       }}
     >
       {/* Hidden file input */}
@@ -797,7 +806,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
           e.target.value = "";
         }}
       />
-      <div style={{ maxWidth: 820, margin: "0 auto" }}>
+      <div style={{ maxWidth: inputMaxWidth, margin: "0 auto" }}>
         {/* Retry banner */}
         {retryInfo && (
           <div style={{
@@ -1198,15 +1207,17 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         <div
           style={{
             display: "flex",
-            gap: 8,
+            gap: compact ? 7 : 8,
             alignItems: "center",
             background: "var(--bg)",
             border: `1px solid ${isStreaming && (onSteer || onFollowUp)
               ? "rgba(234,179,8,0.4)"
               : "color-mix(in srgb, var(--border) 70%, transparent)"}`,
-            borderRadius: 14,
-            padding: "10px 10px 10px 14px",
-            boxShadow: "0 1px 2px rgba(15,23,42,0.04), 0 8px 24px -12px rgba(15,23,42,0.10)",
+            borderRadius: compact ? 16 : 14,
+            padding: compact ? "9px 9px 9px 12px" : "10px 10px 10px 14px",
+            boxShadow: compact
+              ? "0 1px 2px rgba(15,23,42,0.035), 0 12px 28px -22px rgba(15,23,42,0.22)"
+              : "0 1px 2px rgba(15,23,42,0.04), 0 8px 24px -12px rgba(15,23,42,0.10)",
             transition: "border-color 0.15s, background 0.15s, box-shadow 0.15s",
           } as React.CSSProperties}
         >
@@ -1330,15 +1341,15 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 outline: "none",
                 resize: "none",
                 color: "var(--text)",
-                fontSize: 14,
-                lineHeight: "22px",
+                fontSize: compact ? 13 : 14,
+                lineHeight: compact ? "21px" : "22px",
                 fontFamily: "inherit",
                 padding: 0,
                 paddingLeft: 0,
                 margin: 0,
                 display: "block",
                 boxSizing: "border-box",
-                minHeight: 44,
+                minHeight: compact ? 40 : 44,
                 maxHeight: 200,
                 overflow: "auto",
                 // Only reserve space for the skill chip on the first visual line.
@@ -1511,7 +1522,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                   title={roleSettingCount ? `当前角色有 ${roleSettingCount} 条设定` : "选择角色"}
                   style={{
                     display: "flex", alignItems: "center", gap: 6,
-                    padding: "8px 12px", height: 32, maxWidth: 180,
+                    padding: compact ? "8px 8px" : "8px 12px", height: 32, maxWidth: compact ? 92 : 180,
                     background: roleDropdownOpen ? "var(--bg-hover)" : "none",
                     border: "none", borderRadius: 9,
                     color: roleSettingCount ? "var(--accent)" : "var(--text-muted)",
@@ -1592,9 +1603,9 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                     disabled={isStreaming}
                     style={{
                       display: "flex", alignItems: "center", gap: 6,
-                      padding: "8px 12px",
+                      padding: compact ? "8px 8px" : "8px 12px",
                       height: 32,
-                      maxWidth: 220, overflow: "hidden",
+                      maxWidth: compact ? 118 : 220, overflow: "hidden",
                       background: modelDropdownOpen ? "var(--bg-hover)" : "none",
                       border: "none",
                       borderRadius: 9,
@@ -1686,8 +1697,62 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
           {/* spacer */}
           <div style={{ flex: 1 }} />
 
-          {/* RIGHT: thinking + tools preset + compact + sound */}
-          <div style={{ flex: "0 0 auto", display: "flex", alignItems: "center", gap: 2, marginLeft: "auto" }}>
+          {/* RIGHT: collapsed assistant controls */}
+          <div ref={moreMenuRef} style={{ flex: "0 0 auto", position: "relative", display: "flex", alignItems: "center", marginLeft: "auto" }}>
+            <button
+              type="button"
+              onClick={() => setMoreMenuOpen((open) => !open)}
+              title="更多输入选项"
+              aria-label="更多输入选项"
+              aria-expanded={moreMenuOpen}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                width: 32,
+                height: 32,
+                padding: 0,
+                background: moreMenuOpen ? "var(--bg-hover)" : "none",
+                border: "none",
+                borderRadius: 9,
+                color: moreMenuOpen ? "var(--text)" : "var(--text-muted)",
+                cursor: "pointer",
+                fontSize: 18,
+                lineHeight: 1,
+                fontWeight: 700,
+                letterSpacing: 1,
+                transition: "background 0.12s, color 0.12s",
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.background = "var(--bg-hover)";
+                e.currentTarget.style.color = "var(--text)";
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.background = moreMenuOpen ? "var(--bg-hover)" : "none";
+                e.currentTarget.style.color = moreMenuOpen ? "var(--text)" : "var(--text-muted)";
+              }}
+            >
+              ...
+            </button>
+            {moreMenuOpen && (
+              <div
+                style={{
+                  position: "absolute",
+                  right: 0,
+                  bottom: "calc(100% + 8px)",
+                  zIndex: 120,
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 3,
+                  padding: 6,
+                  border: "1px solid var(--border)",
+                  borderRadius: 12,
+                  background: "var(--bg)",
+                  boxShadow: "0 -8px 26px rgba(0,0,0,0.14)",
+                  overflow: "visible",
+                  whiteSpace: "nowrap",
+                }}
+              >
             {!isStreaming && onThinkingLevelChange && (
               <div ref={thinkingDropdownRef} style={{ position: "relative" }}>
                 <button
@@ -2004,6 +2069,8 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 </svg>
                 {autoRecoveryMode === "off" ? "关闭" : autoRecoveryMode === "conservative" ? "保守" : "激进"}
               </button>
+            )}
+              </div>
             )}
           </div>
 

@@ -2,7 +2,7 @@
 
 import { useState, useCallback, useRef, useEffect, useReducer, useMemo } from "react";
 import { getLocalStorageItem } from "@/lib/client-storage";
-import type { AgentMessage, FileReference, SessionInfo, SkillReference } from "@/lib/types";
+import type { AgentMessage, FileReference, ImageContent, SessionInfo, SkillReference, TextContent, UserMessage } from "@/lib/types";
 import { normalizeCompletedMessage, normalizeCompletedMessages, normalizeToolCalls } from "@/lib/normalize";
 import { agentEventBus } from "@/lib/agent-event-bus";
 import { sendAgentCommand } from "@/lib/agent-client";
@@ -155,6 +155,17 @@ export interface AttachedImage {
   data: string;
   mimeType: string;
   previewUrl: string;
+}
+
+function buildUserContent(message: string, images?: AttachedImage[]): UserMessage["content"] {
+  const imageBlocks: ImageContent[] = images?.map((img) => ({
+    type: "image",
+    source: { type: "base64", media_type: img.mimeType, data: img.data },
+  })) ?? [];
+  if (!imageBlocks.length) return message;
+
+  const textBlocks: TextContent[] = message.trim() ? [{ type: "text", text: message }] : [];
+  return [...textBlocks, ...imageBlocks];
 }
 
 function userContentKey(msg: AgentMessage | Partial<AgentMessage>): string | null {
@@ -851,12 +862,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     awaitingAgentStartRef.current = true;
     setPlanReady(false);
 
-    const imageBlocks = images?.map((img) => ({ type: "image" as const, source: { type: "base64" as const, media_type: img.mimeType, data: img.data } }));
     const userMsg: AgentMessage = {
       role: "user",
-      content: imageBlocks?.length
-        ? [...(message.trim() ? [{ type: "text" as const, text: message }] : []), ...imageBlocks]
-        : message,
+      content: buildUserContent(message, images),
       ...(sentReferences ? { references: sentReferences } : {}),
       ...(skill ? { skill } : {}),
       timestamp: Date.now(),
@@ -1046,7 +1054,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const sentReferences = references?.length ? references : undefined;
     setMessages((prev) => [...prev, {
       role: "user",
-      content: `[steer] ${message}`,
+      content: buildUserContent(`[steer] ${message}`, images),
       ...(sentReferences ? { references: sentReferences } : {}),
       ...(skill ? { skill } : {}),
       timestamp: Date.now(),
@@ -1071,7 +1079,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const sentReferences = references?.length ? references : undefined;
     setMessages((prev) => [...prev, {
       role: "user",
-      content: message,
+      content: buildUserContent(message, images),
       ...(sentReferences ? { references: sentReferences } : {}),
       ...(skill ? { skill } : {}),
       timestamp: Date.now(),

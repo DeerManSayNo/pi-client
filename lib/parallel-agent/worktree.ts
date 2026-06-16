@@ -1,4 +1,4 @@
-import { execSync } from "child_process";
+import { execFileSync, execSync } from "child_process";
 import fs from "fs";
 import path from "path";
 import os from "os";
@@ -110,10 +110,15 @@ export function generateDiff(worktreePath: string): { diff: string; stats: strin
  * Apply a patch from a worktree to the main cwd.
  * Returns { success, conflict }.
  */
-export function applyPatch(mainCwd: string, worktreePath: string): { success: boolean; error?: string } {
+export function applyPatch(mainCwd: string, worktreePath: string, files?: string[]): { success: boolean; error?: string } {
   try {
     // Generate patch and apply
-    const diff = execSync("git diff HEAD", { cwd: worktreePath, encoding: "utf8", maxBuffer: 10 * 1024 * 1024 });
+    const pathspecs = files?.map((file) => file.trim()).filter(Boolean) ?? [];
+    const diff = execFileSync("git", ["diff", "HEAD", "--", ...pathspecs], {
+      cwd: worktreePath,
+      encoding: "utf8",
+      maxBuffer: 10 * 1024 * 1024,
+    });
     if (!diff.trim()) {
       return { success: true };
     }

@@ -10,7 +10,7 @@ import { applyRolePromptConfigToPrompt, isRoleSystemPromptSectionEnabled, readRo
 import { indexExists } from "./code-index/database";
 import { searchIndex } from "./code-index/search";
 import { createCodeGraphTools } from "./codegraph/tools";
-import type { FileReference, SkillReference } from "./types";
+import type { FileReference, ImageContent, SkillReference, TextContent } from "./types";
 import type { McpRuntime, McpRuntimeLease } from "./mcp-runtime";
 import {
   applyModePrompt,
@@ -45,6 +45,9 @@ interface PreparedTurnContext {
   systemPromptBlock: string;
 }
 
+type RuntimeImage = { type: "image"; data: string; mimeType: string };
+type DisplayUserContent = string | (TextContent | ImageContent)[];
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -76,6 +79,17 @@ function normalizeReferences(value: unknown): FileReference[] {
     });
   }
   return references;
+}
+
+function buildDisplayUserContent(message: string, images?: RuntimeImage[]): DisplayUserContent {
+  if (!images?.length) return message;
+  return [
+    ...(message.trim() ? [{ type: "text" as const, text: message }] : []),
+    ...images.map((image) => ({
+      type: "image" as const,
+      source: { type: "base64" as const, media_type: image.mimeType, data: image.data },
+    })),
+  ];
 }
 
 function getNestedString(value: unknown, keys: string[]): string | null {
@@ -710,13 +724,14 @@ export class AgentSessionWrapper {
 
   private async prepareImageFallback(
     message: string,
-    images?: Array<{ type: "image"; data: string; mimeType: string }>,
+    images?: RuntimeImage[],
     displayMessage = message,
-  ): Promise<{ message: string; images?: Array<{ type: "image"; data: string; mimeType: string }>; displayContent?: unknown }> {
+  ): Promise<{ message: string; images?: RuntimeImage[]; displayContent?: DisplayUserContent }> {
     if (!images?.length) return { message, images };
 
+    const displayContent = buildDisplayUserContent(displayMessage, images);
     const supportsImageInput = (this.inner.model as { input?: string[] } | null | undefined)?.input?.includes("image") ?? false;
-    if (supportsImageInput) return { message, images };
+    if (supportsImageInput) return { message, images, displayContent };
 
     const mcpRuntime = await this.ensureMcpRuntimeLoaded(false).catch(() => null);
     const descriptions = await mcpRuntime?.describeImages(images, message).catch((error: unknown) => [
@@ -725,18 +740,11 @@ export class AgentSessionWrapper {
     const imageContext = descriptions?.length
       ? descriptions.map((text, index) => `图片 ${index + 1}:\n${text}`).join("\n\n")
       : "当前模型未开启图片输入，且没有可用的 MCP 图片识别工具。";
-    const displayContent = [
-      ...(displayMessage.trim() ? [{ type: "text", text: displayMessage }] : []),
-      ...images.map((image) => ({
-        type: "image",
-        source: { type: "base64", media_type: image.mimeType, data: image.data },
-      })),
-    ];
 
     return {
       message: `${message}\n\n<image_context source="mcp-vision-fallback">\n${imageContext}\n</image_context>\n\n注意：当前模型配置未勾选图片输入，上面的 image_context 是由 MCP 图片识别服务生成的，请基于该内容回答用户。`,
       images: undefined,
-      displayContent: displayContent.length ? displayContent : message,
+      displayContent,
     };
   }
 

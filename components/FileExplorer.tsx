@@ -25,6 +25,9 @@ interface Props {
   onOpenFile: (filePath: string, fileName: string) => void;
   refreshKey?: number;
   onAtMention?: (relativePath: string) => void;
+  initialExpandedPaths?: string[];
+  activePath?: string | null;
+  onExplorerStateChange?: (state: { expandedPaths: string[]; activePath: string | null }) => void;
 }
 
 async function fetchEntries(dirPath: string): Promise<FileNode[]> {
@@ -52,6 +55,7 @@ function TreeNode({
   onToggleExpanded,
   refreshKey,
   onContextMenu,
+  activePath,
 }: {
   node: FileNode;
   depth: number;
@@ -62,8 +66,10 @@ function TreeNode({
   onToggleExpanded: (fullPath: string, open: boolean) => void;
   refreshKey?: number;
   onContextMenu?: (event: React.MouseEvent, filePath: string, fileName: string, isDir: boolean) => void;
+  activePath?: string | null;
 }) {
   const open = expandedPaths.has(node.fullPath);
+  const active = !node.isDir && activePath === node.fullPath;
   const [children, setChildren] = useState<FileNode[]>(node.children ?? []);
   const [loaded, setLoaded] = useState(node.loaded ?? false);
   const [loading, setLoading] = useState(false);
@@ -129,11 +135,15 @@ function TreeNode({
           paddingRight: 8,
           height: 24,
           cursor: "pointer",
-          background: hovered ? "color-mix(in srgb, var(--accent) 18%, var(--bg-hover))" : "transparent",
+          background: active
+            ? "color-mix(in srgb, var(--accent) 22%, var(--bg-hover))"
+            : hovered
+              ? "color-mix(in srgb, var(--accent) 18%, var(--bg-hover))"
+              : "transparent",
           borderRadius: 3,
           userSelect: "none",
           transition: "background 0.12s ease, color 0.12s ease",
-          color: hovered ? "var(--text)" : "var(--text-muted)",
+          color: active || hovered ? "var(--text)" : "var(--text-muted)",
         }}
       >
         {node.isDir && (
@@ -152,7 +162,7 @@ function TreeNode({
         <span
           style={{
             fontSize: 11,
-            color: hovered ? "var(--text)" : "var(--text-muted)",
+            color: active || hovered ? "var(--text)" : "var(--text-muted)",
             overflow: "hidden",
             textOverflow: "ellipsis",
             whiteSpace: "nowrap",
@@ -206,7 +216,7 @@ function TreeNode({
       {node.isDir && open && (
         <div>
           {children.map((child) => (
-            <TreeNode key={child.fullPath} node={child} depth={depth + 1} cwd={cwd} onOpenFile={onOpenFile} onAtMention={onAtMention} expandedPaths={expandedPaths} onToggleExpanded={onToggleExpanded} refreshKey={refreshKey} onContextMenu={onContextMenu} />
+            <TreeNode key={child.fullPath} node={child} depth={depth + 1} cwd={cwd} onOpenFile={onOpenFile} onAtMention={onAtMention} expandedPaths={expandedPaths} onToggleExpanded={onToggleExpanded} refreshKey={refreshKey} onContextMenu={onContextMenu} activePath={activePath} />
           ))}
           {children.length === 0 && loaded && (
             <div style={{ paddingLeft: 6 + (depth + 1) * 12 + 14, fontSize: 10, color: "var(--text-dim)", height: 22, display: "flex", alignItems: "center", fontStyle: "italic" }}>
@@ -219,12 +229,16 @@ function TreeNode({
   );
 }
 
-export function FileExplorer({ cwd, onOpenFile, refreshKey, onAtMention }: Props) {
+export function FileExplorer({ cwd, onOpenFile, refreshKey, onAtMention, initialExpandedPaths = [], activePath = null, onExplorerStateChange }: Props) {
   const [roots, setRoots] = useState<FileNode[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set());
+  const [expandedPaths, setExpandedPaths] = useState<Set<string>>(() => new Set(initialExpandedPaths));
+  const [activeFilePath, setActiveFilePath] = useState<string | null>(activePath);
   const prevCwdRef = useRef<string | null>(null);
+  const initialExpandedPathsRef = useRef(initialExpandedPaths);
+  const initialActivePathRef = useRef(activePath);
+  const onExplorerStateChangeRef = useRef(onExplorerStateChange);
 
   // Context menu state
   const [contextMenu, setContextMenu] = useState<{
@@ -296,12 +310,33 @@ export function FileExplorer({ cwd, onOpenFile, refreshKey, onAtMention }: Props
     });
   }, []);
 
+  const handleOpenFile = useCallback((filePath: string, fileName: string) => {
+    setActiveFilePath(filePath);
+    onOpenFile(filePath, fileName);
+  }, [onOpenFile]);
+
+  useEffect(() => {
+    initialExpandedPathsRef.current = initialExpandedPaths;
+    initialActivePathRef.current = activePath;
+  }, [activePath, initialExpandedPaths]);
+
+  useEffect(() => {
+    onExplorerStateChangeRef.current = onExplorerStateChange;
+  }, [onExplorerStateChange]);
+
+  useEffect(() => {
+    onExplorerStateChangeRef.current?.({ expandedPaths: Array.from(expandedPaths), activePath: activeFilePath });
+  }, [activeFilePath, expandedPaths]);
+
   useEffect(() => {
     const cwdChanged = prevCwdRef.current !== cwd;
     prevCwdRef.current = cwd;
 
     // Reset expanded state only when cwd changes, not on refreshKey bumps
-    if (cwdChanged) setExpandedPaths(new Set());
+    if (cwdChanged) {
+      setExpandedPaths(new Set(initialExpandedPathsRef.current));
+      setActiveFilePath(initialActivePathRef.current);
+    }
 
     setLoading(cwdChanged);
     setError(null);
@@ -309,7 +344,7 @@ export function FileExplorer({ cwd, onOpenFile, refreshKey, onAtMention }: Props
       .then((entries) => setRoots(entries))
       .catch((e) => setError(String(e)))
       .finally(() => setLoading(false));
-  }, [cwd, refreshKey]);
+  }, [cwd, refreshKey, initialExpandedPathsRef, initialActivePathRef]);
 
   if (loading) {
     return (
@@ -352,12 +387,13 @@ export function FileExplorer({ cwd, onOpenFile, refreshKey, onAtMention }: Props
           node={node}
           depth={0}
           cwd={cwd}
-          onOpenFile={onOpenFile}
+          onOpenFile={handleOpenFile}
           onAtMention={onAtMention}
           expandedPaths={expandedPaths}
           onToggleExpanded={handleToggleExpanded}
           refreshKey={refreshKey}
           onContextMenu={handleContextMenu}
+          activePath={activeFilePath}
         />
       ))}
       {roots.length === 0 && (

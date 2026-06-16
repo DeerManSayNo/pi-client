@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useEscapeClose } from "@/hooks/useEscapeClose";
 import type { SkillSearchResult } from "@/app/api/skills/search/route";
 
@@ -17,9 +17,22 @@ interface Skill {
   canDelete: boolean;
 }
 
+interface ProjectOption {
+  cwd: string;
+  displayName: string;
+}
+
 function shortenPath(p: string): string {
   // Match common home dir patterns: /Users/xxx, /home/xxx
   return p.replace(/^\/(?:Users|home)\/[^/]+/, "~");
+}
+
+function projectName(cwd: string): string {
+  return cwd.replace(/[/\\]+$/, "").split(/[/\\]/).pop() || cwd;
+}
+
+function skillsApiUrl(cwd?: string): string {
+  return cwd ? `/api/skills?cwd=${encodeURIComponent(cwd)}` : "/api/skills";
 }
 
 function sourceLabel(skill: Skill): string {
@@ -410,29 +423,43 @@ function TavilyKeyConfig() {
 function SkillDetail({
   skill,
   cwd,
+  projects,
+  moveProjectCwd,
+  onMoveProjectCwdChange,
   onToggle,
   onDelete,
+  onMove,
   toggling,
   deleting,
+  moving,
   saveError,
 }: {
   skill: Skill;
-  cwd: string;
+  cwd?: string;
+  projects: ProjectOption[];
+  moveProjectCwd: string;
+  onMoveProjectCwdChange: (cwd: string) => void;
   onToggle: (skill: Skill) => void;
   onDelete: (skill: Skill) => void;
+  onMove: (skill: Skill, targetScope: "global" | "project", targetCwd?: string) => void;
   toggling: boolean;
   deleting: boolean;
+  moving: boolean;
   saveError: string | null;
 }) {
   const label = sourceLabel(skill);
   const sgKey = subGroupKey(skill);
   const sgDisplay = subGroupDisplay(sgKey);
   const enabled = !skill.disableModelInvocation;
+  const targetScope = label === "global" ? "project" : "global";
+  const canMove = skill.canDelete && (label === "global" || label === "project");
+  const needsProjectTarget = canMove && targetScope === "project";
+  const canMoveNow = !needsProjectTarget || Boolean(moveProjectCwd);
 
   const [confirmDelete, setConfirmDelete] = useState(false);
 
   function displayPath(p: string): string {
-    if (label === "project" && p.startsWith(cwd)) {
+    if (cwd && label === "project" && p.startsWith(cwd)) {
       const rel = p.slice(cwd.length).replace(/^[/\\]/, "");
       return `./${rel}`;
     }
@@ -494,13 +521,63 @@ function SkillDetail({
         </span>
         <Toggle
           enabled={enabled}
-          loading={toggling}
+          loading={toggling || moving}
           onToggle={() => onToggle(skill)}
         />
+        {needsProjectTarget && (
+          <select
+            value={moveProjectCwd}
+            onChange={(e) => onMoveProjectCwdChange(e.target.value)}
+            disabled={moving || deleting}
+            title={moveProjectCwd || "选择目标项目"}
+            style={{
+              flexShrink: 0,
+              maxWidth: 150,
+              padding: "3px 6px",
+              fontSize: 11,
+              borderRadius: 4,
+              border: "1px solid var(--border)",
+              background: "var(--bg)",
+              color: moveProjectCwd ? "var(--text-muted)" : "var(--text-dim)",
+              cursor: moving || deleting ? "not-allowed" : "pointer",
+            }}
+          >
+            <option value="">选择项目</option>
+            {projects.map((project) => (
+              <option key={project.cwd} value={project.cwd}>
+                {project.displayName || projectName(project.cwd)}
+              </option>
+            ))}
+          </select>
+        )}
+        {canMove && (
+          <button
+            onClick={() => onMove(skill, targetScope, targetScope === "project" ? moveProjectCwd : undefined)}
+            disabled={moving || deleting || !canMoveNow}
+            title={targetScope === "project" ? "移到选择的项目" : "移到全局"}
+            style={{
+              flexShrink: 0,
+              padding: "3px 8px",
+              fontSize: 11,
+              borderRadius: 4,
+              border: "1px solid var(--border)",
+              background: "none",
+              color: "var(--text-dim)",
+              cursor: moving || deleting || !canMoveNow ? "not-allowed" : "pointer",
+              opacity: moving || deleting || !canMoveNow ? 0.5 : 1,
+            }}
+          >
+            {moving
+              ? "移动中…"
+              : targetScope === "project"
+                ? "移到项目"
+                : "移到全局"}
+          </button>
+        )}
         {skill.canDelete && !confirmDelete && (
           <button
             onClick={() => setConfirmDelete(true)}
-            disabled={deleting}
+            disabled={deleting || moving}
             title="删除技能"
             style={{
               flexShrink: 0,
@@ -510,8 +587,8 @@ function SkillDetail({
               border: "1px solid var(--border)",
               background: "none",
               color: "var(--text-dim)",
-              cursor: deleting ? "not-allowed" : "pointer",
-              opacity: deleting ? 0.5 : 1,
+              cursor: deleting || moving ? "not-allowed" : "pointer",
+              opacity: deleting || moving ? 0.5 : 1,
             }}
           >
             <svg
@@ -652,7 +729,7 @@ function AddSkillPanel({
   cwd,
   onInstalled,
 }: {
-  cwd: string;
+  cwd?: string;
   onInstalled: () => void;
 }) {
   const [query, setQuery] = useState("");
@@ -668,6 +745,10 @@ function AddSkillPanel({
   useEffect(() => {
     inputRef.current?.focus();
   }, []);
+
+  useEffect(() => {
+    if (!cwd && scope === "project") setScope("global");
+  }, [cwd, scope]);
 
   const search = useCallback(async (q: string) => {
     if (!q.trim()) return;
@@ -699,6 +780,10 @@ function AddSkillPanel({
 
   const install = useCallback(
     async (pkg: string) => {
+      if (scope === "project" && !cwd) {
+        setInstallError("请先在技能配置顶部选择项目视图");
+        return;
+      }
       setInstalling(pkg);
       setInstallError(null);
       try {
@@ -726,7 +811,9 @@ function AddSkillPanel({
   const installPath =
     scope === "global"
       ? "~/.deerhux/agent/skills/"
-      : `${shortenPath(cwd)}/.deerhux/skills/`;
+      : cwd
+        ? `${shortenPath(cwd)}/.deerhux/skills/`
+        : "请先选择项目视图";
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
@@ -799,12 +886,14 @@ function AddSkillPanel({
               <button
                 key={s}
                 onClick={() => setScope(s)}
+                disabled={s === "project" && !cwd}
                 style={{
                   padding: "3px 10px",
                   border: "none",
-                  cursor: "pointer",
+                  cursor: s === "project" && !cwd ? "not-allowed" : "pointer",
                   background: scope === s ? "var(--bg-selected)" : "none",
                   color: scope === s ? "var(--text)" : "var(--text-dim)",
+                  opacity: s === "project" && !cwd ? 0.45 : 1,
                   fontWeight: scope === s ? 600 : 400,
                   borderRight:
                     s === "global" ? "1px solid var(--border)" : "none",
@@ -976,28 +1065,37 @@ function AddSkillPanel({
 }
 
 export function SkillsConfig({
-  cwd,
+  projects = [],
   onClose,
 }: {
-  cwd: string;
+  projects?: ProjectOption[];
   onClose: () => void;
 }) {
   const [skills, setSkills] = useState<Skill[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
+  const [selectedProjectCwd, setSelectedProjectCwd] = useState("");
+  const [moveProjectCwd, setMoveProjectCwd] = useState("");
   const [toggling, setToggling] = useState<Set<string>>(new Set());
   const [deleting, setDeleting] = useState<Set<string>>(new Set());
+  const [moving, setMoving] = useState<Set<string>>(new Set());
   const [saveError, setSaveError] = useState<string | null>(null);
   const [addMode, setAddMode] = useState(false);
 
   useEscapeClose(() => setAddMode(false), addMode);
   useEscapeClose(onClose, !addMode);
 
-  const loadSkills = useCallback(() => {
+  const projectChoices = useMemo(
+    () => projects.filter((project) => project.cwd),
+    [projects],
+  );
+
+  const loadSkills = useCallback((preferredSelected?: string, overrideCwd?: string) => {
+    const targetCwd = overrideCwd ?? selectedProjectCwd;
     setLoading(true);
     setError(null);
-    fetch(`/api/skills?cwd=${encodeURIComponent(cwd)}`)
+    fetch(skillsApiUrl(targetCwd || undefined))
       .then((r) => r.json())
       .then((d: { skills?: Skill[]; error?: string }) => {
         if (d.error) {
@@ -1006,15 +1104,27 @@ export function SkillsConfig({
         }
         const list = d.skills ?? [];
         setSkills(list);
-        if (list.length > 0 && !selected) setSelected(list[0].filePath);
+        setSelected((current) => {
+          if (preferredSelected && list.some((s) => s.filePath === preferredSelected)) {
+            return preferredSelected;
+          }
+          if (current && list.some((s) => s.filePath === current)) return current;
+          return list[0]?.filePath ?? null;
+        });
       })
       .catch((e) => setError(String(e)))
       .finally(() => setLoading(false));
-  }, [cwd, selected]);
+  }, [selectedProjectCwd]);
 
   useEffect(() => {
     loadSkills();
-  }, [cwd]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [selectedProjectCwd]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!moveProjectCwd && projectChoices[0]?.cwd) {
+      setMoveProjectCwd(projectChoices[0].cwd);
+    }
+  }, [moveProjectCwd, projectChoices]);
 
   const toggle = useCallback(async (skill: Skill) => {
     const next = !skill.disableModelInvocation;
@@ -1026,7 +1136,7 @@ export function SkillsConfig({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           filePath: skill.filePath,
-          cwd,
+          cwd: selectedProjectCwd || undefined,
           disableModelInvocation: next,
         }),
       });
@@ -1051,14 +1161,55 @@ export function SkillsConfig({
         return n;
       });
     }
-  }, []);
+  }, [selectedProjectCwd]);
+
+  const moveSkill = useCallback(async (skill: Skill, targetScope: "global" | "project", targetCwd?: string) => {
+    const requestCwd = targetScope === "project" ? targetCwd : selectedProjectCwd;
+    if (targetScope === "project" && !requestCwd) {
+      setSaveError("请选择目标项目");
+      return;
+    }
+    setMoving((s) => new Set(s).add(skill.filePath));
+    setSaveError(null);
+    try {
+      const res = await fetch("/api/skills", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          filePath: skill.filePath,
+          cwd: requestCwd || undefined,
+          targetScope,
+        }),
+      });
+      const d = (await res.json()) as {
+        success?: boolean;
+        filePath?: string;
+        error?: string;
+      };
+      if (!res.ok || d.error) {
+        setSaveError(d.error ?? `HTTP ${res.status}`);
+        return;
+      }
+      const nextCwd = targetScope === "project" ? (requestCwd ?? "") : "";
+      setSelectedProjectCwd(nextCwd);
+      loadSkills(d.filePath, nextCwd);
+    } catch (e) {
+      setSaveError(String(e));
+    } finally {
+      setMoving((s) => {
+        const n = new Set(s);
+        n.delete(skill.filePath);
+        return n;
+      });
+    }
+  }, [loadSkills, selectedProjectCwd]);
 
   const deleteSkill = useCallback(async (skill: Skill) => {
     setDeleting((s) => new Set(s).add(skill.filePath));
     setSaveError(null);
     try {
       const res = await fetch(
-        `/api/skills?cwd=${encodeURIComponent(cwd)}&filePath=${encodeURIComponent(skill.filePath)}`,
+        `${skillsApiUrl(selectedProjectCwd || undefined)}${selectedProjectCwd ? "&" : "?"}filePath=${encodeURIComponent(skill.filePath)}`,
         { method: "DELETE" },
       );
       const d = (await res.json()) as { success?: boolean; error?: string };
@@ -1083,7 +1234,7 @@ export function SkillsConfig({
         return n;
       });
     }
-  }, [selected]);
+  }, [selected, selectedProjectCwd]);
 
   const selectedSkill = skills.find((s) => s.filePath === selected) ?? null;
 
@@ -1126,25 +1277,71 @@ export function SkillsConfig({
             flexShrink: 0,
           }}
         >
-          <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
             <span
-              style={{ fontSize: 15, fontWeight: 700, color: "var(--text)" }}
+              style={{ fontSize: 15, fontWeight: 700, color: "var(--text)", flexShrink: 0 }}
             >
               技能配置
             </span>
-            <code
+            <div
               style={{
-                fontSize: 11,
-                color: "var(--text-muted)",
-                fontFamily: "var(--font-mono)",
-                maxWidth: 320,
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+                minWidth: 0,
               }}
             >
-              {shortenPath(cwd)}
-            </code>
+              <button
+                type="button"
+                onClick={() => setSelectedProjectCwd("")}
+                style={{
+                  padding: "4px 9px",
+                  fontSize: 12,
+                  borderRadius: 5,
+                  border: "1px solid var(--border)",
+                  background: selectedProjectCwd ? "none" : "var(--bg-selected)",
+                  color: selectedProjectCwd ? "var(--text-dim)" : "var(--text)",
+                  cursor: "pointer",
+                }}
+              >
+                全局
+              </button>
+              <select
+                value={selectedProjectCwd}
+                onChange={(e) => setSelectedProjectCwd(e.target.value)}
+                title={selectedProjectCwd || "选择项目视图"}
+                style={{
+                  maxWidth: 360,
+                  padding: "4px 8px",
+                  fontSize: 12,
+                  borderRadius: 5,
+                  border: "1px solid var(--border)",
+                  background: selectedProjectCwd ? "var(--bg-selected)" : "var(--bg)",
+                  color: selectedProjectCwd ? "var(--text)" : "var(--text-dim)",
+                  cursor: "pointer",
+                }}
+              >
+                <option value="">选择项目视图…</option>
+                {projectChoices.map((project) => (
+                  <option key={project.cwd} value={project.cwd}>
+                    {project.displayName || projectName(project.cwd)}
+                  </option>
+                ))}
+              </select>
+              <code
+                style={{
+                  fontSize: 11,
+                  color: "var(--text-muted)",
+                  fontFamily: "var(--font-mono)",
+                  maxWidth: 260,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {selectedProjectCwd ? shortenPath(selectedProjectCwd) : "global skills"}
+              </code>
+            </div>
           </div>
           <button
             onClick={onClose}
@@ -1398,7 +1595,7 @@ export function SkillsConfig({
           <div style={{ flex: 1, overflowY: "auto", padding: 20 }}>
             {addMode ? (
               <AddSkillPanel
-                cwd={cwd}
+                cwd={selectedProjectCwd || undefined}
                 onInstalled={() => {
                   loadSkills();
                 }}
@@ -1408,11 +1605,16 @@ export function SkillsConfig({
                 <SkillDetail
                   key={selectedSkill.filePath}
                   skill={selectedSkill}
-                  cwd={cwd}
+                  cwd={selectedProjectCwd || undefined}
+                  projects={projectChoices}
+                  moveProjectCwd={moveProjectCwd}
+                  onMoveProjectCwdChange={setMoveProjectCwd}
                   onToggle={toggle}
                   onDelete={deleteSkill}
+                  onMove={moveSkill}
                   toggling={toggling.has(selectedSkill.filePath)}
                   deleting={deleting.has(selectedSkill.filePath)}
+                  moving={moving.has(selectedSkill.filePath)}
                   saveError={saveError}
                 />
                 {selectedSkill.name === "tavily-search" && <TavilyKeyConfig />}

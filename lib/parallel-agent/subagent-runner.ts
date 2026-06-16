@@ -45,9 +45,6 @@ export async function createSubagentWorkerSession(cwd: string, mode: Collaborati
     sessionFile || "",
     cwd,
     tools,
-    undefined,
-    undefined,
-    { hideFromGlobalRunningList: true, hideFromProjectList: true },
   );
 
   return {

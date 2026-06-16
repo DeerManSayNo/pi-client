@@ -4,13 +4,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AgentMessage, FileReference, SessionInfo, SkillReference } from "@/lib/types";
 import { MessageView } from "./MessageView";
 import { ChatInput, type ChatInputHandle, type ChatInputState, type AttachedImage } from "./ChatInput";
-import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
+import { useMessageRefs } from "./ChatMinimap";
 import { ChangedFilesList } from "./ChangedFilesList";
 import { useAgentSession, type AgentPhase, type WatchdogInfo } from "@/hooks/useAgentSession";
 import { useAgentStatus, type ServerStatus } from "@/hooks/useAgentStatus";
 import { useAudio } from "@/hooks/useAudio";
 import { useDragDrop } from "@/hooks/useDragDrop";
-import { logEventStore } from "@/lib/log-event-store";
 import { agentEventBus } from "@/lib/agent-event-bus";
 
 interface AgentRole {
@@ -23,10 +22,16 @@ interface AgentRole {
   sourceInfo?: { scope?: string; filePath?: string };
 }
 
+interface ProjectOption {
+  cwd: string;
+  displayName: string;
+}
+
 interface Props {
   activeTabId?: string | null;
   session: SessionInfo | null;
   newSessionCwd: string | null;
+  compact?: boolean;
   onAgentEnd?: (sessionId: string, changedFiles?: string[]) => void;
   onSessionCreated?: (session: SessionInfo) => void;
   onSessionStarted?: (session: SessionInfo | null) => void;
@@ -38,6 +43,14 @@ interface Props {
   onContextUsageChange?: (usage: { percent: number | null; contextWindow: number; tokens: number | null } | null) => void;
   onOpenFile?: (filePath: string, fileName: string) => void;
   onOpenRoleConfig?: () => void;
+  projectOptions?: ProjectOption[];
+  onNewSessionCwdChange?: (cwd: string) => void;
+}
+
+function getProjectName(cwd: string): string {
+  const normalized = cwd.replace(/[\\/]+$/, "");
+  const parts = normalized.split(/[\\/]/).filter(Boolean);
+  return parts.at(-1) ?? cwd;
 }
 
 function phaseLabel(
@@ -349,7 +362,7 @@ function Typewriter({ phrases }: { phrases: string[] }) {
   );
 }
 
-export function ChatWindow({ activeTabId, session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionStarted, onAgentRunningChange, onSessionForked, modelsRefreshKey, chatInputRef, onSessionStatsChange, onContextUsageChange, onOpenFile, onOpenRoleConfig }: Props) {
+export function ChatWindow({ activeTabId, session, newSessionCwd, compact = false, onAgentEnd, onSessionCreated, onSessionStarted, onAgentRunningChange, onSessionForked, modelsRefreshKey, chatInputRef, onSessionStatsChange, onContextUsageChange, onOpenFile, onOpenRoleConfig, projectOptions = [], onNewSessionCwdChange }: Props) {
   // Track changed files from agent_end event per session so switching chats
   // does not show another session's bottom "x files modified" banner.
   const [changedFilesBySession, setChangedFilesBySession] = useState<Record<string, string[]>>({});
@@ -358,8 +371,8 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, onAgentEnd, on
   const [currentRoleId, setCurrentRoleId] = useState("default");
   const [roles, setRoles] = useState<AgentRole[]>([]);
   const [pendingRoleSetting, setPendingRoleSetting] = useState<{ roleId: string; roleName: string; block: string; setting: string } | null>(null);
-  const [systemPromptExpanded, setSystemPromptExpanded] = useState(false);
   const [lastUserMsgExpanded, setLastUserMsgExpanded] = useState(false);
+  const [projectPickerOpen, setProjectPickerOpen] = useState(false);
   const wrappedOnAgentEnd = useCallback((sessionId: string, cf?: string[]) => {
     setChangedFilesBySession((prev) => ({
       ...prev,
@@ -393,6 +406,26 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, onAgentEnd, on
   const { server: serverStatus } = useAgentStatus(session?.id, agentRunning, watchdogInfo);
 
   const currentCwd = session?.cwd ?? newSessionCwd ?? undefined;
+  const selectableProjectOptions = useMemo(() => {
+    const byCwd = new Map<string, string>();
+    for (const project of projectOptions) byCwd.set(project.cwd, project.displayName);
+    if (currentCwd && !byCwd.has(currentCwd)) byCwd.set(currentCwd, getProjectName(currentCwd));
+    return [...byCwd.entries()].map(([cwd, displayName]) => ({ cwd, displayName }));
+  }, [currentCwd, projectOptions]);
+
+  useEffect(() => {
+    if (!projectPickerOpen) return;
+    const close = () => setProjectPickerOpen(false);
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") close();
+    };
+    window.addEventListener("click", close);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [projectPickerOpen]);
 
   const applyRoleToSession = useCallback(async (roleId: string) => {
     if (!session?.id) return;
@@ -491,7 +524,7 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, onAgentEnd, on
   const soundEnabledRef = useRef(soundEnabled);
   soundEnabledRef.current = soundEnabled;
 
-  // Subscribe to the global event bus for sound effects and log forwarding.
+  // Subscribe to the global event bus for sound effects.
   // This avoids wrapping handleAgentEventRef which has closure/stale-ref issues.
   const sessionIdRef2 = useRef(session?.id);
   sessionIdRef2.current = session?.id;
@@ -505,84 +538,6 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, onAgentEnd, on
       }
       if (event.type === "agent_end" && soundEnabledRef.current) {
         playDoneSoundRef.current();
-      }
-    });
-    return unsubscribe;
-  }, []);
-
-  // Forward agent events to the log store (independent of useAgentSession handler).
-  // Track per-block content lengths to correctly handle multiple blocks per message.
-  const logContentLenRef = useRef<{ thinking: number[]; text: number[] }>({ thinking: [], text: [] });
-  useEffect(() => {
-    const unsubscribe = agentEventBus.subscribe((event) => {
-      const logGroupKey = `session-${sessionIdRef2.current ?? "new"}`;
-      switch (event.type) {
-        case "agent_start": {
-          logContentLenRef.current = { thinking: [], text: [] };
-          logEventStore.push({ type: "system", content: "Agent 启动", groupKey: logGroupKey });
-          break;
-        }
-        case "agent_end":
-          logEventStore.finalizeBlock();
-          break;
-        case "message_start":
-        case "message_update": {
-          const msg = event.message as { role?: string; content?: unknown } | undefined;
-          if (msg?.role === "assistant" && Array.isArray(msg.content)) {
-            const blocks = msg.content as Array<{ type?: string; text?: string; thinking?: string }>;
-            let thinkingIdx = 0;
-            let textIdx = 0;
-            for (const block of blocks) {
-              if (block.type === "thinking" && block.thinking) {
-                const idx = thinkingIdx++;
-                const prevLen = logContentLenRef.current.thinking[idx] ?? 0;
-                const newLen = block.thinking.length;
-                if (newLen > prevLen) {
-                  logEventStore.push({ type: "thinking", content: block.thinking.slice(prevLen), groupKey: logGroupKey });
-                  logContentLenRef.current.thinking[idx] = newLen;
-                }
-              } else if (block.type === "text" && block.text) {
-                const idx = textIdx++;
-                const prevLen = logContentLenRef.current.text[idx] ?? 0;
-                const newLen = block.text.length;
-                if (newLen > prevLen) {
-                  logEventStore.push({ type: "text", content: block.text.slice(prevLen), groupKey: logGroupKey });
-                  logContentLenRef.current.text[idx] = newLen;
-                }
-              }
-            }
-          }
-          break;
-        }
-        case "tool_execution_start": {
-          const toolName = (event.toolName ?? event.name ?? "unknown") as string;
-          const toolCallId = (event.toolCallId ?? "") as string;
-          logEventStore.push({ type: "tool_start", content: `开始执行: ${toolName}`, toolName, toolCallId, groupKey: logGroupKey });
-          break;
-        }
-        case "tool_execution_end": {
-          const toolName = (event.toolName ?? event.name ?? "unknown") as string;
-          const toolCallId = (event.toolCallId ?? "") as string;
-          const result = typeof event.result === "string" ? event.result : "";
-          logEventStore.push({ type: "tool_end", content: result ? `完成: ${result.slice(0, 200)}` : "完成", toolName, toolCallId, groupKey: logGroupKey });
-          break;
-        }
-        case "auto_retry_start":
-          logEventStore.push({ type: "error", content: `自动重试 (第 ${event.attempt}/${event.maxAttempts} 次): ${event.errorMessage ?? ""}`, groupKey: logGroupKey });
-          break;
-        case "auto_retry_end":
-          if ((event as { success?: boolean }).success === false) {
-            logEventStore.push({ type: "error", content: `重试失败: ${(event as { finalError?: string }).finalError ?? ""}`, groupKey: logGroupKey });
-          }
-          break;
-        case "auto_compaction_start":
-        case "compaction_start":
-          logEventStore.push({ type: "info", content: "上下文压缩开始", groupKey: logGroupKey });
-          break;
-        case "auto_compaction_end":
-        case "compaction_end":
-          logEventStore.push({ type: "info", content: "上下文压缩完成", groupKey: logGroupKey });
-          break;
       }
     });
     return unsubscribe;
@@ -823,6 +778,13 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, onAgentEnd, on
   }, [agentRunning, streamState.streamingMessage, agentPhase, scrollToLiveBottom]);
 
   const isEmptyNew = isNew && messages.length === 0 && !streamState.isStreaming && !agentRunning;
+  const contentMaxWidth = compact ? 640 : 820;
+  const contentSidePadding = 16;
+  const messagePaddingClass = compact ? "px-3" : "px-4";
+  const canSwitchEmptyProject = isEmptyNew && Boolean(onNewSessionCwdChange) && selectableProjectOptions.length > 1;
+  const currentProjectLabel = currentCwd
+    ? selectableProjectOptions.find((project) => project.cwd === currentCwd)?.displayName ?? getProjectName(currentCwd)
+    : "";
 
   const availableThinkingLevels = displayModelValue
     ? (modelThinkingLevels[`${displayModelValue.provider}:${displayModelValue.modelId}`] ?? null)
@@ -861,7 +823,7 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, onAgentEnd, on
   const chatInputElement = (
     <>
       {pendingRoleSetting && (
-        <div style={{ maxWidth: 820, margin: "0 auto 8px", padding: "0 16px", paddingRight: 52 }}>
+        <div style={{ maxWidth: contentMaxWidth, margin: "0 auto 8px", padding: "0 16px", paddingRight: contentSidePadding }}>
           <div style={{ border: "1px solid var(--border)", borderRadius: 12, background: "var(--bg-panel)", padding: 12, boxShadow: "0 4px 14px rgba(0,0,0,0.08)" }}>
             <div style={{ fontSize: 12, fontWeight: 700, color: "var(--text)", marginBottom: 6 }}>识别到角色设定</div>
             <div style={{ fontSize: 12, color: "var(--text-muted)", lineHeight: 1.6 }}>
@@ -880,45 +842,46 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, onAgentEnd, on
       <ChatInput
         key={session?.id ?? `new:${newSessionCwd ?? ""}:${activeTabId ?? ""}`}
         ref={chatInputRef}
-      onSend={sendWithRole}
-      onAbort={handleAbort}
-      onSteer={agentRunning ? handleSteer : undefined}
-      onFollowUp={agentRunning ? handleFollowUp : undefined}
-      isStreaming={agentRunning}
-      model={displayModelValue}
-      modelNames={modelNames}
-      modelList={modelList}
-      onModelChange={handleModelChange}
-      onCompact={session || isNew ? handleCompact : undefined}
-      onAbortCompaction={handleAbortCompaction}
-      isCompacting={isCompacting}
-      compactError={compactError}
-      lastModelError={lastModelError}
-      onClearModelError={() => setLastModelError(null)}
-      agentMode={agentMode}
-      onAgentModeChange={session || isNew ? handleAgentModeChange : undefined}
-      planReady={planReady}
-      onBuildPlan={handleBuildPlan}
-      thinkingLevel={thinkingLevel}
-      onThinkingLevelChange={session || isNew ? handleThinkingLevelChange : undefined}
-      availableThinkingLevels={availableThinkingLevels}
-      thinkingLevelMap={currentThinkingLevelMap}
-      retryInfo={retryInfo}
-      soundEnabled={soundEnabled}
-      onSoundToggle={onSoundToggle}
-      cwd={session?.cwd ?? newSessionCwd}
-      currentRoleId={currentRoleId}
-      onRoleChange={handleRoleChange}
-      onRolesLoaded={setRoles}
-      onOpenRoleConfig={onOpenRoleConfig}
-      stallLevel={stallLevel}
-      autoRecoveryMode={autoRecoveryMode}
-      onAutoRecover={handleAutoRecover}
-      onDismissStall={handleDismissStall}
-      onAutoRecoveryModeChange={handleAutoRecoveryModeChange}
-      initialInputState={savedInputState}
-      saveInputStateRef={saveInputStateRef}
-    />
+        compact={compact}
+        onSend={sendWithRole}
+        onAbort={handleAbort}
+        onSteer={agentRunning ? handleSteer : undefined}
+        onFollowUp={agentRunning ? handleFollowUp : undefined}
+        isStreaming={agentRunning}
+        model={displayModelValue}
+        modelNames={modelNames}
+        modelList={modelList}
+        onModelChange={handleModelChange}
+        onCompact={session || isNew ? handleCompact : undefined}
+        onAbortCompaction={handleAbortCompaction}
+        isCompacting={isCompacting}
+        compactError={compactError}
+        lastModelError={lastModelError}
+        onClearModelError={() => setLastModelError(null)}
+        agentMode={agentMode}
+        onAgentModeChange={session || isNew ? handleAgentModeChange : undefined}
+        planReady={planReady}
+        onBuildPlan={handleBuildPlan}
+        thinkingLevel={thinkingLevel}
+        onThinkingLevelChange={session || isNew ? handleThinkingLevelChange : undefined}
+        availableThinkingLevels={availableThinkingLevels}
+        thinkingLevelMap={currentThinkingLevelMap}
+        retryInfo={retryInfo}
+        soundEnabled={soundEnabled}
+        onSoundToggle={onSoundToggle}
+        cwd={session?.cwd ?? newSessionCwd}
+        currentRoleId={currentRoleId}
+        onRoleChange={handleRoleChange}
+        onRolesLoaded={setRoles}
+        onOpenRoleConfig={onOpenRoleConfig}
+        stallLevel={stallLevel}
+        autoRecoveryMode={autoRecoveryMode}
+        onAutoRecover={handleAutoRecover}
+        onDismissStall={handleDismissStall}
+        onAutoRecoveryModeChange={handleAutoRecoveryModeChange}
+        initialInputState={savedInputState}
+        saveInputStateRef={saveInputStateRef}
+      />
     </>
   );
 
@@ -940,7 +903,7 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, onAgentEnd, on
 
   return (
     <div
-      className="relative flex h-full flex-col overflow-hidden"
+      className="chat-window-wrap relative flex h-full flex-col overflow-hidden"
       onDragEnter={handleDragEnter}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
@@ -979,113 +942,172 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, onAgentEnd, on
       )}
 
       {isEmptyNew ? (
-        <div className="flex flex-1 flex-col items-center justify-center overflow-y-auto px-4 py-8">
-          <div className="w-full max-w-[820px]">
+        <div className={`flex flex-1 flex-col items-center justify-center overflow-y-auto ${compact ? "px-3 py-5" : "px-4 py-8"}`}>
+          {currentCwd && currentProjectLabel && (
             <div
-              className="mb-3"
+              style={{
+                position: "absolute",
+                top: compact ? 10 : 18,
+                left: compact ? 10 : 16,
+                zIndex: 4,
+                maxWidth: compact ? "calc(100% - 20px)" : "calc(100% - 32px)",
+              }}
+              onClick={(event) => event.stopPropagation()}
+            >
+              <button
+                type="button"
+                onClick={() => {
+                  if (!canSwitchEmptyProject) return;
+                  setProjectPickerOpen((open) => !open);
+                }}
+                title={canSwitchEmptyProject ? "切换项目" : currentCwd}
+                aria-label="当前项目"
+                aria-haspopup={canSwitchEmptyProject ? "menu" : undefined}
+                aria-expanded={canSwitchEmptyProject ? projectPickerOpen : undefined}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 6,
+                  maxWidth: "100%",
+                  padding: compact ? "4px 7px" : "4px 8px",
+                  border: "none",
+                  borderRadius: 8,
+                  background: projectPickerOpen ? "var(--bg-hover)" : "transparent",
+                  color: "var(--text)",
+                  cursor: canSwitchEmptyProject ? "pointer" : "default",
+                  fontSize: compact ? 13 : 16,
+                  fontWeight: 700,
+                  fontFamily: "inherit",
+                  lineHeight: 1.25,
+                  transition: "background 0.12s, color 0.12s",
+                }}
+                onMouseEnter={(event) => {
+                  if (canSwitchEmptyProject) event.currentTarget.style.background = "var(--bg-hover)";
+                }}
+                onMouseLeave={(event) => {
+                  event.currentTarget.style.background = projectPickerOpen ? "var(--bg-hover)" : "transparent";
+                }}
+              >
+                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {currentProjectLabel}
+                </span>
+                {canSwitchEmptyProject && (
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, color: "var(--text-muted)", transform: projectPickerOpen ? "rotate(180deg)" : "none", transition: "transform 0.12s" }}>
+                    <polyline points="6 9 12 15 18 9" />
+                  </svg>
+                )}
+              </button>
+              {canSwitchEmptyProject && projectPickerOpen && (
+                <div
+                  role="menu"
+                  style={{
+                    position: "absolute",
+                    top: compact ? 30 : 34,
+                    left: 0,
+                    width: compact ? 230 : 260,
+                    maxWidth: "calc(100vw - 48px)",
+                    maxHeight: compact ? 260 : 320,
+                    overflowY: "auto",
+                    padding: 6,
+                    background: "var(--bg-panel)",
+                    border: "1px solid var(--border)",
+                    borderRadius: 10,
+                    boxShadow: "0 14px 36px rgba(0,0,0,0.18)",
+                  }}
+                >
+                  {selectableProjectOptions.map((project) => {
+                    const active = project.cwd === currentCwd;
+                    return (
+                      <button
+                        key={project.cwd}
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          if (!active) onNewSessionCwdChange?.(project.cwd);
+                          setProjectPickerOpen(false);
+                        }}
+                        title={project.cwd}
+                        style={{
+                          width: "100%",
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 8,
+                          padding: "8px 9px",
+                          border: "none",
+                          borderRadius: 8,
+                          background: active ? "var(--bg-selected)" : "transparent",
+                          color: active ? "var(--text)" : "var(--text-muted)",
+                          cursor: active ? "default" : "pointer",
+                          textAlign: "left",
+                          fontSize: 12,
+                        }}
+                        onMouseEnter={(event) => {
+                          if (!active) event.currentTarget.style.background = "var(--bg-hover)";
+                        }}
+                        onMouseLeave={(event) => {
+                          if (!active) event.currentTarget.style.background = "transparent";
+                        }}
+                      >
+                        <span style={{ width: 7, height: 7, borderRadius: 999, background: active ? "var(--accent)" : "var(--border)", flexShrink: 0 }} />
+                        <span style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {project.displayName}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+          <div className="w-full" style={{ maxWidth: contentMaxWidth }}>
+            <div
               style={{
                 display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                gap: 12,
-                marginLeft: 16,
-                marginRight: 52,
+                flexDirection: compact ? "column" : "row",
+                alignItems: compact ? "center" : "center",
+                justifyContent: compact ? "center" : "space-between",
+                gap: compact ? 6 : 12,
+                margin: compact ? "0 10px 14px" : `0 ${contentSidePadding}px 12px 16px`,
                 fontFamily: "var(--font-mono)",
+                textAlign: compact ? "center" : "left",
               }}
             >
-              <div style={{ display: "flex", alignItems: "baseline", gap: 10, minWidth: 0, flex: 1, lineHeight: 1.4 }}>
-                <span style={{ fontSize: 28, fontWeight: 700, letterSpacing: "-0.02em", color: "var(--text)" }}>π</span>
-                <span style={{ fontSize: 22, color: "var(--text)", fontWeight: 700, letterSpacing: "-0.01em" }}>DeerHux</span>
-                <span style={{ fontSize: 14, minWidth: 0, overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis" }}>
-                  <Typewriter phrases={TYPEWRITER_PHRASES} />
+              <div style={{ display: "flex", alignItems: "center", justifyContent: compact ? "center" : "flex-start", gap: compact ? 8 : 10, minWidth: 0, flex: compact ? "0 0 auto" : 1, lineHeight: 1.4 }}>
+                <span
+                  style={{
+                    width: compact ? 30 : "auto",
+                    height: compact ? 30 : "auto",
+                    borderRadius: compact ? 12 : 0,
+                    display: "inline-flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    background: compact ? "color-mix(in srgb, var(--accent) 9%, var(--bg-panel))" : "transparent",
+                    color: compact ? "var(--accent)" : "var(--text)",
+                    fontSize: compact ? 18 : 28,
+                    fontWeight: 760,
+                    letterSpacing: "-0.02em",
+                  }}
+                >
+                  π
                 </span>
+                <span style={{ fontSize: compact ? 18 : 22, color: "var(--text)", fontWeight: 760, letterSpacing: "-0.02em" }}>DeerHux</span>
+                {!compact && (
+                  <span style={{ fontSize: 14, minWidth: 0, overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis" }}>
+                    <Typewriter phrases={TYPEWRITER_PHRASES} />
+                  </span>
+                )}
               </div>
+              {compact && (
+                <div style={{ maxWidth: 280, color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5 }}>
+                  <Typewriter phrases={TYPEWRITER_PHRASES} />
+                </div>
+              )}
             </div>
             {chatInputElement}
           </div>
         </div>
       ) : (
       <>
-      {systemPrompt !== null && (
-        <div
-          style={{
-            flexShrink: 0,
-            width: "100%",
-            boxSizing: "border-box",
-            paddingLeft: 16,
-            paddingRight: 52, // 16px base + 36px for ChatMinimap alignment
-          }}
-        >
-          <div style={{
-            maxWidth: 820,
-            margin: "8px auto 0",
-            border: "1px solid var(--border)",
-            borderRadius: 8,
-            background: "var(--bg-panel)",
-            overflow: "hidden",
-          }}>
-            <button
-              onClick={() => setSystemPromptExpanded(!systemPromptExpanded)}
-              style={{
-                width: "100%",
-                display: "flex",
-                alignItems: "center",
-                gap: 6,
-                padding: "5px 10px",
-                border: "none",
-                background: "transparent",
-                cursor: "pointer",
-                fontSize: 11,
-                color: "var(--text-muted)",
-                fontFamily: "inherit",
-              }}
-              onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
-              onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
-            >
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: systemPrompt ? "var(--accent)" : "currentColor", flexShrink: 0 }}>
-                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                <polyline points="14 2 14 8 20 8" />
-                <line x1="8" y1="13" x2="16" y2="13" />
-                <line x1="8" y1="17" x2="13" y2="17" />
-              </svg>
-              <span style={{ fontWeight: 500 }}>系统提示词</span>
-              {systemPrompt && (
-                <span style={{
-                  maxWidth: 280,
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
-                  opacity: 0.6,
-                  fontSize: 10,
-                }}>
-                  {systemPrompt.slice(0, 60).replace(/\n/g, " ")}{systemPrompt.length > 60 ? "…" : ""}
-                </span>
-              )}
-              {systemPrompt === "" && (
-                <span style={{ opacity: 0.5, fontStyle: "italic", fontSize: 10 }}>为空（已禁用工具）</span>
-              )}
-              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ marginLeft: "auto", flexShrink: 0, transform: systemPromptExpanded ? "rotate(180deg)" : "none", transition: "transform 0.15s" }}>
-                <polyline points="6 9 12 15 18 9" />
-              </svg>
-            </button>
-            {systemPromptExpanded && (
-              <div style={{
-                padding: "8px 10px 10px",
-                borderTop: "1px solid var(--border)",
-                fontSize: 11,
-                lineHeight: 1.65,
-                color: "var(--text-muted)",
-                whiteSpace: "pre-wrap",
-                fontFamily: "var(--font-mono)",
-                maxHeight: 240,
-                overflowY: "auto",
-              }}>
-                {systemPrompt || "（空）"}
-              </div>
-            )}
-          </div>
-        </div>
-      )}
       {pinnedUserMsgIdx >= 0 && pinnedUserMsgText && (
         <div
           style={{
@@ -1093,11 +1115,11 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, onAgentEnd, on
             width: "100%",
             boxSizing: "border-box",
             paddingLeft: 16,
-            paddingRight: 52,
+            paddingRight: contentSidePadding,
           }}
         >
           <div style={{
-            maxWidth: 820,
+            maxWidth: contentMaxWidth,
             margin: "4px auto 0",
             border: "1px solid var(--border)",
             borderRadius: 8,
@@ -1165,7 +1187,7 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, onAgentEnd, on
               </button>
             </div>
             {lastUserMsgExpanded && (
-              <div style={{
+              <div className="scrollbar-none" style={{
                 padding: "8px 10px 10px",
                 borderTop: "1px solid var(--border)",
                 fontSize: 11,
@@ -1188,9 +1210,10 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, onAgentEnd, on
           onScroll={handleScroll}
           onWheel={markUserScrollIntent}
           onTouchStart={markUserScrollIntent}
-          className="flex-1 overflow-y-auto pt-4 [scrollbar-width:none]"
+          className={`${compact ? "pt-3" : "pt-4"} flex-1 overflow-y-auto scrollbar-none [scrollbar-width:none]`}
+          style={{ overflowX: "hidden" }}
         >
-          <div className="mx-auto max-w-[820px] px-4">
+          <div className={`mx-auto ${messagePaddingClass}`} style={{ width: "100%", maxWidth: contentMaxWidth, minWidth: 0, overflowX: "hidden", paddingBottom: compact ? 12 : 18 }}>
 
             {(() => {
               let lastUserIdx = -1;
@@ -1226,6 +1249,7 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, onAgentEnd, on
                     showTimestamp={showTimestamp}
                     prevTimestamp={idx > 0 ? (messages[idx - 1] as import("@/lib/types").AgentMessage & { timestamp?: number }).timestamp : undefined}
                     onResend={session && entryIds[idx] ? handleResend : undefined}
+                    systemPrompt={systemPrompt}
                   />
                 );
                 if (!isVisible) return view;
@@ -1287,12 +1311,6 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, onAgentEnd, on
             回到底部
           </button>
         )}
-        <ChatMinimap
-          messages={messages}
-          streamingMessage={streamState.streamingMessage}
-          scrollContainer={scrollContainerRef}
-          messageRefs={messageRefs}
-        />
       </div>
 
       <div className="relative">

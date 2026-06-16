@@ -1,10 +1,10 @@
 import { NextResponse } from "next/server";
-import { existsSync, readFileSync, writeFileSync, rmdirSync, unlinkSync } from "fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync, rmdirSync, unlinkSync } from "fs";
 import { DefaultResourceLoader, getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import path from "path";
 import { readdirSync } from "fs";
 import { migrateProjectAgentsDir } from "@/lib/legacy-migration";
-import { isManagedDeerHuxSkillFile } from "@/lib/extensions/config";
+import { deerhuxManagedSkillDirs, isManagedDeerHuxSkillFile, isPathInside } from "@/lib/extensions/config";
 
 export const dynamic = "force-dynamic";
 
@@ -72,11 +72,12 @@ function injectBuiltinSkills(skills: SkillWithMeta[]): SkillWithMeta[] {
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
   const cwd = searchParams.get("cwd");
-  if (!cwd) return NextResponse.json({ error: "cwd required" }, { status: 400 });
 
   try {
-    migrateProjectAgentsDir(cwd);
-    const loader = new DefaultResourceLoader({ cwd, agentDir: getAgentDir() });
+    if (cwd) migrateProjectAgentsDir(cwd);
+    const agentDir = getAgentDir();
+    const loaderCwd = cwd?.trim() || path.parse(agentDir).root;
+    const loader = new DefaultResourceLoader({ cwd: loaderCwd, agentDir });
     await loader.reload();
     const { skills, diagnostics } = loader.getSkills();
 
@@ -105,6 +106,44 @@ export async function GET(req: Request) {
 
 function isBuiltinSkill(filePath: string): boolean {
   return BUILTIN_SKILLS.some((s) => s.filePath === filePath);
+}
+
+function targetSkillRoot(scope: "global" | "project", cwd?: string | null): string {
+  if (scope === "global") return deerhuxManagedSkillDirs()[0];
+  if (!cwd?.trim()) throw new Error("cwd required for project scope");
+  return deerhuxManagedSkillDirs(cwd)[1];
+}
+
+function moveDirectory(srcDir: string, destDir: string): void {
+  try {
+    renameSync(srcDir, destDir);
+  } catch {
+    cpSync(srcDir, destDir, { recursive: true });
+    rmSync(srcDir, { recursive: true, force: true });
+  }
+}
+
+function moveSkillToScope(filePath: string, targetScope: "global" | "project", cwd?: string | null): string {
+  if (!isManagedDeerHuxSkillFile(filePath, cwd)) {
+    throw new Error("only DeerHux-managed SKILL.md files can be moved");
+  }
+
+  const sourceDir = path.dirname(filePath);
+  if (!deerhuxManagedSkillDirs(cwd).some((dir) => isPathInside(sourceDir, dir))) {
+    throw new Error("skill directory is outside managed skill roots");
+  }
+
+  const targetRoot = targetSkillRoot(targetScope, cwd);
+  const targetDir = path.join(targetRoot, path.basename(sourceDir));
+  const targetFile = path.join(targetDir, "SKILL.md");
+  if (sourceDir === targetDir) return targetFile;
+  if (existsSync(targetDir)) {
+    throw new Error(`target skill already exists: ${targetFile}`);
+  }
+
+  mkdirSync(targetRoot, { recursive: true });
+  moveDirectory(sourceDir, targetDir);
+  return targetFile;
 }
 
 // DELETE /api/skills — delete a skill file
@@ -148,19 +187,35 @@ export async function DELETE(req: Request) {
   }
 }
 
-// PATCH /api/skills — toggle disable-model-invocation on a SKILL.md file
+// PATCH /api/skills — toggle disable-model-invocation or move a SKILL.md file between scopes
 export async function PATCH(req: Request) {
   try {
-    const body = await req.json() as { filePath: string; disableModelInvocation: boolean; cwd?: string | null };
-    const { filePath, disableModelInvocation, cwd } = body;
+    const body = await req.json() as {
+      filePath: string;
+      disableModelInvocation?: boolean;
+      targetScope?: "global" | "project";
+      cwd?: string | null;
+    };
+    const { filePath, disableModelInvocation, targetScope, cwd } = body;
     if (!filePath) return NextResponse.json({ error: "filePath required" }, { status: 400 });
     if (isBuiltinSkill(filePath)) {
       return NextResponse.json({ error: "built-in skills cannot be modified through this API" }, { status: 400 });
     }
     if (!existsSync(filePath)) return NextResponse.json({ error: "file not found" }, { status: 404 });
 
+    if (targetScope) {
+      if (targetScope !== "global" && targetScope !== "project") {
+        return NextResponse.json({ error: "targetScope must be global or project" }, { status: 400 });
+      }
+      const nextFilePath = moveSkillToScope(filePath, targetScope, cwd);
+      return NextResponse.json({ success: true, filePath: nextFilePath });
+    }
+
     if (!isManagedDeerHuxSkillFile(filePath, cwd)) {
       return NextResponse.json({ error: "only DeerHux-managed SKILL.md files can be modified" }, { status: 400 });
+    }
+    if (typeof disableModelInvocation !== "boolean") {
+      return NextResponse.json({ error: "disableModelInvocation required" }, { status: 400 });
     }
 
     const content = readFileSync(filePath, "utf8");

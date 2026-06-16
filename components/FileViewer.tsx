@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useRef, useCallback, type ClipboardEvent, type FormEvent } from "react";
+import { useEffect, useMemo, useState, useRef, useCallback, type ClipboardEvent, type FormEvent } from "react";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { vs } from "react-syntax-highlighter/dist/cjs/styles/prism";
 import { vscDarkPlus } from "react-syntax-highlighter/dist/cjs/styles/prism";
@@ -337,6 +337,106 @@ type DiffLine =
   | { type: "added"; text: string; lineNo: number };
 
 type MarkdownSaveState = "idle" | "dirty" | "saving" | "saved" | "error";
+
+interface FileSearchMatch {
+  line: number;
+  column: number;
+  length: number;
+}
+
+interface TextSegment {
+  node: Text;
+  start: number;
+  end: number;
+}
+
+function findFileSearchMatches(content: string, query: string): FileSearchMatch[] {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return [];
+
+  const matches: FileSearchMatch[] = [];
+  const lines = content.split("\n");
+  lines.forEach((line, lineIndex) => {
+    const lowerLine = line.toLowerCase();
+    let fromIndex = 0;
+    while (fromIndex <= lowerLine.length) {
+      const columnIndex = lowerLine.indexOf(needle, fromIndex);
+      if (columnIndex < 0) break;
+      matches.push({ line: lineIndex + 1, column: columnIndex + 1, length: needle.length });
+      fromIndex = columnIndex + Math.max(needle.length, 1);
+    }
+  });
+  return matches;
+}
+
+function clearPreviewSearchHighlights(root: HTMLElement): void {
+  root.querySelectorAll<HTMLElement>("[data-file-search-preview-active='true']").forEach((element) => {
+    element.style.background = element.dataset.previousSearchBackground ?? "";
+    element.style.boxShadow = element.dataset.previousSearchBoxShadow ?? "";
+    element.style.borderRadius = element.dataset.previousSearchBorderRadius ?? "";
+    delete element.dataset.fileSearchPreviewActive;
+    delete element.dataset.previousSearchBackground;
+    delete element.dataset.previousSearchBoxShadow;
+    delete element.dataset.previousSearchBorderRadius;
+  });
+}
+
+function getSearchableTextFromElement(root: HTMLElement): string {
+  const parts: string[] = [];
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  let node = walker.nextNode();
+  while (node) {
+    parts.push(normalizeEditableText(node.textContent ?? ""));
+    node = walker.nextNode();
+  }
+  return parts.join("");
+}
+
+function highlightTextMatchInElement(root: HTMLElement, query: string, matchIndex: number): boolean {
+  clearPreviewSearchHighlights(root);
+
+  const needle = query.trim().toLowerCase();
+  if (!needle) return false;
+
+  const segments: TextSegment[] = [];
+  let text = "";
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  let node = walker.nextNode();
+  while (node) {
+    const textNode = node as Text;
+    const value = normalizeEditableText(textNode.textContent ?? "");
+    segments.push({ node: textNode, start: text.length, end: text.length + value.length });
+    text += value;
+    node = walker.nextNode();
+  }
+
+  let fromIndex = 0;
+  let foundIndex = -1;
+  for (let index = 0; index <= matchIndex; index++) {
+    foundIndex = text.toLowerCase().indexOf(needle, fromIndex);
+    if (foundIndex < 0) return false;
+    fromIndex = foundIndex + Math.max(needle.length, 1);
+  }
+
+  const foundEnd = foundIndex + needle.length;
+  const startSegment = segments.find((segment) => foundIndex >= segment.start && foundIndex <= segment.end);
+  if (!startSegment || foundEnd < foundIndex) return false;
+
+  const textParent = startSegment.node.parentElement ?? root;
+  const highlightElement = textParent.closest<HTMLElement>(
+    "p, li, h1, h2, h3, h4, h5, h6, blockquote, pre, td, th, tr, table, section, article, div"
+  ) ?? textParent;
+
+  highlightElement.dataset.fileSearchPreviewActive = "true";
+  highlightElement.dataset.previousSearchBackground = highlightElement.style.background;
+  highlightElement.dataset.previousSearchBoxShadow = highlightElement.style.boxShadow;
+  highlightElement.dataset.previousSearchBorderRadius = highlightElement.style.borderRadius;
+  highlightElement.style.background = "color-mix(in srgb, var(--accent) 18%, transparent)";
+  highlightElement.style.boxShadow = "0 0 0 2px color-mix(in srgb, var(--accent) 22%, transparent)";
+  highlightElement.style.borderRadius = highlightElement.style.borderRadius || "6px";
+  highlightElement.scrollIntoView({ block: "center" });
+  return true;
+}
 
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -785,6 +885,20 @@ function EditableMarkdownPreview({
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
+          h1: ({ children }) => <h1>{children}</h1>,
+          h2: ({ children }) => <h2>{children}</h2>,
+          h3: ({ children }) => <h3>{children}</h3>,
+          h4: ({ children }) => <h4>{children}</h4>,
+          h5: ({ children }) => <h5>{children}</h5>,
+          h6: ({ children }) => <h6>{children}</h6>,
+          p: ({ children }) => <p>{children}</p>,
+          blockquote: ({ children }) => <blockquote>{children}</blockquote>,
+          pre: ({ children }) => <pre>{children}</pre>,
+          table: ({ children }) => (
+            <div>
+              <table>{children}</table>
+            </div>
+          ),
           img: ({ src, alt }) => {
             const srcText = typeof src === "string" ? src : undefined;
             const mediaSrc = markdownResourceUrl(srcText, filePath, cwd);
@@ -838,7 +952,11 @@ function EditableMarkdownPreview({
               {children}
             </ol>
           ),
-          li: ({ children }) => <li style={{ display: "list-item", margin: "3px 0" }}>{children}</li>,
+          li: ({ children }) => (
+            <li style={{ display: "list-item", margin: "3px 0" }}>
+              {children}
+            </li>
+          ),
         }}
       >
         {content}
@@ -1241,12 +1359,18 @@ function TextFileViewer({ filePath, cwd }: Props) {
   const [copiedFullText, setCopiedFullText] = useState(false);
   const [saveState, setSaveState] = useState<MarkdownSaveState>("idle");
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [activeSearchIndex, setActiveSearchIndex] = useState(0);
+  const [previewSearchText, setPreviewSearchText] = useState("");
   const esRef = useRef<EventSource | null>(null);
   const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const latestContentRef = useRef("");
   const markdownPreviewRootRef = useRef<HTMLDivElement | null>(null);
   const htmlPreviewFrameRef = useRef<HTMLIFrameElement | null>(null);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const contentScrollRef = useRef<HTMLDivElement | null>(null);
 
   const fetchContent = useCallback((filePath: string, isRefresh = false) => {
     const encoded = encodeFilePathForApi(filePath);
@@ -1350,6 +1474,44 @@ function TextFileViewer({ filePath, cwd }: Props) {
     };
   }, [cwd, filePath]);
 
+  const isSearchingMarkdownPreview = data?.language === "markdown" && previewMode && viewMode === "source";
+  const searchContent = data
+    ? isSearchingMarkdownPreview
+      ? previewSearchText
+      : data.language === "markdown"
+      ? (latestContentRef.current || data.content)
+      : data.content
+    : "";
+  const searchMatches = useMemo(() => findFileSearchMatches(searchContent, searchQuery), [searchContent, searchQuery]);
+  const activeSearchMatch = searchMatches.length > 0 ? searchMatches[Math.min(activeSearchIndex, searchMatches.length - 1)] : null;
+  const searchMatchLines = useMemo(() => new Set(searchMatches.map((match) => match.line)), [searchMatches]);
+  const activeSearchLine = activeSearchMatch?.line ?? null;
+
+  const focusSearchInput = useCallback(() => {
+    requestAnimationFrame(() => {
+      searchInputRef.current?.focus();
+      searchInputRef.current?.select();
+    });
+  }, []);
+
+  const openFileSearch = useCallback(() => {
+    setSearchOpen(true);
+    if (viewMode === "diff") setViewMode("source");
+    if (data?.language === "html" && previewMode) setPreviewMode(false);
+    focusSearchInput();
+  }, [data?.language, focusSearchInput, previewMode, viewMode]);
+
+  const closeFileSearch = useCallback(() => {
+    setSearchOpen(false);
+  }, []);
+
+  const goToSearchMatch = useCallback((direction: 1 | -1) => {
+    if (searchMatches.length === 0) return;
+    if (viewMode === "diff") setViewMode("source");
+    if (data?.language === "html" && previewMode) setPreviewMode(false);
+    setActiveSearchIndex((index) => (index + direction + searchMatches.length) % searchMatches.length);
+  }, [data?.language, previewMode, searchMatches.length, viewMode]);
+
   // Initial load + SSE watch setup
   useEffect(() => {
     setLoading(true);
@@ -1362,6 +1524,10 @@ function TextFileViewer({ filePath, cwd }: Props) {
     setCopiedFullText(false);
     setSaveState("idle");
     setSaveError(null);
+    setSearchOpen(false);
+    setSearchQuery("");
+    setActiveSearchIndex(0);
+    setPreviewSearchText("");
     latestContentRef.current = "";
     if (saveTimerRef.current) {
       clearTimeout(saveTimerRef.current);
@@ -1411,6 +1577,57 @@ function TextFileViewer({ filePath, cwd }: Props) {
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     };
   }, []);
+
+  useEffect(() => {
+    setActiveSearchIndex(0);
+  }, [filePath, searchQuery]);
+
+  useEffect(() => {
+    if (activeSearchIndex < searchMatches.length) return;
+    setActiveSearchIndex(Math.max(0, searchMatches.length - 1));
+  }, [activeSearchIndex, searchMatches.length]);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "f") return;
+      event.preventDefault();
+      openFileSearch();
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [openFileSearch]);
+
+  useEffect(() => {
+    if (!searchOpen || activeSearchLine == null || viewMode !== "source" || previewMode) return;
+    requestAnimationFrame(() => {
+      const line = contentScrollRef.current?.querySelector(`[data-search-line="${activeSearchLine}"]`);
+      line?.scrollIntoView({ block: "center" });
+    });
+  }, [activeSearchLine, previewMode, searchOpen, viewMode]);
+
+  useEffect(() => {
+    if (!searchOpen || !isSearchingMarkdownPreview) return;
+    const frame = requestAnimationFrame(() => {
+      const root = markdownPreviewRootRef.current;
+      setPreviewSearchText(root ? getSearchableTextFromElement(root) : "");
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [data?.content, isSearchingMarkdownPreview, saveState, searchOpen]);
+
+  useEffect(() => {
+    if (!isSearchingMarkdownPreview) return;
+    if (!searchOpen || !searchQuery.trim()) {
+      const root = markdownPreviewRootRef.current;
+      if (root) clearPreviewSearchHighlights(root);
+      return;
+    }
+    const frame = requestAnimationFrame(() => {
+      const root = markdownPreviewRootRef.current;
+      if (!root) return;
+      highlightTextMatchInElement(root, searchQuery, Math.min(activeSearchIndex, Math.max(searchMatches.length - 1, 0)));
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [activeSearchIndex, isSearchingMarkdownPreview, searchMatches.length, searchOpen, searchQuery]);
 
   if (loading) {
     return (
@@ -1534,6 +1751,130 @@ function TextFileViewer({ filePath, cwd }: Props) {
         )}
       </div>
 
+      {searchOpen && (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            padding: "6px 12px",
+            borderBottom: "1px solid var(--border)",
+            background: "var(--bg-panel)",
+            flexShrink: 0,
+          }}
+        >
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              flex: "0 1 360px",
+              minWidth: 180,
+              height: 28,
+              padding: "0 9px",
+              border: "1px solid var(--border)",
+              borderRadius: 7,
+              background: "var(--bg)",
+              color: "var(--text-dim)",
+            }}
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+              <circle cx="11" cy="11" r="8" />
+              <path d="m21 21-4.3-4.3" />
+            </svg>
+            <input
+              ref={searchInputRef}
+              value={searchQuery}
+              onChange={(event) => setSearchQuery(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  goToSearchMatch(event.shiftKey ? -1 : 1);
+                  return;
+                }
+                if (event.key === "Escape") {
+                  event.preventDefault();
+                  closeFileSearch();
+                }
+              }}
+              placeholder="搜索当前文件..."
+              aria-label="搜索当前文件"
+              style={{
+                minWidth: 0,
+                flex: 1,
+                height: "100%",
+                padding: 0,
+                border: "none",
+                outline: "none",
+                background: "transparent",
+                color: "var(--text)",
+                fontSize: 12,
+                fontFamily: "inherit",
+              }}
+            />
+          </div>
+          <span style={{ minWidth: 58, fontSize: 11, color: "var(--text-dim)", whiteSpace: "nowrap" }}>
+            {searchQuery.trim() ? `${searchMatches.length ? activeSearchIndex + 1 : 0}/${searchMatches.length}` : "输入关键词"}
+          </span>
+          <button
+            type="button"
+            onClick={() => goToSearchMatch(-1)}
+            disabled={searchMatches.length === 0}
+            title="上一个匹配 (Shift+Enter)"
+            style={{
+              width: 26,
+              height: 26,
+              border: "none",
+              borderRadius: 6,
+              background: "var(--bg-hover)",
+              color: searchMatches.length ? "var(--text-muted)" : "var(--text-dim)",
+              cursor: searchMatches.length ? "pointer" : "not-allowed",
+              opacity: searchMatches.length ? 1 : 0.5,
+            }}
+          >
+            ↑
+          </button>
+          <button
+            type="button"
+            onClick={() => goToSearchMatch(1)}
+            disabled={searchMatches.length === 0}
+            title="下一个匹配 (Enter)"
+            style={{
+              width: 26,
+              height: 26,
+              border: "none",
+              borderRadius: 6,
+              background: "var(--bg-hover)",
+              color: searchMatches.length ? "var(--text-muted)" : "var(--text-dim)",
+              cursor: searchMatches.length ? "pointer" : "not-allowed",
+              opacity: searchMatches.length ? 1 : 0.5,
+            }}
+          >
+            ↓
+          </button>
+          <button
+            type="button"
+            onClick={closeFileSearch}
+            title="关闭搜索 (Esc)"
+            aria-label="关闭搜索"
+            style={{
+              marginLeft: "auto",
+              width: 26,
+              height: 26,
+              border: "none",
+              borderRadius: 6,
+              background: "transparent",
+              color: "var(--text-dim)",
+              cursor: "pointer",
+              fontSize: 16,
+              lineHeight: 1,
+            }}
+          >
+            ×
+          </button>
+        </div>
+      )}
+
       {copiedFullText && (
         <div
           aria-live="polite"
@@ -1558,7 +1899,7 @@ function TextFileViewer({ filePath, cwd }: Props) {
       )}
 
       {/* Content area */}
-      <div style={{ flex: 1, overflow: "auto", background: "var(--bg)" }}>
+      <div ref={contentScrollRef} style={{ flex: 1, overflow: "auto", background: "var(--bg)" }}>
         {viewMode === "diff" && hasDiff ? (
           <DiffView oldContent={prevContent!} newContent={sourceContent} language={data.language} />
         ) : isHtml && previewMode ? (
@@ -1599,6 +1940,22 @@ function TextFileViewer({ filePath, cwd }: Props) {
               minHeight: "100%",
             }}
             codeTagProps={{ style: { fontFamily: "var(--font-mono)" } }}
+            wrapLines={searchOpen && searchQuery.trim().length > 0}
+            lineProps={(lineNumber) => {
+              const isMatch = searchMatchLines.has(lineNumber);
+              const isActive = activeSearchLine === lineNumber;
+              return {
+                "data-search-line": String(lineNumber),
+                style: {
+                  display: "block",
+                  background: isActive
+                    ? "color-mix(in srgb, var(--accent) 26%, transparent)"
+                    : isMatch
+                    ? "color-mix(in srgb, var(--accent) 12%, transparent)"
+                    : "transparent",
+                },
+              };
+            }}
             wrapLongLines={false}
           >
             {sourceContent}

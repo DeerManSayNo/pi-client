@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
+import { createPortal } from "react-dom";
 import { getLocalStorageItem } from "@/lib/client-storage";
 import { FileExplorer } from "./FileExplorer";
 
@@ -9,6 +10,7 @@ interface Props {
   onOpenFile?: (filePath: string, fileName: string) => void;
   onAtMention?: (relativePath: string) => void;
   refreshKey?: number;
+  variant?: "floating" | "header";
 }
 
 interface ExplorerProjectState {
@@ -62,13 +64,51 @@ function writeFileExplorerState(cwd: string, state: ExplorerProjectState) {
   }
 }
 
-export function ChatFileExplorerButton({ cwd, onOpenFile, onAtMention, refreshKey }: Props) {
+export function ChatFileExplorerButton({ cwd, onOpenFile, onAtMention, refreshKey, variant = "floating" }: Props) {
+  const isHeader = variant === "header";
   const [open, setOpen] = useState(false);
   const [hasOpened, setHasOpened] = useState(false);
   const [localRefreshKey, setLocalRefreshKey] = useState(0);
   const [refreshDone, setRefreshDone] = useState(false);
   const [explorerState, setExplorerState] = useState<ExplorerProjectState>(EMPTY_EXPLORER_PROJECT_STATE);
+  const [popoverStyle, setPopoverStyle] = useState<CSSProperties | null>(null);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const buttonRef = useRef<HTMLButtonElement | null>(null);
+  const popoverRef = useRef<HTMLDivElement | null>(null);
   const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const updatePopoverPosition = useCallback(() => {
+    const rect = buttonRef.current?.getBoundingClientRect();
+    if (!rect || typeof window === "undefined") return;
+
+    const margin = 12;
+    const width = Math.min(isHeader ? 360 : 420, Math.max(240, window.innerWidth - margin * 2));
+    const maxLeft = Math.max(margin, window.innerWidth - width - margin);
+    const left = Math.min(Math.max(isHeader ? rect.right - width : rect.left, margin), maxLeft);
+
+    if (isHeader) {
+      const top = Math.min(rect.bottom + 8, window.innerHeight - margin - 160);
+      setPopoverStyle({
+        position: "fixed",
+        left,
+        top: Math.max(margin, top),
+        width,
+        maxHeight: Math.min(520, Math.max(160, window.innerHeight - top - margin)),
+        zIndex: 1000,
+      });
+      return;
+    }
+
+    const bottom = Math.max(margin, window.innerHeight - rect.top + 8);
+    setPopoverStyle({
+      position: "fixed",
+      left,
+      bottom,
+      width,
+      maxHeight: Math.min(620, Math.max(160, rect.top - margin - 8)),
+      zIndex: 1000,
+    });
+  }, [isHeader]);
 
   useEffect(() => {
     if (refreshKey !== undefined) setLocalRefreshKey((key) => key + 1);
@@ -79,6 +119,33 @@ export function ChatFileExplorerButton({ cwd, onOpenFile, onAtMention, refreshKe
       if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
     };
   }, []);
+
+  useEffect(() => {
+    if (!open) return;
+    updatePopoverPosition();
+
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target as Node | null;
+      if (containerRef.current?.contains(target) || popoverRef.current?.contains(target)) return;
+      setOpen(false);
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setOpen(false);
+      }
+    };
+
+    document.addEventListener("pointerdown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("resize", updatePopoverPosition);
+    window.addEventListener("scroll", updatePopoverPosition, true);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("resize", updatePopoverPosition);
+      window.removeEventListener("scroll", updatePopoverPosition, true);
+    };
+  }, [open, updatePopoverPosition]);
 
   useEffect(() => {
     if (!cwd) {
@@ -95,10 +162,11 @@ export function ChatFileExplorerButton({ cwd, onOpenFile, onAtMention, refreshKe
     refreshTimerRef.current = setTimeout(() => setRefreshDone(false), 1600);
   }, []);
 
-  const handleOpen = useCallback(() => {
+  const handleToggle = useCallback(() => {
     setHasOpened(true);
-    setOpen(true);
-  }, []);
+    if (!open) updatePopoverPosition();
+    setOpen((value) => !value);
+  }, [open, updatePopoverPosition]);
 
   const handleExplorerStateChange = useCallback((state: ExplorerProjectState) => {
     if (!cwd) return;
@@ -109,54 +177,63 @@ export function ChatFileExplorerButton({ cwd, onOpenFile, onAtMention, refreshKe
 
   if (!cwd) return null;
 
+  const containerStyle: CSSProperties = {
+    position: isHeader ? "relative" : "absolute",
+    zIndex: isHeader ? 52 : 1000,
+    display: "flex",
+    alignItems: "flex-end",
+    flexShrink: 0,
+  };
+  if (!isHeader) {
+    containerStyle.left = 16;
+    containerStyle.bottom = 16;
+  }
+
   return (
     <div
-      style={{
-        position: "absolute",
-        left: 16,
-        bottom: 16,
-        zIndex: 42,
-        display: "flex",
-        alignItems: "flex-end",
-      }}
-      onMouseEnter={handleOpen}
-      onMouseLeave={() => setOpen(false)}
-      onFocus={handleOpen}
+      ref={containerRef}
+      style={containerStyle}
       onBlur={(event) => {
-        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setOpen(false);
+        const nextTarget = event.relatedTarget as Node | null;
+        if (!event.currentTarget.contains(nextTarget) && !popoverRef.current?.contains(nextTarget)) setOpen(false);
       }}
     >
       <button
+        ref={buttonRef}
         type="button"
         title="资源管理器"
         aria-label="资源管理器"
         aria-expanded={open}
         style={{
-          width: 36,
-          height: 36,
+          width: isHeader ? 22 : 36,
+          height: isHeader ? 22 : 36,
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
           padding: 0,
-          borderRadius: "50%",
+          borderRadius: isHeader ? 7 : "50%",
           border: "none",
-          background: "none",
+          background: open && isHeader ? "var(--bg-hover)" : "none",
           color: open ? "var(--text)" : "var(--text-muted)",
           cursor: "pointer",
           opacity: 1,
           transition: "background 0.12s, color 0.12s, opacity 0.12s, transform 0.12s",
         }}
         onMouseEnter={(event) => {
-          event.currentTarget.style.background = "none";
+          event.currentTarget.style.background = isHeader ? "var(--bg-hover)" : "none";
           event.currentTarget.style.color = "var(--text)";
           event.currentTarget.style.opacity = "1";
           event.currentTarget.style.transform = "translateY(-1px)";
         }}
         onMouseLeave={(event) => {
-          event.currentTarget.style.background = "none";
+          event.currentTarget.style.background = open && isHeader ? "var(--bg-hover)" : "none";
           event.currentTarget.style.color = open ? "var(--text)" : "var(--text-muted)";
           event.currentTarget.style.opacity = "1";
           event.currentTarget.style.transform = "none";
+        }}
+        onClick={(event) => {
+          event.stopPropagation();
+          handleToggle();
         }}
       >
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -164,14 +241,11 @@ export function ChatFileExplorerButton({ cwd, onOpenFile, onAtMention, refreshKe
         </svg>
       </button>
 
-      {hasOpened && (
+      {hasOpened && typeof document !== "undefined" && createPortal(
         <div
+          ref={popoverRef}
           style={{
-            position: "absolute",
-            left: 0,
-            bottom: 36,
-            width: "min(420px, calc(100vw - 48px))",
-            maxHeight: "min(62vh, 620px)",
+            ...(popoverStyle ?? {}),
             display: open ? "flex" : "none",
             flexDirection: "column",
             overflow: "hidden",
@@ -258,7 +332,7 @@ export function ChatFileExplorerButton({ cwd, onOpenFile, onAtMention, refreshKe
             />
           </div>
         </div>
-      )}
+      , document.body)}
     </div>
   );
 }

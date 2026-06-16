@@ -20,13 +20,6 @@ export default function RootLayout({
 }) {
   return (
     <html lang="zh-CN" className={notoSansMono.variable} suppressHydrationWarning>
-      <head>
-        <script
-          dangerouslySetInnerHTML={{
-            __html: `(function(){try{var k="deerhux-theme",l="pi-theme",t=localStorage.getItem(k);if(t===null){t=localStorage.getItem(l);if(t!==null)localStorage.setItem(k,t)}if(t==="dark")document.documentElement.classList.add("dark")}catch(e){}})();`,
-          }}
-        />
-      </head>
       <body style={{ height: "100dvh", display: "flex", flexDirection: "column" }}>
         {children}
       </body>

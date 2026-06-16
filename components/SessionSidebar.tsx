@@ -219,7 +219,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const [allProjectsState, setAllProjectsState] = useState<"expanded" | "compact" | "collapsed">("expanded");
   const [showAllCwds, setShowAllCwds] = useState<Set<string>>(new Set());
   const autoExpandedRef = useRef(false);
-  const [explorerOpen, setExplorerOpen] = useState(true);
+  const [explorerOpen, setExplorerOpen] = useState(false);
   const [explorerKey, setExplorerKey] = useState(0);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");

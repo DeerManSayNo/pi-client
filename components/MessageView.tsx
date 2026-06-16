@@ -39,6 +39,7 @@ interface Props {
   showTimestamp?: boolean;
   prevTimestamp?: number;
   onResend?: (message: string, entryId?: string, references?: FileReference[], skill?: UserMessage["skill"]) => void;
+  systemPrompt?: string | null;
 }
 
 function formatTime(ts?: number): string | null {
@@ -73,9 +74,9 @@ function copyText(text: string): Promise<void> {
   }
 }
 
-function MessageViewImpl({ message, isStreaming, toolResults, modelNames, watchdogInfo, entryId, onFork, forking, showTimestamp, prevTimestamp, onResend }: Props) {
+function MessageViewImpl({ message, isStreaming, toolResults, modelNames, watchdogInfo, entryId, onFork, forking, showTimestamp, prevTimestamp, onResend, systemPrompt }: Props) {
   if (message.role === "user") {
-    return <UserMessageView message={message as UserMessage} entryId={entryId} onFork={onFork} forking={forking} onResend={onResend} />;
+    return <UserMessageView message={message as UserMessage} entryId={entryId} onFork={onFork} forking={forking} onResend={onResend} systemPrompt={systemPrompt} />;
   }
   if (message.role === "assistant") {
     return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} modelNames={modelNames} watchdogInfo={watchdogInfo} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} />;
@@ -98,7 +99,8 @@ export const MessageView = memo(MessageViewImpl, (prev, next) => (
   prev.forking === next.forking &&
   prev.showTimestamp === next.showTimestamp &&
   prev.prevTimestamp === next.prevTimestamp &&
-  prev.onResend === next.onResend
+  prev.onResend === next.onResend &&
+  prev.systemPrompt === next.systemPrompt
 ));
 
 /** Parse /skill:name prefix from message text. Returns { skillName, rest } or null. */
@@ -135,12 +137,13 @@ function parseReferencePrefix(text: string): { references: string[]; rest: strin
   return { references, rest: lines.slice(index).join("\n") };
 }
 
-function UserMessageView({ message, entryId, onResend }: {
+function UserMessageView({ message, entryId, onResend, systemPrompt }: {
   message: UserMessage;
   entryId?: string;
   onFork?: (entryId: string) => void;
   forking?: boolean;
   onResend?: (message: string, entryId?: string, references?: FileReference[], skill?: UserMessage["skill"]) => void;
+  systemPrompt?: string | null;
 }) {
   const content =
     typeof message.content === "string"
@@ -249,15 +252,103 @@ function UserMessageView({ message, entryId, onResend }: {
     </div>
   );
 
+  const renderSystemPromptChip = () => {
+    if (systemPrompt === undefined) return null;
+    return (
+      <span
+        title={systemPrompt === null ? "系统提示词加载中" : systemPrompt || "（空）"}
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 5,
+          height: 24,
+          padding: "0 9px",
+          borderRadius: 999,
+          background: "color-mix(in srgb, var(--bg-panel) 84%, transparent)",
+          border: "1px solid color-mix(in srgb, var(--border) 78%, transparent)",
+          color: "var(--text-muted)",
+          fontSize: 12,
+          fontWeight: 500,
+          whiteSpace: "nowrap",
+        }}
+      >
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+          <polyline points="14 2 14 8 20 8" />
+        </svg>
+        系统提示词
+      </span>
+    );
+  };
+
+  const renderReferenceChips = () => {
+    if (displayReferences.length === 0) return null;
+    return (
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 7, minWidth: 0, flexWrap: "wrap" }}>
+        <span style={{ fontSize: 12, color: "var(--text-dim)", lineHeight: 1.4 }}>引用</span>
+        {displayReferences.map((ref, index) => (
+          <span
+            key={`${ref.path}-${index}`}
+            title={ref.path}
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 5,
+              maxWidth: 220,
+              height: 24,
+              padding: "0 8px",
+              borderRadius: 999,
+              background: "color-mix(in srgb, var(--accent) 6%, var(--bg))",
+              border: "1px solid color-mix(in srgb, var(--accent) 16%, var(--border))",
+              color: "color-mix(in srgb, var(--accent) 62%, var(--text-muted))",
+              fontSize: 12,
+              fontWeight: 500,
+            }}
+          >
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+              <polyline points="14 2 14 8 20 8" />
+            </svg>
+            <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {ref.name}
+            </span>
+          </span>
+        ))}
+      </div>
+    );
+  };
+
+  const hasSideMeta = systemPrompt !== undefined || displayReferences.length > 0;
+
   return (
     <div style={{ marginBottom: 24, display: "flex", justifyContent: "center", width: "100%" }}>
+      <div
+        style={{
+          width: "min(100%, 72rem)",
+        }}
+      >
+      {hasSideMeta && (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 10,
+            marginBottom: 6,
+            minWidth: 0,
+          }}
+        >
+          <div style={{ flexShrink: 0 }}>{renderSystemPromptChip()}</div>
+          <div style={{ minWidth: 0 }}>{renderReferenceChips()}</div>
+        </div>
+      )}
       {!expanded ? (
         <button
           type="button"
           onClick={() => canResend && setExpanded(true)}
           title={canResend ? "点击编辑并重新发送" : undefined}
           style={{
-            width: "min(100%, 72rem)",
+            width: "100%",
             display: "block",
             textAlign: "left",
             padding: "10px 14px",
@@ -281,41 +372,6 @@ function UserMessageView({ message, entryId, onResend }: {
           }}
         >
           {renderImages()}
-          {displayReferences.length > 0 && (
-            <div style={{ display: "flex", alignItems: "flex-start", gap: 8, marginBottom: displayContent ? 8 : 0 }}>
-              <span style={{ flexShrink: 0, paddingTop: 3, fontSize: 11, color: "var(--text-dim)" }}>引用</span>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 6, minWidth: 0 }}>
-                {displayReferences.map((ref) => (
-                  <span
-                    key={ref.path}
-                    title={ref.path}
-                    style={{
-                      display: "inline-flex",
-                      alignItems: "center",
-                      gap: 5,
-                      maxWidth: 220,
-                      height: 24,
-                      padding: "0 8px",
-                      borderRadius: 999,
-                      background: "color-mix(in srgb, var(--accent) 6%, var(--bg))",
-                      border: "1px solid color-mix(in srgb, var(--accent) 16%, var(--border))",
-                      color: "color-mix(in srgb, var(--accent) 62%, var(--text-muted))",
-                      fontSize: 12,
-                      fontWeight: 500,
-                    }}
-                  >
-                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
-                      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                      <polyline points="14 2 14 8 20 8" />
-                    </svg>
-                    <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                      {ref.name}
-                    </span>
-                  </span>
-                ))}
-              </div>
-            </div>
-          )}
           <div
             style={{
               fontSize: 14,
@@ -366,7 +422,7 @@ function UserMessageView({ message, entryId, onResend }: {
         <div
           ref={editorRef}
           style={{
-            width: "min(100%, 72rem)",
+            width: "100%",
             display: "flex",
             gap: 8,
             alignItems: "center",
@@ -455,6 +511,7 @@ function UserMessageView({ message, entryId, onResend }: {
             </button>
         </div>
       )}
+      </div>
     </div>
   );
 }

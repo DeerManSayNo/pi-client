@@ -28,6 +28,24 @@ export function useTheme() {
   const theme = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
 
   useEffect(() => {
+    try {
+      let stored = localStorage.getItem("deerhux-theme") as Theme | null;
+      if (stored === null) {
+        stored = localStorage.getItem("pi-theme") as Theme | null;
+        if (stored !== null) localStorage.setItem("deerhux-theme", stored);
+      }
+      if (stored === "dark") {
+        document.documentElement.classList.add("dark");
+      } else if (stored === "light") {
+        document.documentElement.classList.remove("dark");
+      }
+      listeners.forEach((cb) => cb());
+    } catch {
+      // ignore storage errors (private mode, quota, etc.)
+    }
+  }, []);
+
+  useEffect(() => {
     // Keep the native Tauri window/title bar in sync with the web UI theme.
     // In the browser this import/invoke is unavailable, so failures are ignored.
     void import("@tauri-apps/api/window")

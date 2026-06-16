@@ -17,6 +17,7 @@ interface Props {
   onCloseTab: (id: string) => void;
   onCloseTabs?: (ids: string[]) => void;
   cwd?: string;
+  rightAction?: React.ReactNode;
 }
 
 const menuItemStyle: React.CSSProperties = {
@@ -126,7 +127,7 @@ function ContextMenuButton({
   );
 }
 
-export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, onCloseTabs, cwd }: Props) {
+export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, onCloseTabs, cwd, rightAction }: Props) {
   const [hoveredClose, setHoveredClose] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<{ tabId: string; filePath: string; x: number; y: number } | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
@@ -159,7 +160,7 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, onCloseTabs
   }, [onCloseTab, onCloseTabs]);
 
   const handleCopyPath = useCallback(async (type: "absolute" | "relative") => {
-    if (!contextMenu || contextMenu.tabId === "__log__") return;
+    if (!contextMenu) return;
     const text = type === "absolute" ? contextMenu.filePath : getRelativeFilePath(contextMenu.filePath, cwd);
     try {
       await navigator.clipboard.writeText(text);
@@ -173,7 +174,7 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, onCloseTabs
   }, [contextMenu, cwd]);
 
   const handleRevealInFinder = useCallback(async () => {
-    if (!contextMenu || contextMenu.tabId === "__log__") return;
+    if (!contextMenu) return;
     try {
       await fetch("/api/files/reveal", {
         method: "POST",
@@ -192,87 +193,110 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, onCloseTabs
   const rightTabIds = contextTabIndex >= 0 ? tabs.slice(contextTabIndex + 1).map((tab) => tab.id) : [];
   const otherTabIds = contextTab ? tabs.filter((tab) => tab.id !== contextTab.id).map((tab) => tab.id) : [];
   const allTabIds = tabs.map((tab) => tab.id);
-  const isLogTab = contextMenu?.tabId === "__log__";
 
   return (
     <>
     <div
       style={{
         display: "flex",
-        alignItems: "flex-end",
+        alignItems: "stretch",
         background: "var(--bg-panel)",
-        overflowX: "auto",
         flexShrink: 0,
         height: 36,
       }}
     >
-      {tabs.map((tab) => {
-        const isActive = tab.id === activeTabId;
-        return (
-          <div
-            key={tab.id}
-            onClick={() => onSelectTab(tab.id)}
-            onContextMenu={(e) => handleContextMenu(e, tab)}
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 6,
-              height: 36,
-              paddingLeft: 12,
-              paddingRight: 6,
-              borderRight: "1px solid var(--border)",
-              background: isActive ? "var(--bg)" : "var(--bg-panel)",
-              cursor: "pointer",
-              fontSize: 12,
-              color: isActive ? "var(--text)" : "var(--text-muted)",
-              whiteSpace: "nowrap",
-              maxWidth: 180,
-              minWidth: 80,
-              flexShrink: 0,
-              userSelect: "none",
-              transition: "background 0.1s, color 0.1s",
-            }}
-          >
-            <span style={{ flexShrink: 0, opacity: isActive ? 1 : 0.7, display: "flex", alignItems: "center" }}>
-              {getFileIcon(tab.label, 13)}
-            </span>
-            <span
+      <div
+        style={{
+          display: "flex",
+          alignItems: "flex-end",
+          overflowX: "auto",
+          minWidth: 0,
+          flex: 1,
+        }}
+      >
+        {tabs.map((tab) => {
+          const isActive = tab.id === activeTabId;
+          return (
+            <div
+              key={tab.id}
+              onClick={() => onSelectTab(tab.id)}
+              onContextMenu={(e) => handleContextMenu(e, tab)}
               style={{
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                flex: 1,
-                fontWeight: isActive ? 500 : 400,
-              }}
-              title={tab.filePath}
-            >
-              {tab.label}
-            </span>
-            <button
-              onClick={(e) => { e.stopPropagation(); onCloseTab(tab.id); }}
-              onMouseEnter={() => setHoveredClose(tab.id)}
-              onMouseLeave={() => setHoveredClose(null)}
-              style={{
-                display: "flex", alignItems: "center", justifyContent: "center",
-                width: 16, height: 16,
-                background: hoveredClose === tab.id ? "var(--bg-hover)" : "transparent",
-                border: "none",
-                borderRadius: 3,
-                color: hoveredClose === tab.id ? "var(--text)" : "var(--text-dim)",
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+                height: 36,
+                paddingLeft: 12,
+                paddingRight: 6,
+                borderRight: "1px solid var(--border)",
+                background: isActive ? "var(--bg)" : "var(--bg-panel)",
                 cursor: "pointer",
-                padding: 0,
+                fontSize: 12,
+                color: isActive ? "var(--text)" : "var(--text-muted)",
+                whiteSpace: "nowrap",
+                maxWidth: 180,
+                minWidth: 80,
                 flexShrink: 0,
+                userSelect: "none",
                 transition: "background 0.1s, color 0.1s",
               }}
-              title="关闭"
             >
-              <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
-                <line x1="2" y1="2" x2="8" y2="8" />
-                <line x1="8" y1="2" x2="2" y2="8" />
-              </svg>
-            </button>
-          </div>
-        );
-      })}
+              <span style={{ flexShrink: 0, opacity: isActive ? 1 : 0.7, display: "flex", alignItems: "center" }}>
+                {getFileIcon(tab.label, 13)}
+              </span>
+              <span
+                style={{
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  flex: 1,
+                  fontWeight: isActive ? 500 : 400,
+                }}
+                title={tab.filePath}
+              >
+                {tab.label}
+              </span>
+              <button
+                onClick={(e) => { e.stopPropagation(); onCloseTab(tab.id); }}
+                onMouseEnter={() => setHoveredClose(tab.id)}
+                onMouseLeave={() => setHoveredClose(null)}
+                style={{
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  width: 16, height: 16,
+                  background: hoveredClose === tab.id ? "var(--bg-hover)" : "transparent",
+                  border: "none",
+                  borderRadius: 3,
+                  color: hoveredClose === tab.id ? "var(--text)" : "var(--text-dim)",
+                  cursor: "pointer",
+                  padding: 0,
+                  flexShrink: 0,
+                  transition: "background 0.1s, color 0.1s",
+                }}
+                title="关闭"
+              >
+                <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+                  <line x1="2" y1="2" x2="8" y2="8" />
+                  <line x1="8" y1="2" x2="2" y2="8" />
+                </svg>
+              </button>
+            </div>
+          );
+        })}
+      </div>
+      {rightAction && (
+        <div
+          style={{
+            width: 36,
+            height: 36,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            borderLeft: "1px solid var(--border)",
+            flexShrink: 0,
+          }}
+        >
+          {rightAction}
+        </div>
+      )}
     </div>
 
     {/* Context Menu */}
@@ -310,15 +334,11 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, onCloseTabs
         <ContextMenuButton icon="right" disabled={rightTabIds.length === 0} onClick={() => closeTabs(rightTabIds)}>关闭右侧标签</ContextMenuButton>
         <ContextMenuButton icon="others" disabled={otherTabIds.length === 0} onClick={() => closeTabs(otherTabIds)}>关闭其他页签</ContextMenuButton>
         <ContextMenuButton icon="all" disabled={allTabIds.length === 0} onClick={() => closeTabs(allTabIds)}>关闭全部页签</ContextMenuButton>
-        {!isLogTab && (
-          <>
-            <div style={{ height: 1, background: "var(--border)", margin: "5px 4px" }} />
-            <ContextMenuButton icon="copy" onClick={() => handleCopyPath("absolute")}>{copied === "absolute" ? "已复制!" : "复制绝对路径"}</ContextMenuButton>
-            <ContextMenuButton icon="copy" onClick={() => handleCopyPath("relative")}>{copied === "relative" ? "已复制!" : "复制相对路径"}</ContextMenuButton>
-            <div style={{ height: 1, background: "var(--border)", margin: "5px 4px" }} />
-            <ContextMenuButton icon="folder" onClick={handleRevealInFinder}>{isMac ? "在 Finder 中显示" : "打开所在文件夹"}</ContextMenuButton>
-          </>
-        )}
+        <div style={{ height: 1, background: "var(--border)", margin: "5px 4px" }} />
+        <ContextMenuButton icon="copy" onClick={() => handleCopyPath("absolute")}>{copied === "absolute" ? "已复制!" : "复制绝对路径"}</ContextMenuButton>
+        <ContextMenuButton icon="copy" onClick={() => handleCopyPath("relative")}>{copied === "relative" ? "已复制!" : "复制相对路径"}</ContextMenuButton>
+        <div style={{ height: 1, background: "var(--border)", margin: "5px 4px" }} />
+        <ContextMenuButton icon="folder" onClick={handleRevealInFinder}>{isMac ? "在 Finder 中显示" : "打开所在文件夹"}</ContextMenuButton>
       </div>
     )}
     </>
