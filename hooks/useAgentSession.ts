@@ -32,15 +32,57 @@ function compressSkillText(text: string): string {
   return args ? `/skill:${skillName} ${args}` : `/skill:${skillName}`;
 }
 
-/** Strip SDK-injected skill prefix from user message content for display. */
-function stripSkillInjectedPrefix(text: string): string {
+function getSdkInjectedSkillName(text: string): string | null {
   // 中文格式："使用技能：xxx"
   const cnMatch = text.match(/^使用技能[：:]\s*(\S+)\s*$/);
-  if (cnMatch) return "";
+  if (cnMatch) return cnMatch[1].replace(/[。.]$/, "");
   // 英文格式："Use the selected skill: xxx."
   const enMatch = text.match(/^Use the selected skill:\s*(\S+)\.?\s*$/i);
-  if (enMatch) return "";
-  return text;
+  if (enMatch) return enMatch[1].replace(/[。.]$/, "");
+  return null;
+}
+
+/** Strip SDK-injected skill prefix from user message content for display. */
+function stripSkillInjectedPrefix(text: string): string {
+  return getSdkInjectedSkillName(text) ? "" : text;
+}
+
+function userTextContent(msg: AgentMessage | Partial<AgentMessage>): string {
+  const content = (msg as { content?: unknown }).content;
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter((block): block is TextContent => typeof block === "object" && block !== null && (block as { type?: unknown }).type === "text")
+    .map((block) => block.text)
+    .join("\n");
+}
+
+function isSkillOnlyUserMessage(msg: AgentMessage | Partial<AgentMessage>, skillName?: string | null): boolean {
+  if (msg.role !== "user") return false;
+  const userSkillName = (msg as { skill?: SkillReference }).skill?.name;
+  if (skillName && userSkillName !== skillName) return false;
+  return userTextContent(msg).trim() === "";
+}
+
+function normalizeLoadedMessages(rawMessages: AgentMessage[], rawEntryIds?: string[]): { messages: AgentMessage[]; entryIds: string[] } {
+  const compressed = rawMessages.map(compressMessageContent);
+  const normalized = normalizeCompletedMessages(compressed);
+  const messages: AgentMessage[] = [];
+  const entryIds: string[] = [];
+  normalized.forEach((msg, index) => {
+    if (msg.role === "user") {
+      const injectedSkillName = getSdkInjectedSkillName(userTextContent(msg));
+      if (injectedSkillName) {
+        const lastUser = [...messages].reverse().find((m) => m.role === "user");
+        if (lastUser && isSkillOnlyUserMessage(lastUser, injectedSkillName)) {
+          return;
+        }
+      }
+    }
+    messages.push(msg);
+    if (rawEntryIds) entryIds.push(rawEntryIds[index]);
+  });
+  return { messages, entryIds };
 }
 
 function compressMessageContent(msg: AgentMessage): AgentMessage {
@@ -512,8 +554,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const d = await res.json() as SessionData & { agentState?: { running: boolean; state?: { isStreaming?: boolean; isCompacting?: boolean; isRunning?: boolean; contextUsage?: { percent: number | null; contextWindow: number; tokens: number | null } | null; systemPrompt?: string; thinkingLevel?: string; agentMode?: AgentMode } } };
       if (sid !== sessionIdRef.current) return null;
       setData(d);
-      setMessages(normalizeCompletedMessages(d.context.messages.map(compressMessageContent)));
-      setEntryIds(d.context.entryIds ?? []);
+      const { messages: loadedMessages, entryIds: loadedEntryIds } = normalizeLoadedMessages(d.context.messages, d.context.entryIds);
+      setMessages(loadedMessages);
+      setEntryIds(loadedEntryIds);
       setCurrentModelOverride(null);
       setAgentMode(normalizeAgentMode(d.context.agentMode));
       setError(null);
@@ -805,6 +848,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
               // into user content, which doesn't match our optimistic empty-string content.
               // If both messages share the same skill, treat them as duplicates.
               if (normalized.skill?.name && lastUser?.skill?.name === normalized.skill.name) {
+                return prev;
+              }
+              // Also handle the case where SDK's message_end/user carries no skill
+              // field but the content is a pure SDK-injected prefix (e.g.,
+              // "Use the selected skill: ccomit-auto-git."). Match against the
+              // skill name on the optimistic user message.
+              const injectedFromSdk = getSdkInjectedSkillName(userTextContent(normalized));
+              if (injectedFromSdk && lastUser && isSkillOnlyUserMessage(lastUser, injectedFromSdk)) {
                 return prev;
               }
             }
@@ -1678,8 +1729,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const nextKey = nextEntryIds.join("\0");
         if (nextKey && nextKey !== prevKey) {
           setData(d);
-          setMessages(normalizeCompletedMessages(d.context.messages.map(compressMessageContent)));
-          setEntryIds(nextEntryIds);
+          const { messages: loadedMessages2, entryIds: loadedEntryIds2 } = normalizeLoadedMessages(d.context.messages, d.context.entryIds);
+          setMessages(loadedMessages2);
+          setEntryIds(loadedEntryIds2);
           setCurrentModelOverride(null);
           setAgentMode(normalizeAgentMode(d.context.agentMode));
           setError(null);
