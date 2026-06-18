@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useCallback, useRef, useEffect, useMemo, type CSSProperties } from "react";
+import { useState, useCallback, useRef, useEffect, useMemo } from "react";
+import type { PointerEvent as PointerEventType, MouseEvent as MouseEventType, ReactNode } from "react";
 import { useSearchParams } from "next/navigation";
 import { SessionSidebar } from "./SessionSidebar";
 import { CHAT_LAYOUT_COUNTS, ChatWorkspace, type ChatLayoutMode } from "./ChatWorkspace";
@@ -29,11 +30,9 @@ import {
 } from "@/lib/file-preview-window";
 import { useTheme } from "@/hooks/useTheme";
 import { useEscapeClose } from "@/hooks/useEscapeClose";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { SessionInfo } from "@/lib/types";
 import type { ChatInputHandle } from "./ChatInput";
 
-type DraggableStyle = CSSProperties & { WebkitAppRegion?: "drag" | "no-drag" };
 type SidebarMode = "open" | "closed";
 type RunningSessionStatus = {
   sessionId: string;
@@ -135,20 +134,6 @@ export function AppShell() {
   const wechatAutoStartAttemptedRef = useRef(false);
   const [chatWindowLimitNotice, setChatWindowLimitNotice] = useState<string | null>(null);
   const chatWindowLimitNoticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  // Platform detection — only show custom window controls on Windows
-  const isWindowsPlatform = typeof navigator !== 'undefined' && /windows/i.test(navigator.userAgent);
-  const titlebarActionRightInset = isWindowsPlatform ? 126 : 8;
-  const titlebarActionGap = 28;
-  const getTitlebarActionRight = (indexFromRight: number) => titlebarActionRightInset + titlebarActionGap * indexFromRight;
-  const handleWindowAction = useCallback((action: 'minimize' | 'maximize' | 'close') => {
-    try {
-      const win = getCurrentWindow();
-      if (action === 'minimize') win.minimize();
-      else if (action === 'maximize') win.toggleMaximize();
-      else if (action === 'close') win.close();
-    } catch { /* ignore in non-Tauri contexts */ }
-  }, []);
 
   const replaceUrl = useCallback((url: string) => {
     window.history.replaceState(null, "", url);
@@ -456,6 +441,17 @@ export function AppShell() {
     });
   }, [getTargetChatSlotIndex]);
 
+  const placeSessionInLeftmostSlot = useCallback((sessionId: string) => {
+    setFocusedChatSlotIndex(0);
+    setChatSlotIds((prev) => {
+      const remainingIds = prev.filter((id): id is string => Boolean(id) && id !== sessionId);
+      const next = [sessionId, ...remainingIds, ...Array(MAX_CHAT_WINDOWS).fill(null)].slice(0, MAX_CHAT_WINDOWS);
+      const changed = next.some((id, index) => id !== prev[index]);
+      if (changed) chatSlotIdsRef.current = next;
+      return changed ? next : prev;
+    });
+  }, []);
+
   const handleFocusChatSlot = useCallback((slotIndex: number) => {
     setFocusedChatSlotIndex(slotIndex);
   }, []);
@@ -495,7 +491,7 @@ export function AppShell() {
     // cannot list it yet, so the sidebar must keep showing the optimistic row.
     // Only placeholder sessions show the new-session UI.
     if (placeholderTabIdsRef.current.has(session.id)) {
-      placeSessionInFocusedSlot(session.id);
+      placeSessionInLeftmostSlot(session.id);
       setNewSessionCwd(session.cwd);
       setSelectedSession(null);
       setActiveSessionTabId(session.id);
@@ -518,7 +514,7 @@ export function AppShell() {
       }
       return [...prev, session];
     });
-    placeSessionInFocusedSlot(session.id);
+    placeSessionInLeftmostSlot(session.id);
     setSelectedSession(session);
     setActiveSessionTabId(session.id);
     setInitialSessionRestored(true);
@@ -533,7 +529,7 @@ export function AppShell() {
     if (!isRestore) {
       replaceUrl(`?session=${encodeURIComponent(session.id)}`);
     }
-  }, [hasOpenChatWindowCapacity, placeSessionInFocusedSlot, replaceUrl, showChatWindowLimitMessage]);
+  }, [hasOpenChatWindowCapacity, placeSessionInLeftmostSlot, replaceUrl, showChatWindowLimitMessage]);
 
   const handleNewSession = useCallback((_sessionId: string, cwd: string) => {
     if (!hasOpenChatWindowCapacity()) {
@@ -634,26 +630,38 @@ export function AppShell() {
       setNewSessionCwd(null);
       setSelectedSession(session);
     }
-    // Replace the placeholder in this slot with the real session.
-    const tempId = pendingTempTabIdsBySlotRef.current.get(slotIndex) ?? null;
+    // Replace the placeholder in this slot with the real session. In practice the
+    // pending-temp map can miss if focus/layout changed while the first prompt was
+    // creating the real DeerHux session, so also treat the current slot id as the
+    // placeholder fallback.
+    const mappedTempId = pendingTempTabIdsBySlotRef.current.get(slotIndex) ?? null;
+    const slotTempId = chatSlotIdsRef.current[slotIndex] ?? null;
+    const tempId = mappedTempId ?? (slotTempId && placeholderTabIdsRef.current.has(slotTempId) ? slotTempId : null);
     pendingTempTabIdsBySlotRef.current.delete(slotIndex);
     // The placeholder is now a real session — remove from placeholder set
     if (tempId) placeholderTabIdsRef.current.delete(tempId);
     setChatSlotIds((prev) => {
-      const next = prev.map((id) => (id === session.id ? null : id));
+      const next = prev.map((id) => (id === session.id || (tempId && id === tempId) ? null : id));
       next[slotIndex] = session.id;
       chatSlotIdsRef.current = next;
       return next;
     });
     setSessionTabs((prev) => {
-      const filtered = prev.filter((t) => t.id !== session.id);
-      const tempIndex = tempId ? filtered.findIndex((t) => t.id === tempId) : -1;
-      if (tempIndex >= 0) {
-        const next = [...filtered];
-        next[tempIndex] = session;
-        return next;
+      const replacementId = tempId;
+      const next: SessionInfo[] = [];
+      let replaced = false;
+      for (const tab of prev) {
+        if (tab.id === session.id) continue;
+        if (replacementId && tab.id === replacementId) {
+          if (!replaced) {
+            next.push(session);
+            replaced = true;
+          }
+          continue;
+        }
+        next.push(tab);
       }
-      return [...filtered, session];
+      return replaced ? next : [...next, session];
     });
     setActiveSessionTabId((cur) => (cur === tempId || slotIndex === focusedChatSlotIndex) ? session.id : cur);
     setRefreshKey((k) => k + 1);
@@ -708,7 +716,7 @@ export function AppShell() {
     });
   }, []);
 
-  const handleResizeStart = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+  const handleResizeStart = useCallback((e: PointerEventType<HTMLDivElement>) => {
     e.preventDefault();
     e.currentTarget.setPointerCapture(e.pointerId);
     setIsResizing(true);
@@ -749,7 +757,7 @@ export function AppShell() {
     });
   }, []);
 
-  const handleRightPanelResizeStart = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+  const handleRightPanelResizeStart = useCallback((e: PointerEventType<HTMLDivElement>) => {
     e.preventDefault();
     e.currentTarget.setPointerCapture(e.pointerId);
     setIsResizingRightPanel(true);
@@ -1149,7 +1157,7 @@ export function AppShell() {
               </svg>
             ),
           },
-        ] as { label: string; onClick: () => void; disabled: boolean; icon: React.ReactNode }[]).map(({ label, onClick, disabled, icon }, index) => (
+        ] as { label: string; onClick: () => void; disabled: boolean; icon: ReactNode }[]).map(({ label, onClick, disabled, icon }, index) => (
           <button
             key={`${label}-${index}`}
             onClick={onClick}
@@ -1185,7 +1193,7 @@ export function AppShell() {
         aria-live="polite"
         style={{
           position: "fixed",
-          top: 42,
+          top: 14,
           left: "50%",
           transform: "translateX(-50%)",
           zIndex: 1200,
@@ -1203,461 +1211,49 @@ export function AppShell() {
         {chatWindowLimitNotice}
       </div>
     )}
-    {/* Custom titlebar content — rendered in the native macOS traffic-light row. */}
-    <div
-      data-tauri-drag-region="deep"
+    <button
+      onClick={() => setSidebarMode((mode) => mode === "open" ? "closed" : "open")}
+      title={sidebarOpen ? "收起侧边栏" : "展开侧边栏"}
+      aria-label={sidebarOpen ? "收起侧边栏" : "展开侧边栏"}
+      aria-pressed={sidebarOpen}
       style={{
         position: "fixed",
-        top: 0,
-        left: 0,
-        right: 0,
+        left: 76,
+        top: -1,
+        zIndex: 700,
+        width: 28,
         height: 28,
-        zIndex: 900,
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        background: "var(--bg-panel)",
-        borderBottom: "1px solid var(--border)",
-        WebkitAppRegion: "drag",
-      } as DraggableStyle}
+        padding: 0,
+        borderRadius: 8,
+        border: "none",
+        background: "transparent",
+        color: "var(--text-muted)",
+        cursor: "pointer",
+        transition: "background 0.12s, color 0.12s",
+      }}
+      onMouseEnter={(e) => {
+        e.currentTarget.style.background = "var(--bg-hover)";
+        e.currentTarget.style.color = "var(--text)";
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.background = "transparent";
+        e.currentTarget.style.color = "var(--text-muted)";
+      }}
     >
-      <div data-tauri-drag-region style={{ fontSize: 13, fontWeight: 700, color: "var(--text)", opacity: 0.85, pointerEvents: "none" }}>DeerHux</div>
-      <button
-        data-tauri-drag-region="false"
-        onClick={() => setSidebarMode((mode) => mode === "open" ? "closed" : "open")}
-        title={sidebarOpen ? "收起侧边栏" : "展开侧边栏"}
-        aria-label={sidebarOpen ? "收起侧边栏" : "展开侧边栏"}
-        aria-pressed={sidebarOpen}
-        style={{
-          position: "absolute",
-          left: 78,
-          top: 2,
-          width: 24,
-          height: 24,
-          padding: 0,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          background: "transparent",
-          border: "1px solid transparent",
-          borderRadius: 7,
-          color: "var(--text-muted)",
-          cursor: "pointer",
-          transition: "color 0.12s, background 0.12s, border-color 0.12s",
-          WebkitAppRegion: "no-drag",
-        } as DraggableStyle}
-        onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; e.currentTarget.style.background = "var(--bg-hover)"; }}
-        onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-muted)"; e.currentTarget.style.background = "transparent"; }}
-      >
-        {!sidebarOpen ? (
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-            <line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="18" x2="21" y2="18" />
-          </svg>
-        ) : (
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="9" y1="3" x2="9" y2="21" />
-          </svg>
-        )}
-      </button>
-      <button
-        data-tauri-drag-region="false"
-        onClick={(e) => { e.stopPropagation(); handleTopNewSession(); }}
-        disabled={!canCreateTopSession}
-        title={topNewSessionCwd ? `在 ${topNewSessionCwd} 中新建会话` : "新建会话（将使用最近项目或默认项目）"}
-        aria-label="新建会话"
-        style={{
-          position: "absolute",
-          right: getTitlebarActionRight(3),
-          top: 2,
-          width: 24,
-          height: 24,
-          padding: 0,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          background: "transparent",
-          border: "1px solid transparent",
-          borderRadius: 7,
-          color: canCreateTopSession ? "var(--text-muted)" : "var(--text-dim)",
-          cursor: canCreateTopSession ? "pointer" : "not-allowed",
-          opacity: canCreateTopSession ? 1 : 0.45,
-          transition: "color 0.12s, background 0.12s, border-color 0.12s",
-          WebkitAppRegion: "no-drag",
-        } as DraggableStyle}
-        onMouseEnter={(e) => {
-          if (!canCreateTopSession) return;
-          e.currentTarget.style.color = "var(--text)";
-          e.currentTarget.style.background = "var(--bg-hover)";
-        }}
-        onMouseLeave={(e) => {
-          e.currentTarget.style.color = canCreateTopSession ? "var(--text-muted)" : "var(--text-dim)";
-          e.currentTarget.style.background = "transparent";
-        }}
-      >
+      {sidebarOpen ? (
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="9" y1="3" x2="9" y2="21" />
+        </svg>
+      ) : (
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-          <line x1="12" y1="5" x2="12" y2="19" />
-          <line x1="5" y1="12" x2="19" y2="12" />
+          <line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="18" x2="21" y2="18" />
         </svg>
-      </button>
-      {/* Settings button */}
-      <button
-        data-tauri-drag-region="false"
-        onClick={(e) => { e.stopPropagation(); setSettingsMenuOpen((v) => !v); }}
-        title="设置"
-        aria-label="设置"
-        aria-haspopup="menu"
-        aria-expanded={settingsMenuOpen}
-        style={{
-          position: "absolute",
-          right: getTitlebarActionRight(2),
-          top: 2,
-          width: 24,
-          height: 24,
-          padding: 0,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          background: settingsMenuOpen ? "var(--bg-hover)" : "transparent",
-          border: "1px solid transparent",
-          borderRadius: 7,
-          color: settingsMenuOpen ? "var(--text)" : "var(--text-muted)",
-          cursor: "pointer",
-          transition: "color 0.12s, background 0.12s, border-color 0.12s",
-          WebkitAppRegion: "no-drag",
-        } as DraggableStyle}
-        onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; e.currentTarget.style.background = "var(--bg-hover)"; }}
-        onMouseLeave={(e) => { e.currentTarget.style.color = settingsMenuOpen ? "var(--text)" : "var(--text-muted)"; e.currentTarget.style.background = settingsMenuOpen ? "var(--bg-hover)" : "transparent"; }}
-      >
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-          <circle cx="12" cy="12" r="3" />
-          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-        </svg>
-      </button>
-      {/* Settings dropdown */}
-      {settingsMenuOpen && (
-        <div
-          role="menu"
-          style={{
-            position: "absolute",
-            top: 30,
-            right: getTitlebarActionRight(2) - 4,
-            width: 180,
-            maxHeight: 360,
-            overflowY: "auto",
-            padding: 6,
-            background: "var(--bg-panel)",
-            border: "1px solid var(--border)",
-            borderRadius: 10,
-            boxShadow: "0 14px 36px rgba(0,0,0,0.18)",
-            zIndex: 910,
-            WebkitAppRegion: "no-drag",
-          } as DraggableStyle}
-          onClick={(e) => e.stopPropagation()}
-        >
-          {([
-            {
-              label: "模型配置",
-              onClick: () => { setSettingsMenuOpen(false); setModelsConfigOpen(true); },
-              icon: (
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <rect x="4" y="4" width="16" height="16" rx="2" /><rect x="9" y="9" width="6" height="6" />
-                  <line x1="9" y1="1" x2="9" y2="4" /><line x1="15" y1="1" x2="15" y2="4" />
-                  <line x1="9" y1="20" x2="9" y2="23" /><line x1="15" y1="20" x2="15" y2="23" />
-                  <line x1="20" y1="9" x2="23" y2="9" /><line x1="20" y1="14" x2="23" y2="14" />
-                  <line x1="1" y1="9" x2="4" y2="9" /><line x1="1" y1="14" x2="4" y2="14" />
-                </svg>
-              ),
-            },
-            {
-              label: "扩展总览",
-              disabled: !activeCwd && !selectedSession?.cwd && !newSessionCwd,
-              onClick: () => { setSettingsMenuOpen(false); setExtensionsConfigOpen(true); },
-              icon: (
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M12 2v6" /><path d="M12 16v6" /><path d="M4.93 4.93l4.24 4.24" /><path d="M14.83 14.83l4.24 4.24" />
-                  <path d="M2 12h6" /><path d="M16 12h6" /><path d="M4.93 19.07l4.24-4.24" /><path d="M14.83 9.17l4.24-4.24" />
-                </svg>
-              ),
-            },
-            {
-              label: "技能配置",
-              disabled: false,
-              onClick: () => { setSettingsMenuOpen(false); setSkillsConfigOpen(true); },
-              icon: (
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M12 2L2 7l10 5 10-5-10-5z" />
-                  <path d="M2 17l10 5 10-5" />
-                  <path d="M2 12l10 5 10-5" />
-                </svg>
-              ),
-            },
-            {
-              label: "定时任务",
-              onClick: () => { setSettingsMenuOpen(false); setSchedulerPanelOpen(true); },
-              icon: (
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <circle cx="12" cy="12" r="10" />
-                  <polyline points="12 6 12 12 16 14" />
-                </svg>
-              ),
-            },
-            {
-              label: "角色",
-              onClick: () => { setSettingsMenuOpen(false); setQuickConfigOpen("role"); },
-              icon: (
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <circle cx="12" cy="8" r="4" />
-                  <path d="M4 21a8 8 0 0 1 16 0" />
-                </svg>
-              ),
-            },
-            {
-              label: "记忆",
-              onClick: () => { setSettingsMenuOpen(false); setQuickConfigOpen("memory"); },
-              icon: (
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M4 6.5A2.5 2.5 0 0 1 6.5 4H20v16H6.5A2.5 2.5 0 0 1 4 17.5z" />
-                  <path d="M8 8h8" />
-                  <path d="M8 12h6" />
-                  <path d="M8 16h7" />
-                </svg>
-              ),
-            },
-            {
-              label: "MCP",
-              onClick: () => { setSettingsMenuOpen(false); setQuickConfigOpen("mcp"); },
-              icon: (
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <rect x="3" y="3" width="7" height="7" rx="1.5" />
-                  <rect x="14" y="3" width="7" height="7" rx="1.5" />
-                  <rect x="8.5" y="14" width="7" height="7" rx="1.5" />
-                  <path d="M10 6.5h4" />
-                  <path d="M17.5 10v2a2 2 0 0 1-2 2H12" />
-                  <path d="M6.5 10v2a2 2 0 0 0 2 2H12" />
-                </svg>
-              ),
-            },
-            {
-              label: "微信 Bot",
-              onClick: () => { setSettingsMenuOpen(false); setWechatConfigOpen(true); },
-              icon: (
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />
-                </svg>
-              ),
-            },
-          ] as { label: string; onClick: () => void; disabled?: boolean; icon: React.ReactNode }[]).map((item) => (
-            <button
-              key={item.label}
-              role="menuitem"
-              onClick={item.onClick}
-              disabled={item.disabled}
-              style={{
-                width: "100%",
-                display: "flex",
-                alignItems: "center",
-                gap: 8,
-                padding: "8px 9px",
-                border: "none",
-                borderRadius: 8,
-                background: "transparent",
-                color: item.disabled ? "var(--text-dim)" : "var(--text-muted)",
-                cursor: item.disabled ? "default" : "pointer",
-                textAlign: "left",
-                fontSize: 12,
-                opacity: item.disabled ? 0.4 : 1,
-              }}
-              onMouseEnter={(e) => { if (!item.disabled) { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text)"; } }}
-              onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = item.disabled ? "var(--text-dim)" : "var(--text-muted)"; }}
-            >
-              {item.icon}
-              <span>{item.label}</span>
-            </button>
-          ))}
-        </div>
       )}
-      <button
-        data-tauri-drag-region="false"
-        onClick={(e) => {
-          const rect = e.currentTarget.getBoundingClientRect();
-          toggleTheme({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
-        }}
-        title={isDark ? "切换为浅色模式" : "切换为深色模式"}
-        aria-label={isDark ? "切换为浅色模式" : "切换为深色模式"}
-        aria-pressed={isDark}
-        style={{
-          position: "absolute",
-          right: getTitlebarActionRight(1),
-          top: 2,
-          width: 24,
-          height: 24,
-          padding: 0,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          background: "transparent",
-          border: "1px solid transparent",
-          borderRadius: 7,
-          color: "var(--text-muted)",
-          cursor: "pointer",
-          transition: "color 0.12s, background 0.12s, border-color 0.12s",
-          WebkitAppRegion: "no-drag",
-        } as DraggableStyle}
-        onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; e.currentTarget.style.background = "var(--bg-hover)"; }}
-        onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-muted)"; e.currentTarget.style.background = "transparent"; }}
-      >
-        {isDark ? (
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <circle cx="12" cy="12" r="5" />
-            <line x1="12" y1="1" x2="12" y2="3" /><line x1="12" y1="21" x2="12" y2="23" />
-            <line x1="4.22" y1="4.22" x2="5.64" y2="5.64" /><line x1="18.36" y1="18.36" x2="19.78" y2="19.78" />
-            <line x1="1" y1="12" x2="3" y2="12" /><line x1="21" y1="12" x2="23" y2="12" />
-            <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" /><line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
-          </svg>
-        ) : (
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
-          </svg>
-        )}
-      </button>
-      <button
-        data-tauri-drag-region="false"
-        onClick={filePreviewDetached ? handleReturnFilePreview : () => setRightPanelOpen((v) => !v)}
-        title={filePreviewDetached ? "收回文件面板" : rightPanelOpen ? "隐藏文件面板" : "显示文件面板"}
-        aria-label={filePreviewDetached ? "收回文件面板" : rightPanelOpen ? "隐藏文件面板" : "显示文件面板"}
-        aria-pressed={rightPanelOpen || filePreviewDetached}
-        style={{
-          position: "absolute",
-          right: getTitlebarActionRight(0),
-          top: 2,
-          width: 24,
-          height: 24,
-          padding: 0,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          background: rightPanelOpen || filePreviewDetached ? "var(--bg-selected)" : "transparent",
-          border: "1px solid transparent",
-          borderRadius: 7,
-          color: rightPanelOpen || filePreviewDetached ? "var(--text)" : "var(--text-muted)",
-          cursor: "pointer",
-          transition: "color 0.12s, background 0.12s, border-color 0.12s",
-          WebkitAppRegion: "no-drag",
-        } as DraggableStyle}
-        onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; e.currentTarget.style.background = "var(--bg-hover)"; }}
-        onMouseLeave={(e) => {
-          const active = rightPanelOpen || filePreviewDetached;
-          e.currentTarget.style.color = active ? "var(--text)" : "var(--text-muted)";
-          e.currentTarget.style.background = active ? "var(--bg-selected)" : "transparent";
-        }}
-      >
-        {filePreviewDetached ? (
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="15" y1="3" x2="15" y2="21" /><path d="M10 8 6 12l4 4" /><path d="M6 12h7" />
-          </svg>
-        ) : (
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="15" y1="3" x2="15" y2="21" />
-          </svg>
-        )}
-      </button>
-      {/* Window control buttons — Windows only */}
-      {isWindowsPlatform && (
-        <>
-          <button
-            data-tauri-drag-region="false"
-            onClick={() => handleWindowAction('minimize')}
-            title="最小化"
-            aria-label="最小化"
-            style={{
-              position: "absolute",
-              right: 64,
-              top: 2,
-              width: 24,
-              height: 24,
-              padding: 0,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              background: "transparent",
-              border: "1px solid transparent",
-              borderRadius: 7,
-              color: "var(--text-muted)",
-              cursor: "pointer",
-              transition: "color 0.12s, background 0.12s, border-color 0.12s",
-              WebkitAppRegion: "no-drag",
-            } as DraggableStyle}
-            onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; e.currentTarget.style.background = "var(--bg-hover)"; }}
-            onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-muted)"; e.currentTarget.style.background = "transparent"; }}
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-              <line x1="5" y1="12" x2="19" y2="12" />
-            </svg>
-          </button>
-          <button
-            data-tauri-drag-region="false"
-            onClick={() => handleWindowAction('maximize')}
-            title="最大化"
-            aria-label="最大化"
-            style={{
-              position: "absolute",
-              right: 36,
-              top: 2,
-              width: 24,
-              height: 24,
-              padding: 0,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              background: "transparent",
-              border: "1px solid transparent",
-              borderRadius: 7,
-              color: "var(--text-muted)",
-              cursor: "pointer",
-              transition: "color 0.12s, background 0.12s, border-color 0.12s",
-              WebkitAppRegion: "no-drag",
-            } as DraggableStyle}
-            onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; e.currentTarget.style.background = "var(--bg-hover)"; }}
-            onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-muted)"; e.currentTarget.style.background = "transparent"; }}
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <rect x="4" y="4" width="16" height="16" rx="2" />
-            </svg>
-          </button>
-          <button
-            data-tauri-drag-region="false"
-            onClick={() => handleWindowAction('close')}
-            title="关闭"
-            aria-label="关闭"
-            style={{
-              position: "absolute",
-              right: 8,
-              top: 2,
-              width: 24,
-              height: 24,
-              padding: 0,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              background: "transparent",
-              border: "1px solid transparent",
-              borderRadius: 7,
-              color: "var(--text-muted)",
-              cursor: "pointer",
-              transition: "color 0.12s, background 0.12s, border-color 0.12s",
-              WebkitAppRegion: "no-drag",
-            } as DraggableStyle}
-            onMouseEnter={(e) => { e.currentTarget.style.color = "#fff"; e.currentTarget.style.background = "#e81123"; }}
-            onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-muted)"; e.currentTarget.style.background = "transparent"; }}
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <line x1="6" y1="6" x2="18" y2="18" /><line x1="18" y1="6" x2="6" y2="18" />
-            </svg>
-          </button>
-        </>
-      )}
-    </div>
-    <div style={{ display: "flex", height: "calc(100dvh - 28px)", marginTop: 28, overflow: "hidden", background: "var(--bg)" }}>
+    </button>
+    <div style={{ display: "flex", height: "100dvh", overflow: "hidden", background: "var(--bg)" }}>
       {/* Mobile overlay backdrop */}
       <div
         className="sidebar-overlay-backdrop"
@@ -1714,6 +1310,163 @@ export function AppShell() {
       <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minWidth: 0 }}>
         {/* Chat content */}
         <div style={{ flex: 1, overflow: "hidden", position: "relative" }}>
+          {/* Top-right action buttons */}
+          <div
+            style={{
+              position: "absolute",
+              top: 8,
+              right: 8,
+              zIndex: 10,
+              display: "flex",
+              alignItems: "center",
+              gap: 2,
+              background: "color-mix(in srgb, var(--bg-panel) 85%, transparent)",
+              backdropFilter: "blur(8px)",
+              WebkitBackdropFilter: "blur(8px)",
+              borderRadius: 10,
+              border: "1px solid var(--border)",
+              padding: 2,
+            }}
+          >
+            {([
+              {
+                label: topNewSessionCwd ? `在 ${topNewSessionCwd} 中新建会话` : "新建会话",
+                onClick: handleTopNewSession,
+                disabled: !canCreateTopSession,
+                active: false,
+                icon: (
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                    <line x1="12" y1="5" x2="12" y2="19" />
+                    <line x1="5" y1="12" x2="19" y2="12" />
+                  </svg>
+                ),
+              },
+              {
+                label: "设置",
+                onClick: () => setSettingsMenuOpen((v) => !v),
+                disabled: false,
+                active: settingsMenuOpen,
+                icon: (
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <circle cx="12" cy="12" r="3" />
+                    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+                  </svg>
+                ),
+              },
+              {
+                label: isDark ? "切换为浅色模式" : "切换为深色模式",
+                onClick: (event: MouseEventType<HTMLButtonElement>) => {
+                  const rect = event.currentTarget.getBoundingClientRect();
+                  toggleTheme({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
+                },
+                disabled: false,
+                active: isDark,
+                icon: isDark ? (
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <circle cx="12" cy="12" r="5" />
+                    <line x1="12" y1="1" x2="12" y2="3" /><line x1="12" y1="21" x2="12" y2="23" />
+                    <line x1="4.22" y1="4.22" x2="5.64" y2="5.64" /><line x1="18.36" y1="18.36" x2="19.78" y2="19.78" />
+                    <line x1="1" y1="12" x2="3" y2="12" /><line x1="21" y1="12" x2="23" y2="12" />
+                    <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" /><line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
+                  </svg>
+                ) : (
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+                  </svg>
+                ),
+              },
+              {
+                label: filePreviewDetached ? "收回文件面板" : rightPanelOpen ? "隐藏文件面板" : "显示文件面板",
+                onClick: filePreviewDetached ? handleReturnFilePreview : () => setRightPanelOpen((v) => !v),
+                disabled: false,
+                active: rightPanelOpen || filePreviewDetached,
+                icon: filePreviewDetached ? (
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="15" y1="3" x2="15" y2="21" /><path d="M10 8 6 12l4 4" /><path d="M6 12h7" />
+                  </svg>
+                ) : (
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="15" y1="3" x2="15" y2="21" />
+                  </svg>
+                ),
+              },
+            ] as { label: string; onClick: (event: MouseEventType<HTMLButtonElement>) => void; disabled: boolean; active: boolean; icon: ReactNode }[]).map(({ label, onClick, disabled, active, icon }, index) => (
+              <button
+                key={`chat-action-${index}`}
+                onClick={onClick}
+                disabled={disabled}
+                title={label}
+                aria-label={label}
+                aria-pressed={active}
+                style={{
+                  width: 30,
+                  height: 30,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  padding: 0,
+                  background: active ? "var(--bg-selected)" : "transparent",
+                  border: "none",
+                  borderRadius: 8,
+                  color: active ? "var(--text)" : disabled ? "var(--text-dim)" : "var(--text-muted)",
+                  cursor: disabled ? "default" : "pointer",
+                  opacity: disabled ? 0.35 : 1,
+                  transition: "background 0.12s, color 0.12s",
+                }}
+                onMouseEnter={(e) => { if (!disabled) { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text)"; } }}
+                onMouseLeave={(e) => { e.currentTarget.style.background = active ? "var(--bg-selected)" : "transparent"; e.currentTarget.style.color = active ? "var(--text)" : disabled ? "var(--text-dim)" : "var(--text-muted)"; }}
+              >
+                {icon}
+              </button>
+            ))}
+          </div>
+          {/* Settings dropdown for chat area */}
+          {settingsMenuOpen && (
+            <div
+              role="menu"
+              style={{
+                position: "absolute",
+                top: 46,
+                right: 8,
+                width: 180,
+                padding: 6,
+                background: "var(--bg-panel)",
+                border: "1px solid var(--border)",
+                borderRadius: 10,
+                boxShadow: "0 14px 36px rgba(0,0,0,0.18)",
+                zIndex: 100,
+              }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              {([
+                { label: "扩展总览", disabled: !activeCwd && !selectedSession?.cwd && !newSessionCwd, onClick: () => { setSettingsMenuOpen(false); setExtensionsConfigOpen(true); } },
+                { label: "微信 Bot", disabled: false, onClick: () => { setSettingsMenuOpen(false); setWechatConfigOpen(true); } },
+              ] as { label: string; disabled?: boolean; onClick: () => void }[]).map((item) => (
+                <button
+                  key={item.label}
+                  role="menuitem"
+                  onClick={item.onClick}
+                  disabled={item.disabled}
+                  style={{
+                    width: "100%",
+                    padding: "8px 9px",
+                    border: "none",
+                    borderRadius: 8,
+                    background: "transparent",
+                    color: item.disabled ? "var(--text-dim)" : "var(--text-muted)",
+                    cursor: item.disabled ? "default" : "pointer",
+                    textAlign: "left",
+                    fontSize: 12,
+                    opacity: item.disabled ? 0.4 : 1,
+                  }}
+                  onMouseEnter={(e) => { if (!item.disabled) { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text)"; } }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = item.disabled ? "var(--text-dim)" : "var(--text-muted)"; }}
+                >
+                  {item.label}
+                </button>
+              ))}
+            </div>
+          )}
           {/* Watermark when no session tabs */}
           {!hasSessionTabs && (
             <div
