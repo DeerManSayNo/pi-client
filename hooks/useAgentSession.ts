@@ -32,10 +32,28 @@ function compressSkillText(text: string): string {
   return args ? `/skill:${skillName} ${args}` : `/skill:${skillName}`;
 }
 
+/** Strip SDK-injected skill prefix from user message content for display. */
+function stripSkillInjectedPrefix(text: string): string {
+  // 中文格式："使用技能：xxx"
+  const cnMatch = text.match(/^使用技能[：:]\s*(\S+)\s*$/);
+  if (cnMatch) return "";
+  // 英文格式："Use the selected skill: xxx."
+  const enMatch = text.match(/^Use the selected skill:\s*(\S+)\.?\s*$/i);
+  if (enMatch) return "";
+  return text;
+}
+
 function compressMessageContent(msg: AgentMessage): AgentMessage {
   if (msg.role !== "user") return msg;
   const content = msg.content;
   if (typeof content === "string") {
+    // Only strip SDK-injected prefixes when the message carries a skill field
+    if (msg.skill) {
+      const stripped = stripSkillInjectedPrefix(content);
+      if (stripped !== content) {
+        return { ...msg, content: stripped };
+      }
+    }
     const compressed = compressSkillText(content);
     return compressed !== content ? { ...msg, content: compressed } : msg;
   }
@@ -781,6 +799,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
               const completedKey = userContentKey(normalized);
               const lastUser = [...prev].reverse().find((m) => m.role === "user");
               if (completedKey && lastUser && userContentKey(lastUser) === completedKey) {
+                return prev;
+              }
+              // Skill-only sends: SDK injects a display prefix (e.g., "使用技能：xxx")
+              // into user content, which doesn't match our optimistic empty-string content.
+              // If both messages share the same skill, treat them as duplicates.
+              if (normalized.skill?.name && lastUser?.skill?.name === normalized.skill.name) {
                 return prev;
               }
             }
