@@ -365,6 +365,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [retryInfo, setRetryInfo] = useState<{ attempt: number; maxAttempts: number; errorMessage?: string } | null>(null);
   const [contextUsage, setContextUsage] = useState<{ percent: number | null; contextWindow: number; tokens: number | null } | null>(null);
   const [systemPrompt, setSystemPrompt] = useState<string | null>(null);
+  const lastSystemPromptRef = useRef<string | null>(null);
+  // Keep a persistent copy so systemPrompt is still available after the agent dies
+  useEffect(() => {
+    if (systemPrompt) lastSystemPromptRef.current = systemPrompt;
+  }, [systemPrompt]);
   const [forkingEntryId, setForkingEntryId] = useState<string | null>(null);
   const [currentModelOverride, setCurrentModelOverride] = useState<{ provider: string; modelId: string } | null>(null);
   const [pendingModel, setPendingModel] = useState<{ provider: string; modelId: string } | null>(null);
@@ -470,7 +475,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const loadSession = useCallback(async (sid: string, showLoading = false, includeState = false) => {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 10000);
+    const timeout = setTimeout(() => controller.abort(), 30000);
     try {
       if (showLoading) setLoading(true);
       const url = includeState
@@ -501,12 +506,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       return d.agentState ?? null;
     } catch (e) {
       if (sid === sessionIdRef.current) {
-        setError(e instanceof DOMException && e.name === "AbortError" ? "加载会话超时" : String(e));
+        if (showLoading) {
+          setError(e instanceof DOMException && e.name === "AbortError" ? "加载会话超时" : String(e));
+        } else {
+          console.warn("[loadSession] background refresh failed:", e);
+        }
       }
       return null;
     } finally {
       clearTimeout(timeout);
-      if (sid === sessionIdRef.current) setLoading(false);
+      if (showLoading && sid === sessionIdRef.current) setLoading(false);
     }
   }, []);
 
@@ -849,7 +858,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const handleSend = useCallback(async (message: string, images?: AttachedImage[], roleId?: string, references?: FileReference[], skill?: SkillReference) => {
     const sentReferences = references?.length ? references : undefined;
-    if (!message.trim() && !images?.length && !sentReferences?.length) return;
+    if (!message.trim() && !images?.length && !sentReferences?.length && !skill) return;
     if (agentRunningRef.current) return;
     // Set the ref immediately to prevent duplicate sends before React re-renders
     agentRunningRef.current = true;
@@ -1658,7 +1667,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
     };
 
-    const timer = window.setInterval(tick, 900);
+    const timer = window.setInterval(tick, 2500);
     return () => {
       stopped = true;
       window.clearInterval(timer);
@@ -1724,7 +1733,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // State
     data, loading, error, messages, entryIds, streamState,
     agentRunning, modelNames, modelList, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, toolPreset, agentMode, planReady, thinkingLevel,
-    retryInfo, contextUsage, systemPrompt, forkingEntryId,
+    retryInfo, contextUsage, systemPrompt: systemPrompt ?? lastSystemPromptRef.current, forkingEntryId,
     isCompacting, compactError, lastModelError, currentModel, displayModel, sessionStats,
     agentPhase, watchdogInfo, stallLevel, autoRecoveryMode,
     isNew,

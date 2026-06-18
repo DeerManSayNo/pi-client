@@ -2,9 +2,76 @@
 // Task runner — executes scheduled prompt tasks via AI agent
 // ============================================================================
 
+import fs from "fs";
+import path from "path";
+import { getAgentDir as getCodingAgentDir } from "@earendil-works/pi-coding-agent";
 import type { ScheduledTask, PromptTaskConfig, TaskLog } from "./types";
-import { updateTask, appendTaskLog } from "./store";
+import { updateTask, appendTaskLog, getTask } from "./store";
 import { cacheSessionPath, invalidateSessionListCache } from "../session-reader";
+
+const TASK_RUN_LOCK_TTL_MS = 2 * 60 * 60 * 1000;
+
+function isProcessAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function getTaskRunLockPath(taskId: string): string {
+  const dir = path.join(getCodingAgentDir(), "scheduler-run-locks");
+  fs.mkdirSync(dir, { recursive: true });
+  return path.join(dir, `${encodeURIComponent(taskId)}.lock`);
+}
+
+function acquireTaskRunLock(taskId: string): (() => void) | null {
+  const lockPath = getTaskRunLockPath(taskId);
+  const payload = JSON.stringify({ pid: process.pid, startedAt: Date.now() });
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      fs.writeFileSync(lockPath, payload, { flag: "wx" });
+      return () => {
+        try {
+          const raw = fs.readFileSync(lockPath, "utf-8");
+          const parsed = JSON.parse(raw) as { pid?: unknown };
+          if (parsed.pid === process.pid) fs.unlinkSync(lockPath);
+        } catch {
+          // Ignore cleanup races.
+        }
+      };
+    } catch (err: unknown) {
+      const code = err && typeof err === "object" && "code" in err ? (err as { code?: unknown }).code : undefined;
+      if (code !== "EEXIST") throw err;
+
+      try {
+        const raw = fs.readFileSync(lockPath, "utf-8");
+        const parsed = JSON.parse(raw) as { pid?: unknown; startedAt?: unknown };
+        const pid = typeof parsed.pid === "number" ? parsed.pid : null;
+        const startedAt = typeof parsed.startedAt === "number" ? parsed.startedAt : 0;
+        const stale = !pid || !isProcessAlive(pid) || Date.now() - startedAt > TASK_RUN_LOCK_TTL_MS;
+        if (stale) {
+          fs.unlinkSync(lockPath);
+          continue;
+        }
+      } catch {
+        try {
+          fs.unlinkSync(lockPath);
+          continue;
+        } catch {
+          // Another process may own it now.
+        }
+      }
+
+      return null;
+    }
+  }
+
+  return null;
+}
 
 function recordResult(taskId: string, result: "success" | "error", output?: string, error?: string, durationMs?: number, sessionId?: string, sessionFile?: string): void {
   updateTask(taskId, {
@@ -147,12 +214,24 @@ async function runPromptTask(task: ScheduledTask, config: PromptTaskConfig): Pro
 }
 
 export async function executeTask(task: ScheduledTask): Promise<void> {
-  console.log(`[scheduler] Executing task: "${task.name}" (${task.id})`);
+  const releaseLock = acquireTaskRunLock(task.id);
+  if (!releaseLock) {
+    console.log(`[scheduler] Task "${task.name}" (${task.id}) is already running; skipping duplicate trigger`);
+    return;
+  }
 
-  // Increment run count
-  updateTask(task.id, {
-    runCount: (task.runCount || 0) + 1,
-  });
+  try {
+    console.log(`[scheduler] Executing task: "${task.name}" (${task.id})`);
 
-  await runPromptTask(task, task.config as PromptTaskConfig);
+    // Increment run count from the latest store value. Cron callbacks keep the
+    // original task object in memory, so using task.runCount here becomes stale.
+    const latestTask = getTask(task.id);
+    updateTask(task.id, {
+      runCount: ((latestTask?.runCount ?? task.runCount) || 0) + 1,
+    });
+
+    await runPromptTask(task, task.config as PromptTaskConfig);
+  } finally {
+    releaseLock();
+  }
 }

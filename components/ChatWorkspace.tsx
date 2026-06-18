@@ -107,7 +107,6 @@ export function ChatWorkspace(props: ChatWorkspaceProps) {
     <div
       style={{
         position: "relative",
-        zIndex: 1,
         height: "100%",
         overflow: "auto",
         padding: workspacePadding,
@@ -168,6 +167,8 @@ export function ChatWorkspace(props: ChatWorkspaceProps) {
               {isMultiLayout && session && (
                 <div
                   style={{
+                    position: "relative",
+                    zIndex: 52,
                     height: compact ? 34 : 36,
                     flexShrink: 0,
                     display: "flex",
@@ -249,7 +250,6 @@ export function ChatWorkspace(props: ChatWorkspaceProps) {
                     style={{
                       position: "absolute",
                       inset: 0,
-                      zIndex: 0,
                       pointerEvents: "none",
                       display: "flex",
                       alignItems: "center",
@@ -280,7 +280,7 @@ export function ChatWorkspace(props: ChatWorkspaceProps) {
                   </div>
                 )}
                 {session ? (
-                  <div style={{ position: "relative", zIndex: 1, height: "100%", minHeight: 0 }}>
+                  <div style={{ position: "relative", height: "100%", minHeight: 0 }}>
                     <ChatWindow
                       activeTabId={slotId}
                       session={activeSession}

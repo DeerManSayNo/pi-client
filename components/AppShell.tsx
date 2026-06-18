@@ -5,7 +5,6 @@ import type { PointerEvent as PointerEventType, MouseEvent as MouseEventType, Re
 import { useSearchParams } from "next/navigation";
 import { SessionSidebar } from "./SessionSidebar";
 import { CHAT_LAYOUT_COUNTS, ChatWorkspace, type ChatLayoutMode } from "./ChatWorkspace";
-import { ChatFileExplorerButton } from "./ChatFileExplorerButton";
 import { FilePreviewPanel } from "./FilePreviewPanel";
 import type { Tab } from "./TabBar";
 import { ModelsConfig } from "./ModelsConfig";
@@ -34,6 +33,35 @@ import type { SessionInfo } from "@/lib/types";
 import type { ChatInputHandle } from "./ChatInput";
 
 type SidebarMode = "open" | "closed";
+
+declare global {
+  interface Window {
+    __TAURI_INTERNALS__?: unknown;
+  }
+}
+
+const WINDOW_DRAG_HEIGHT = 32;
+const WINDOW_DRAG_EXCLUDE_SELECTOR = [
+  "button",
+  "a",
+  "input",
+  "textarea",
+  "select",
+  "summary",
+  "[role='button']",
+  "[role='menuitem']",
+  "[contenteditable='true']",
+  "[data-no-window-drag]",
+  "[data-tauri-drag-region='false']",
+].join(",");
+
+function shouldStartWindowDrag(event: PointerEventType<Element>) {
+  if (event.button !== 0 || event.clientY > WINDOW_DRAG_HEIGHT || event.defaultPrevented) return false;
+  const target = event.target;
+  if (!(target instanceof Element)) return false;
+  return !target.closest(WINDOW_DRAG_EXCLUDE_SELECTOR);
+}
+
 type RunningSessionStatus = {
   sessionId: string;
   isStreaming: boolean;
@@ -162,6 +190,8 @@ export function AppShell() {
   const [customCwds, setCustomCwds] = useState<string[]>([]);
   const [projectOptions, setProjectOptions] = useState<{ cwd: string; displayName: string }[]>([]);
   const [settingsMenuOpen, setSettingsMenuOpen] = useState(false);
+  const [topActionBarHovered, setTopActionBarHovered] = useState(false);
+  const topActionBarHoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEscapeClose(() => setSettingsMenuOpen(false), settingsMenuOpen);
 
@@ -1036,6 +1066,37 @@ export function AppShell() {
   // Show chat area only when a session tab is assigned to a visible chat slot.
   const hasSessionTabs = sessionTabs.length > 0;
   const showChat = hasSessionTabs && hasVisibleChatSlots;
+  const topActionBarAutoCollapse = occupiedChatSlotCount > 1;
+  const topActionBarExpanded = !topActionBarAutoCollapse || topActionBarHovered || settingsMenuOpen;
+
+  const clearTopActionBarHoverTimer = useCallback(() => {
+    if (topActionBarHoverTimerRef.current) {
+      clearTimeout(topActionBarHoverTimerRef.current);
+      topActionBarHoverTimerRef.current = null;
+    }
+  }, []);
+
+  const scheduleTopActionBarHover = useCallback((hovered: boolean) => {
+    clearTopActionBarHoverTimer();
+    if (!topActionBarAutoCollapse) {
+      setTopActionBarHovered(false);
+      return;
+    }
+    if (hovered) {
+      setTopActionBarHovered(true);
+    } else {
+      topActionBarHoverTimerRef.current = setTimeout(() => {
+        setTopActionBarHovered(false);
+        topActionBarHoverTimerRef.current = null;
+      }, 500);
+    }
+  }, [clearTopActionBarHoverTimer, topActionBarAutoCollapse]);
+
+  useEffect(() => {
+    if (!topActionBarAutoCollapse) setTopActionBarHovered(false);
+    return clearTopActionBarHoverTimer;
+  }, [clearTopActionBarHoverTimer, topActionBarAutoCollapse]);
+
   // Show watermark only when absolutely nothing is open (no tabs, no session, no new-session cwd)
   const showWatermark = !showChat && !hasSessionTabs;
   // While restoring initial session from URL, don't show the placeholder
@@ -1049,6 +1110,19 @@ export function AppShell() {
     if (effectiveProjectCwd && !byCwd.has(effectiveProjectCwd)) byCwd.set(effectiveProjectCwd, getProjectName(effectiveProjectCwd));
     return [...byCwd.entries()].map(([cwd, displayName]) => ({ cwd, displayName }));
   }, [customCwds, defaultCwd, effectiveProjectCwd, projectOptions]);
+
+  const handleWindowDragPointerDown = useCallback((event: PointerEventType<HTMLDivElement>) => {
+    if (!shouldStartWindowDrag(event)) return;
+    if (typeof window === "undefined" || !window.__TAURI_INTERNALS__) return;
+
+    // 不使用覆盖层抢事件，而是在空白顶栏区域按下时主动通知 Tauri 开始拖动。
+    // 这样顶栏里的按钮、输入框、标签页、右键菜单、resize handle 等元素仍然保留原生左右键/拖拽事件。
+    void import("@tauri-apps/api/window")
+      .then(({ getCurrentWindow }) => getCurrentWindow().startDragging())
+      .catch(() => {
+        // Browser/dev fallback: ignore.
+      });
+  }, []);
 
   const sidebarContent = (
     <div
@@ -1212,6 +1286,7 @@ export function AppShell() {
       </div>
     )}
     <button
+      data-tauri-drag-region="false"
       onClick={() => setSidebarMode((mode) => mode === "open" ? "closed" : "open")}
       title={sidebarOpen ? "收起侧边栏" : "展开侧边栏"}
       aria-label={sidebarOpen ? "收起侧边栏" : "展开侧边栏"}
@@ -1253,7 +1328,10 @@ export function AppShell() {
         </svg>
       )}
     </button>
-    <div style={{ display: "flex", height: "100dvh", overflow: "hidden", background: "var(--bg)" }}>
+    <div
+      onPointerDownCapture={handleWindowDragPointerDown}
+      style={{ display: "flex", height: "100dvh", overflow: "hidden", background: "var(--bg)" }}
+    >
       {/* Mobile overlay backdrop */}
       <div
         className="sidebar-overlay-backdrop"
@@ -1289,6 +1367,7 @@ export function AppShell() {
       {/* Resize handle */}
       {sidebarMode === "open" && (
         <div
+          data-no-window-drag
           onPointerDown={handleResizeStart}
           style={{
             width: 5,
@@ -1312,11 +1391,15 @@ export function AppShell() {
         <div style={{ flex: 1, overflow: "hidden", position: "relative" }}>
           {/* Top-right action buttons */}
           <div
+            data-tauri-drag-region="false"
+            onClick={(event) => event.stopPropagation()}
+            onMouseEnter={() => scheduleTopActionBarHover(true)}
+            onMouseLeave={() => scheduleTopActionBarHover(false)}
             style={{
               position: "absolute",
-              top: 8,
+              top: topActionBarAutoCollapse ? 42 : 8,
               right: 8,
-              zIndex: 10,
+              zIndex: 60,
               display: "flex",
               alignItems: "center",
               gap: 2,
@@ -1326,8 +1409,40 @@ export function AppShell() {
               borderRadius: 10,
               border: "1px solid var(--border)",
               padding: 2,
+              boxShadow: topActionBarAutoCollapse && !topActionBarExpanded ? "0 8px 22px rgba(0,0,0,0.12)" : "none",
+              transform: topActionBarAutoCollapse && !topActionBarExpanded ? "translateX(calc(100% - 30px))" : "translateX(0)",
+              transition: "transform 0.18s ease, box-shadow 0.18s ease",
             }}
           >
+            {topActionBarAutoCollapse && (
+              <div
+                aria-hidden="true"
+                style={{
+                  width: 26,
+                  height: 30,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  color: "var(--text-muted)",
+                  flexShrink: 0,
+                  pointerEvents: "none",
+                }}
+              >
+                <svg
+                  width="14"
+                  height="14"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2.2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  style={{ transform: topActionBarExpanded ? "rotate(180deg)" : "none", transition: "transform 0.18s ease" }}
+                >
+                  <polyline points="9 18 15 12 9 6" />
+                </svg>
+              </div>
+            )}
             {([
               {
                 label: topNewSessionCwd ? `在 ${topNewSessionCwd} 中新建会话` : "新建会话",
@@ -1343,7 +1458,10 @@ export function AppShell() {
               },
               {
                 label: "设置",
-                onClick: () => setSettingsMenuOpen((v) => !v),
+                onClick: (event: MouseEventType<HTMLButtonElement>) => {
+                  event.stopPropagation();
+                  setSettingsMenuOpen((v) => !v);
+                },
                 disabled: false,
                 active: settingsMenuOpen,
                 icon: (
@@ -1681,14 +1799,6 @@ export function AppShell() {
                 projectOptions={headerProjectOptions}
                 onNewSessionCwdChange={handleNewSessionProjectChange}
               />
-              {chatLayoutMode === "single" && (
-                <ChatFileExplorerButton
-                  cwd={effectiveProjectCwd}
-                  onOpenFile={handleOpenFile}
-                  onAtMention={handleAtMention}
-                  refreshKey={explorerRefreshKey}
-                />
-              )}
             </>
           ) : showPlaceholder ? (
             activeCwd ? (
@@ -1716,6 +1826,7 @@ export function AppShell() {
       {/* Right panel resize handle */}
       {rightPanelOpen && !filePreviewDetached && (
         <div
+          data-no-window-drag
           onPointerDown={handleRightPanelResizeStart}
           style={{
             width: 5,

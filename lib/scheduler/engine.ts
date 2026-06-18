@@ -2,7 +2,10 @@
 // Scheduler engine — manages node-cron jobs, syncs with persistent store
 // ============================================================================
 
+import fs from "fs";
+import path from "path";
 import cron, { type ScheduledTask as CronScheduledTask } from "node-cron";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { loadTasks, addTask, updateTask, deleteTask } from "./store";
 import { executeTask } from "./runner";
 import type { ScheduledTask, PromptTaskConfig } from "./types";
@@ -11,6 +14,88 @@ import type { ScheduledTask, PromptTaskConfig } from "./types";
 const runningJobs = new Map<string, CronScheduledTask>();
 
 let started = false;
+let schedulerLockOwned = false;
+const SCHEDULER_LOCK_FILE = "scheduler.lock";
+
+function getSchedulerLockPath(): string {
+  const dir = getAgentDir();
+  fs.mkdirSync(dir, { recursive: true });
+  return path.join(dir, SCHEDULER_LOCK_FILE);
+}
+
+function isProcessAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function readLockPid(lockPath: string): number | null {
+  try {
+    const raw = fs.readFileSync(lockPath, "utf-8");
+    const parsed = JSON.parse(raw) as { pid?: unknown };
+    return typeof parsed.pid === "number" ? parsed.pid : null;
+  } catch {
+    return null;
+  }
+}
+
+function releaseSchedulerLock(): void {
+  if (!schedulerLockOwned) return;
+  const lockPath = getSchedulerLockPath();
+  const lockPid = readLockPid(lockPath);
+  if (lockPid === process.pid) {
+    try {
+      fs.unlinkSync(lockPath);
+    } catch {
+      // Ignore cleanup errors during process shutdown.
+    }
+  }
+  schedulerLockOwned = false;
+}
+
+function acquireSchedulerLock(): boolean {
+  const lockPath = getSchedulerLockPath();
+  const payload = JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString(), cwd: process.cwd() });
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      fs.writeFileSync(lockPath, payload, { flag: "wx" });
+      schedulerLockOwned = true;
+      process.once("exit", releaseSchedulerLock);
+      return true;
+    } catch (err: unknown) {
+      const code = err && typeof err === "object" && "code" in err ? (err as { code?: unknown }).code : undefined;
+      if (code !== "EEXIST") throw err;
+
+      const lockPid = readLockPid(lockPath);
+      if (lockPid === process.pid) {
+        // Same process after Next.js HMR: reclaim the lock and clean node-cron's in-process registry below.
+        fs.writeFileSync(lockPath, payload, "utf-8");
+        schedulerLockOwned = true;
+        process.once("exit", releaseSchedulerLock);
+        return true;
+      }
+
+      if (lockPid === null || !isProcessAlive(lockPid)) {
+        try {
+          fs.unlinkSync(lockPath);
+          continue;
+        } catch {
+          // Another process may have acquired it between read and unlink.
+        }
+      }
+
+      console.log(`[scheduler] Another process already owns the scheduler lock (pid ${lockPid ?? "unknown"}); skipping startup`);
+      return false;
+    }
+  }
+
+  return false;
+}
 
 function scheduleJob(task: ScheduledTask): void {
   if (!task.enabled) return;
@@ -50,6 +135,7 @@ function unscheduleJob(taskId: string): void {
 
 export function startScheduler(): void {
   if (started) return;
+  if (!acquireSchedulerLock()) return;
   started = true;
 
   // Kill any stale cron jobs left over from previous module load (e.g. HMR in dev).
@@ -78,6 +164,7 @@ export function stopScheduler(): void {
     unscheduleJob(id);
   }
   started = false;
+  releaseSchedulerLock();
   console.log("[scheduler] Scheduler stopped");
 }
 

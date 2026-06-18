@@ -256,7 +256,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
 
   const loadSessions = useCallback(async (showLoading = false) => {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 10000);
+    const timeout = setTimeout(() => controller.abort(), 30000);
     try {
       if (showLoading) setLoading(true);
       const res = await fetch("/api/sessions", { signal: controller.signal });
@@ -640,53 +640,68 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       <div
         ref={headerRef}
         style={{
-          padding: compact ? "8px 6px" : "12px 10px 8px",
+          padding: compact ? "8px 6px" : "34px 12px 6px",
           flexShrink: 0,
         }}
       >
-        <div style={{ display: "flex", alignItems: "center", justifyContent: compact ? "center" : "space-between", gap: 6, marginBottom: compact ? 0 : 6 }}>
+        <div style={{ display: "flex", flexDirection: searchOpen ? "row" : compact ? "row" : "column", alignItems: searchOpen || compact ? "center" : "stretch", justifyContent: compact ? "center" : "space-between", gap: compact ? 6 : 3, marginBottom: compact ? 0 : 4 }}>
           {!searchOpen ? (
             <button
               onClick={handleNewSession}
               disabled={false}
               style={{
-                display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: compact ? "center" : "flex-start",
+                gap: compact ? 0 : 10,
                 background: compact ? "var(--bg-hover)" : "transparent",
                 border: compact ? "1px solid var(--border)" : "none",
                 color: "var(--text-muted)",
                 cursor: "pointer",
-                height: compact ? 34 : 32,
-                width: compact ? 34 : undefined,
-                paddingLeft: compact ? 0 : 10,
-                paddingRight: compact ? 0 : 12,
-                borderRadius: compact ? 999 : 7,
-                fontSize: 12,
+                height: compact ? 34 : 30,
+                width: compact ? 34 : "100%",
+                minWidth: 0,
+                padding: compact ? 0 : "0 10px",
+                borderRadius: compact ? 999 : 9,
+                fontSize: compact ? 12 : 13,
                 fontWeight: 500,
                 letterSpacing: "-0.01em",
-                flex: compact ? "0 0 auto" : "0 0 auto",
+                flex: compact ? "0 0 auto" : "1 1 auto",
+                order: compact ? 0 : 2,
                 transition: "background 0.12s, color 0.12s",
               }}
               title={activeSelectedCwd ? `在 ${activeSelectedCwd} 中新建会话` : "新建会话（将使用最近项目或默认项目）"}
               aria-label="新建会话"
               onMouseEnter={(e) => {
                 e.currentTarget.style.background = "var(--bg-hover)";
-                e.currentTarget.style.color = "var(--accent)";
+                e.currentTarget.style.color = "var(--text)";
               }}
               onMouseLeave={(e) => {
                 e.currentTarget.style.background = compact ? "var(--bg-hover)" : "transparent";
                 e.currentTarget.style.color = "var(--text-muted)";
               }}
             >
-              <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
-                <line x1="6" y1="1" x2="6" y2="11" />
-                <line x1="1" y1="6" x2="11" y2="6" />
+              <svg
+                width={compact ? 14 : 13}
+                height={compact ? 14 : 13}
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                style={{ flexShrink: 0 }}
+              >
+                <path d="M3.7 4.3 21 12 3.7 19.7l3.2-7.7-3.2-7.7Z" />
+                <path d="M6.9 12H21" />
               </svg>
-              {!compact && "新建"}
+              {!compact && <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>新建</span>}
             </button>
           ) : (
             <div
               style={{
                 position: "relative",
+                order: compact ? 0 : 1,
                 flex: 1,
                 minWidth: 0,
                 height: compact ? 34 : 32,
@@ -748,22 +763,28 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             style={{
               display: "flex",
               alignItems: "center",
-              justifyContent: "center",
-              width: compact ? 34 : 32,
-              height: compact ? 34 : 32,
-              borderRadius: compact ? 999 : 8,
+              justifyContent: compact || searchOpen ? "center" : "flex-start",
+              gap: compact || searchOpen ? 0 : 10,
+              width: compact || searchOpen ? 34 : "100%",
+              height: compact ? 34 : searchOpen ? 32 : 30,
+              borderRadius: compact ? 999 : searchOpen ? 8 : 9,
               border: compact ? "1px solid var(--border)" : "none",
               background: compact ? "var(--bg-hover)" : "transparent",
               color: "var(--text-muted)",
               cursor: "pointer",
               flexShrink: 0,
+              order: compact ? 0 : searchOpen ? 2 : 1,
+              padding: compact || searchOpen ? 0 : "0 10px",
+              fontSize: compact ? 12 : 13,
+              fontWeight: 500,
+              letterSpacing: "-0.01em",
               transition: "background 0.12s, color 0.12s",
             }}
             title={searchOpen ? "关闭搜索" : "搜索"}
             aria-label={searchOpen ? "关闭搜索" : "搜索"}
             onMouseEnter={(e) => {
               e.currentTarget.style.background = "var(--bg-hover)";
-              e.currentTarget.style.color = "var(--accent)";
+              e.currentTarget.style.color = "var(--text)";
             }}
             onMouseLeave={(e) => {
               e.currentTarget.style.background = compact ? "var(--bg-hover)" : "transparent";
@@ -776,10 +797,23 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                 <line x1="6" y1="6" x2="18" y2="18" />
               </svg>
             ) : (
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <circle cx="11" cy="11" r="8" />
-                <path d="m21 21-4.35-4.35" />
-              </svg>
+              <>
+                <svg
+                  width={compact ? 14 : 13}
+                  height={compact ? 14 : 13}
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  style={{ flexShrink: 0 }}
+                >
+                  <circle cx="11" cy="11" r="8" />
+                  <path d="m21 21-4.35-4.35" />
+                </svg>
+                {!compact && <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>搜索</span>}
+              </>
             )}
           </button>
         </div>

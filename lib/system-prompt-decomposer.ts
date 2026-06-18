@@ -120,7 +120,7 @@ const SECTION_SPECS: Omit<SystemPromptSection, "content" | "enabled">[] = [
 const DEFAULT_SECTION_CONTENT: Record<string, string> = {
   identity: "You are an expert coding assistant operating inside DeerHux, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.",
   tools: "Available tools:\n[自动生成：根据当前会话启用的工具生成工具列表]",
-  guidelines: "Guidelines:\n- Be concise in your responses and thinking all use chinese language\n- Show file paths clearly when working with files",
+  guidelines: "Guidelines:\n- 回答和思考过程（thinking）全部使用中文；言简意赅，不要啰嗦\n- 处理文件时清晰显示文件路径",
   mode_control: getDefaultModePromptSectionContent(),
   project_context: "<project_context>\n[自动生成：来自 AGENTS.md 等项目上下文文件]\n</project_context>",
   skills: "<available_skills>\n[自动生成：当前可用 skills 列表]\n</available_skills>",
@@ -678,7 +678,21 @@ export function applyRolePromptConfigToPrompt(prompt: string, roleId?: string | 
   const mcpSection = config.sections.find((s) => s.id === "mcp_tools");
   const mcpAllowedNames = mcpSection?.enabled === false ? [] : config.mcpToolNames;
   result = filterMcpToolsInPrompt(result, mcpAllowedNames);
+  // Ensure SDK's hardcoded English guidelines are replaced with Chinese version
+  result = ensureChineseGuidelines(result);
   return result;
+}
+
+/**
+ * Replace SDK's hardcoded English guidelines with Chinese equivalents.
+ * The SDK always emits "Be concise in your responses" and "Show file paths clearly
+ * when working with files". This ensures they're replaced even when the user hasn't
+ * customized sections.
+ */
+function ensureChineseGuidelines(prompt: string): string {
+  return prompt
+    .replace(/- Be concise in your responses/g, "- 回答和思考过程（thinking）全部使用中文；言简意赅，不要啰嗦")
+    .replace(/- Show file paths clearly when working with files/g, "- 处理文件时清晰显示文件路径");
 }
 
 export function isGlobalSystemPromptSectionEnabled(sectionId: string): boolean {

@@ -218,6 +218,7 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, onCloseTabs
           const isActive = tab.id === activeTabId;
           return (
             <div
+              data-tauri-drag-region="false"
               key={tab.id}
               onClick={() => onSelectTab(tab.id)}
               onContextMenu={(e) => handleContextMenu(e, tab)}
@@ -256,6 +257,7 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, onCloseTabs
                 {tab.label}
               </span>
               <button
+                data-tauri-drag-region="false"
                 onClick={(e) => { e.stopPropagation(); onCloseTab(tab.id); }}
                 onMouseEnter={() => setHoveredClose(tab.id)}
                 onMouseLeave={() => setHoveredClose(null)}

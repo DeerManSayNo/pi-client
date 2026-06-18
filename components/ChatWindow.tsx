@@ -1111,6 +1111,8 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
       {pinnedUserMsgIdx >= 0 && pinnedUserMsgText && (
         <div
           style={{
+            position: "relative",
+            zIndex: 52,
             flexShrink: 0,
             width: "100%",
             boxSizing: "border-box",
@@ -1120,7 +1122,7 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
         >
           <div style={{
             maxWidth: contentMaxWidth,
-            margin: "4px auto 0",
+            margin: "11px auto 0",
             border: "1px solid var(--border)",
             borderRadius: 8,
             background: "var(--bg-panel)",
@@ -1170,7 +1172,11 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
                 onClick={(e) => { e.stopPropagation(); setLastUserMsgExpanded(!lastUserMsgExpanded); }}
                 title={lastUserMsgExpanded ? "收起" : "展开查看完整内容"}
                 style={{
-                  padding: "5px 10px",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  alignSelf: "stretch",
+                  padding: "0 10px",
                   border: "none",
                   borderLeft: "1px solid var(--border)",
                   background: "transparent",

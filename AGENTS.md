@@ -2,6 +2,7 @@
 
 ## Coding Guidelines
 
+- 回答和思考过程（thinking）全部使用中文
 - 查找函数、组件、类、接口、调用关系时，优先使用 codegraph_search / codegraph_callers / codegraph_callees / codegraph_impact，不要优先用 bash/grep/find。
 - 用 code_search 做关键字快速检索，codegraph_search 做语义符号搜索。
 

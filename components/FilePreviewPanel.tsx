@@ -57,15 +57,17 @@ export function FilePreviewPanel({ tabs, activeTabId, cwd, viewerCwd, onSelectTa
   return (
     <>
       {tabs.length > 0 && (
-        <TabBar
-          tabs={tabs}
-          activeTabId={activeTabId ?? ""}
-          onSelectTab={onSelectTab}
-          onCloseTab={onCloseTab}
-          onCloseTabs={onCloseTabs}
-          cwd={cwd ?? undefined}
-          rightAction={onDetach ? <DetachButton onDetach={onDetach} /> : undefined}
-        />
+        <div style={{ flexShrink: 0 }}>
+          <TabBar
+            tabs={tabs}
+            activeTabId={activeTabId ?? ""}
+            onSelectTab={onSelectTab}
+            onCloseTab={onCloseTab}
+            onCloseTabs={onCloseTabs}
+            cwd={cwd ?? undefined}
+            rightAction={onDetach ? <DetachButton onDetach={onDetach} /> : undefined}
+          />
+        </div>
       )}
       <div style={{ flex: 1, overflow: "hidden", position: "relative" }}>
         {activeTab?.filePath ? (

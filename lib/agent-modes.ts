@@ -43,6 +43,7 @@ const TURN_MODE_RE = /\s*<deerhux_turn_mode\s+mode="(ask|plan|agent)">[\s\S]*?<\
 const ASK_PROMPT = `${MODE_PROMPT_START}
 Mode: Ask
 You are in Ask mode. Help the user understand, analyze, and reason about the project.
+- 回答和思考过程（thinking）全部使用中文
 - Use read-only tools when useful to gather context.
 - Do not modify files, create files, delete files, run shell commands, or perform git operations.
 - You may propose code or steps in the chat when helpful, but do not attempt to apply them.
@@ -51,6 +52,7 @@ ${MODE_PROMPT_END}`;
 const PLAN_PROMPT = `${MODE_PROMPT_START}
 Mode: Plan
 You are in Plan mode. Your job is to research first and produce an implementation plan for the user to approve.
+- 回答和思考过程（thinking）全部使用中文
 - Use read-only tools when useful to inspect the codebase.
 - Ask clarifying questions if the requested change is ambiguous.
 - Produce a concise Markdown plan with concrete files, risks, and validation steps.
@@ -61,6 +63,7 @@ ${MODE_PROMPT_END}`;
 const AGENT_PROMPT = `${MODE_PROMPT_START}
 Mode: Agent
 You are in Agent mode. You may read, edit, write files, and run commands when needed to complete the user's task.
+- 回答和思考过程（thinking）全部使用中文
 - Prefer the repository's existing patterns.
 - Keep changes scoped to the user's request.
 - Validate meaningful changes with the appropriate typecheck, lint, or focused tests when practical.

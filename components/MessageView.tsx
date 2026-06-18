@@ -171,6 +171,7 @@ function UserMessageView({ message, entryId, onResend, systemPrompt }: {
 
   const [expanded, setExpanded] = useState(false);
   const [editValue, setEditValue] = useState(content);
+  const [showSystemPromptModal, setShowSystemPromptModal] = useState(false);
   const editorRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const canResend = !!onResend && !!entryId;
@@ -211,6 +212,16 @@ function UserMessageView({ message, entryId, onResend, systemPrompt }: {
     return () => document.removeEventListener("pointerdown", handlePointerDown);
   }, [expanded, content]);
 
+  // Escape key to close system prompt modal
+  useEffect(() => {
+    if (!showSystemPromptModal) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setShowSystemPromptModal(false);
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [showSystemPromptModal]);
+
   const handleSendEdit = () => {
     const trimmed = editValue.trim();
     if (!trimmed) return;
@@ -231,14 +242,60 @@ function UserMessageView({ message, entryId, onResend, systemPrompt }: {
   const renderImages = () => imageBlocks.length > 0 && (
     <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: content ? 10 : 0 }}>
       {imageBlocks.map((img, i) => {
-        const flat = img as unknown as { data?: string; mimeType?: string };
+        if (img._stripped) {
+          // Image data was stripped on the server to keep the API response lean.
+          // Show a lightweight placeholder so the user knows an image was attached.
+          return (
+            <div
+              key={i}
+              style={{
+                width: 200, height: 140,
+                borderRadius: 8,
+                border: "1px solid var(--border)",
+                background: "color-mix(in srgb, var(--bg-panel) 60%, transparent)",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                flexDirection: "column",
+                gap: 6,
+                color: "var(--text-dim)",
+                fontSize: 12,
+              }}
+            >
+              <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+                <circle cx="8.5" cy="8.5" r="1.5" />
+                <polyline points="21 15 16 10 5 21" />
+              </svg>
+              历史图片（已压缩）
+            </div>
+          );
+        }
         const src = img.source
           ? img.source.type === "base64"
             ? `data:${img.source.media_type};base64,${img.source.data}`
             : img.source.url ?? ""
-          : flat.data
-            ? `data:${flat.mimeType};base64,${flat.data}`
-            : "";
+          : "";
+        if (!src) {
+          return (
+            <div
+              key={i}
+              style={{
+                width: 200, height: 140,
+                borderRadius: 8,
+                border: "1px solid var(--border)",
+                background: "color-mix(in srgb, var(--bg-panel) 60%, transparent)",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                color: "var(--text-dim)",
+                fontSize: 12,
+              }}
+            >
+              图片
+            </div>
+          );
+        }
         return (
           // eslint-disable-next-line @next/next/no-img-element
           <img
@@ -254,9 +311,11 @@ function UserMessageView({ message, entryId, onResend, systemPrompt }: {
 
   const renderSystemPromptChip = () => {
     if (systemPrompt === undefined) return null;
+    const isClickable = systemPrompt !== null && systemPrompt !== "";
     return (
       <span
         title={systemPrompt === null ? "系统提示词加载中" : systemPrompt || "（空）"}
+        onClick={isClickable ? () => setShowSystemPromptModal(true) : undefined}
         style={{
           display: "inline-flex",
           alignItems: "center",
@@ -270,6 +329,8 @@ function UserMessageView({ message, entryId, onResend, systemPrompt }: {
           fontSize: 12,
           fontWeight: 500,
           whiteSpace: "nowrap",
+          cursor: isClickable ? "pointer" : "default",
+          userSelect: "none",
         }}
       >
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
@@ -509,6 +570,107 @@ function UserMessageView({ message, entryId, onResend, systemPrompt }: {
               </svg>
               发送
             </button>
+        </div>
+      )}
+      {showSystemPromptModal && systemPrompt && (
+        <div
+          onClick={() => setShowSystemPromptModal(false)}
+          style={{
+            position: "fixed", inset: 0, zIndex: 1000,
+            display: "flex", alignItems: "center", justifyContent: "center",
+            background: "rgba(0,0,0,0.35)", padding: 20,
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: "min(800px, calc(100vw - 40px))",
+              maxHeight: "min(700px, calc(100vh - 40px))",
+              border: "1px solid var(--border)",
+              borderRadius: 16,
+              background: "var(--bg)",
+              boxShadow: "0 18px 60px rgba(0,0,0,0.28)",
+              overflow: "hidden",
+              display: "flex",
+              flexDirection: "column",
+            }}
+          >
+            <div
+              style={{
+                display: "flex", alignItems: "center", justifyContent: "space-between",
+                padding: "14px 18px",
+                borderBottom: "1px solid var(--border)",
+                flexShrink: 0,
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: "var(--text-muted)" }}>
+                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                  <polyline points="14 2 14 8 20 8" />
+                </svg>
+                <span style={{ fontSize: 15, fontWeight: 600, color: "var(--text)" }}>系统提示词</span>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    void navigator.clipboard.writeText(systemPrompt ?? "");
+                  }}
+                  style={{
+                    display: "inline-flex", alignItems: "center", gap: 5,
+                    padding: "6px 12px",
+                    background: "var(--bg-panel)",
+                    border: "1px solid var(--border)",
+                    borderRadius: 8,
+                    color: "var(--text-muted)",
+                    cursor: "pointer",
+                    fontSize: 13,
+                    fontWeight: 500,
+                  }}
+                >
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+                    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                  </svg>
+                  复制
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowSystemPromptModal(false)}
+                  style={{
+                    display: "inline-flex", alignItems: "center", justifyContent: "center",
+                    width: 32, height: 32,
+                    background: "var(--bg-panel)",
+                    border: "1px solid var(--border)",
+                    borderRadius: 8,
+                    color: "var(--text-muted)",
+                    cursor: "pointer",
+                  }}
+                  title="关闭"
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <line x1="18" y1="6" x2="6" y2="18" />
+                    <line x1="6" y1="6" x2="18" y2="18" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+            <div
+              style={{
+                overflow: "auto",
+                padding: "18px",
+                fontSize: 13,
+                lineHeight: 1.7,
+                color: "var(--text)",
+                fontFamily: "var(--font-mono), ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+                whiteSpace: "pre-wrap",
+                wordBreak: "break-word",
+                flex: 1,
+              }}
+            >
+              {systemPrompt}
+            </div>
+          </div>
         </div>
       )}
       </div>
@@ -851,7 +1013,6 @@ function TextBlock({ block }: { block: TextContent }) {
 }
 
 function ThinkingBlock({ block, duration }: { block: ThinkingContent; duration?: number }) {
-  const [expanded, setExpanded] = useState(false);
   return (
     <div
       style={{
@@ -861,8 +1022,7 @@ function ThinkingBlock({ block, duration }: { block: ThinkingContent; duration?:
         fontSize: 13,
       }}
     >
-      <button
-        onClick={() => setExpanded((v) => !v)}
+      <div
         style={{
           display: "flex",
           alignItems: "center",
@@ -870,33 +1030,30 @@ function ThinkingBlock({ block, duration }: { block: ThinkingContent; duration?:
           width: "100%",
           padding: "6px 10px",
           background: "var(--bg-panel)",
-          border: "none",
           color: "var(--text-muted)",
-          cursor: "pointer",
           fontSize: 12,
-          textAlign: "left",
         }}
       >
         <span>思考过程</span>
         {duration !== undefined && (
           <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--text-dim)", fontVariantNumeric: "tabular-nums" }}>{duration}s</span>
         )}
-      </button>
-      {expanded && (
-        <div
-          style={{
-            padding: "8px 10px",
-            color: "var(--text-muted)",
-            fontSize: 12,
-            lineHeight: 1.6,
-            whiteSpace: "pre-wrap",
-            background: "var(--bg-panel)",
-            borderTop: "1px solid var(--border)",
-          }}
-        >
-          {block.thinking}
-        </div>
-      )}
+      </div>
+      <div
+        style={{
+          maxHeight: 200,
+          overflowY: "auto",
+          padding: "8px 10px",
+          color: "var(--text-muted)",
+          fontSize: 12,
+          lineHeight: 1.6,
+          whiteSpace: "pre-wrap",
+          background: "var(--bg-panel)",
+          borderTop: "1px solid var(--border)",
+        }}
+      >
+        {block.thinking}
+      </div>
     </div>
   );
 }

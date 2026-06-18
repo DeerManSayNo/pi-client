@@ -131,7 +131,8 @@ function skillScope(skill: SkillOption): "global" | "project" | "path" {
 function skillPickerModeForValue(value: string): "all" | "project" | null {
   if (!value || /\s/.test(value)) return null;
   if (value.startsWith("/")) return value.startsWith("/skill:") ? null : "all";
-  return "project";
+  // Only trigger skill picker for "/" prefix, not for plain text input.
+  return null;
 }
 
 export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({

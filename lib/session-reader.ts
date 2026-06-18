@@ -4,7 +4,7 @@ import type { SessionEntry as PiSessionEntry, SessionInfo as PiSessionInfo } fro
 import { normalizeToolCalls } from "./normalize";
 import { extractTurnMode, normalizeAgentMode, stripTurnModeContext, type AgentMode } from "./agent-modes";
 
-const SESSION_LIST_TTL_MS = 5_000;
+const SESSION_LIST_TTL_MS = 30_000;
 
 export { getAgentDir };
 
@@ -108,6 +108,47 @@ export function invalidateSessionPathCache(sessionId: string): void {
 export function getSessionEntries(filePath: string): SessionEntry[] {
   const entries = SessionManager.open(filePath).getEntries();
   return entries as unknown as SessionEntry[];
+}
+
+/**
+ * Strip large base64 image data from content blocks to keep API responses small.
+ * Session files can contain multi-MB base64-encoded images embedded in
+ * display_user_message entries. Sending these unchanged over HTTP causes
+ * extreme latency and browser parsing overhead.
+ *
+ * We replace base64 image data with a short placeholder so the frontend can
+ * still show image count/type without the payload cost. The frontend renders
+ * a lightweight placeholder for images whose data has been stripped.
+ */
+function stripImageData(content: unknown): unknown {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return content;
+  return content.map((block) => {
+    if (typeof block !== "object" || block === null) return block;
+    const b = block as Record<string, unknown>;
+    if (b.type !== "image") return block;
+
+    // Keep the structure but replace base64 payload with a tiny sentinel.
+    // source.data can be 5-10 MB of base64 text; we keep the first ~20 chars
+    // so the frontend knows an image was attached without the data bloat.
+    const source = b.source as Record<string, unknown> | undefined;
+    if (source && typeof source.data === "string" && source.data.length > 200) {
+      return {
+        ...b,
+        source: { ...source, data: source.data.slice(0, 20) + "…[stripped]" },
+        _stripped: true,
+      };
+    }
+    // Legacy flat field
+    if (typeof b.data === "string" && b.data.length > 200) {
+      return {
+        ...b,
+        data: b.data.slice(0, 20) + "…[stripped]",
+        _stripped: true,
+      };
+    }
+    return block;
+  });
 }
 
 export function buildSessionContext(entries: SessionEntry[], leafId?: string | null): SessionContext {
@@ -233,8 +274,11 @@ export function buildSessionContext(entries: SessionEntry[], leafId?: string | n
     if (!data || !("content" in data)) return null;
     const references = normalizeReferences(data.references);
     const skillName = typeof data.skill?.name === "string" && data.skill.name.trim() ? data.skill.name.trim() : null;
+    // Strip large base64 image payloads from display content to keep
+    // session-load responses lean and avoid multi-second HTTP transfers.
+    const displayContent = stripImageData(data.content);
     return {
-      content: data.content,
+      content: displayContent,
       ...(references.length ? { references } : {}),
       ...(data.agentMode ? { agentMode: normalizeAgentMode(data.agentMode) } : {}),
       ...(skillName ? { skill: { name: skillName } } : {}),
@@ -272,12 +316,18 @@ export function buildSessionContext(entries: SessionEntry[], leafId?: string | n
           ...(turnContext?.agentMode || messageMode ? { agentMode: turnContext?.agentMode ?? messageMode } : {}),
         };
       }
+      // Strip image base64 data from raw user messages too (not just display_user_message).
+      // Session message entries can also embed large base64 images directly in content arrays.
+      const strippedContent = stripImageData(normalized.content);
       if (turnContext || messageMode) return {
         ...normalized,
+        content: strippedContent as typeof normalized.content,
         ...(turnContext?.references ? { references: turnContext.references } : {}),
         ...(turnContext?.skill ? { skill: turnContext.skill } : {}),
         ...(turnContext?.agentMode || messageMode ? { agentMode: turnContext?.agentMode ?? messageMode } : {}),
       };
+      // Always strip image data from user messages to keep API responses lean.
+      if (strippedContent !== normalized.content) return { ...normalized, content: strippedContent as typeof normalized.content };
     }
     return normalized;
   });

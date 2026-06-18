@@ -30,6 +30,8 @@ export interface ImageContent {
     data?: string;
     url?: string;
   };
+  /** Set to true when the server stripped large base64 data to keep API responses lean. */
+  _stripped?: boolean;
 }
 
 export interface FileReference {
