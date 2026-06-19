@@ -242,6 +242,26 @@ function UserMessageView({ message, entryId, onResend, systemPrompt }: {
   const renderImages = () => imageBlocks.length > 0 && (
     <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: content ? 10 : 0 }}>
       {imageBlocks.map((img, i) => {
+        // URL/file path images: load directly from the API — no data bloat.
+        if (img.source?.type === "url" && img.source.url) {
+          return (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              key={i}
+              src={img.source.url}
+              alt=""
+              style={{
+                maxWidth: 300, maxHeight: 280,
+                borderRadius: 8,
+                objectFit: "contain",
+                display: "block",
+                border: "1px solid var(--border)",
+                cursor: "pointer",
+              }}
+              onClick={() => window.open(img.source!.url, "_blank")}
+            />
+          );
+        }
         if (img._stripped) {
           // Image data was stripped on the server to keep the API response lean.
           // Show a lightweight placeholder so the user knows an image was attached.
@@ -886,7 +906,7 @@ function AssistantMessageView({
 
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
         {blocks.map((block, i) => (
-          <BlockView key={i} block={block} toolResults={toolResults} streamingDuration={streamingDurations.get(i) ?? (block.type === "thinking" ? thinkingDurationFromFile : undefined)} toolCallDurations={toolCallDurations} />
+          <BlockView key={i} block={block} toolResults={toolResults} streamingDuration={streamingDurations.get(i) ?? (block.type === "thinking" ? thinkingDurationFromFile : undefined)} toolCallDurations={toolCallDurations} isStreaming={isStreaming} />
         ))}
       </div>
 
@@ -944,12 +964,12 @@ function AssistantMessageView({
   );
 }
 
-function BlockView({ block, toolResults, streamingDuration, toolCallDurations }: { block: AssistantContentBlock; toolResults?: Map<string, ToolResultMessage>; streamingDuration?: number; toolCallDurations?: Map<string, number> }) {
+function BlockView({ block, toolResults, streamingDuration, toolCallDurations, isStreaming }: { block: AssistantContentBlock; toolResults?: Map<string, ToolResultMessage>; streamingDuration?: number; toolCallDurations?: Map<string, number>; isStreaming?: boolean }) {
   if (block.type === "text") {
     return <TextBlock block={block as TextContent} />;
   }
   if (block.type === "thinking") {
-    return <ThinkingBlock block={block as ThinkingContent} duration={streamingDuration} />;
+    return <ThinkingBlock block={block as ThinkingContent} duration={streamingDuration} isStreaming={isStreaming} />;
   }
   if (block.type === "toolCall") {
     const tc = block as ToolCallContent;
@@ -1012,7 +1032,29 @@ function TextBlock({ block }: { block: TextContent }) {
   );
 }
 
-function ThinkingBlock({ block, duration }: { block: ThinkingContent; duration?: number }) {
+function ThinkingBlock({ block, duration, isStreaming }: { block: ThinkingContent; duration?: number; isStreaming?: boolean }) {
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const stickToBottomRef = useRef(true);
+
+  // Auto-follow the latest streaming output, like a terminal tail.
+  // Only sticks while streaming, and only if the user hasn't scrolled up
+  // to read earlier content. Scrolling back near the bottom re-enables it.
+  useEffect(() => {
+    if (!isStreaming) return;
+    const el = scrollRef.current;
+    if (!el) return;
+    if (stickToBottomRef.current) {
+      el.scrollTop = el.scrollHeight;
+    }
+  }, [block.thinking, isStreaming]);
+
+  const handleScroll = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    stickToBottomRef.current = distanceFromBottom < 32;
+  };
+
   return (
     <div
       style={{
@@ -1040,6 +1082,8 @@ function ThinkingBlock({ block, duration }: { block: ThinkingContent; duration?:
         )}
       </div>
       <div
+        ref={scrollRef}
+        onScroll={handleScroll}
         style={{
           maxHeight: 200,
           overflowY: "auto",

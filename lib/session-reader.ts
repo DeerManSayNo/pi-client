@@ -1,10 +1,15 @@
 import { SessionManager, buildSessionContext as piBuildSessionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
-import type { SessionEntry, SessionInfo, SessionContext, AssistantMessage, FileReference, SkillReference } from "./types";
+import { statSync } from "fs";
+import type { SessionEntry, SessionInfo, SessionContext, SessionHeader, AssistantMessage, FileReference, SkillReference } from "./types";
 import type { SessionEntry as PiSessionEntry, SessionInfo as PiSessionInfo } from "@earendil-works/pi-coding-agent";
 import { normalizeToolCalls } from "./normalize";
 import { extractTurnMode, normalizeAgentMode, stripTurnModeContext, type AgentMode } from "./agent-modes";
 
 const SESSION_LIST_TTL_MS = 30_000;
+/** Min interval between background refreshes to avoid thundering herd under load. */
+const BACKGROUND_REFRESH_COOLDOWN_MS = 8_000;
+/** Debounce window: batch rapid invalidate() calls into a single background refresh. */
+const INVALIDATE_DEBOUNCE_MS = 2_000;
 
 export { getAgentDir };
 
@@ -43,10 +48,56 @@ async function listAllSessionsUncached(): Promise<SessionInfo[]> {
   });
 }
 
+// ============================================================================
+// Background refresh: non-blocking cache updates
+// ============================================================================
+let _lastBackgroundRefreshAt = 0;
+let _backgroundRefreshPromise: Promise<void> | null = null;
+
+function scheduleBackgroundRefresh(): void {
+  const now = Date.now();
+  if (now - _lastBackgroundRefreshAt < BACKGROUND_REFRESH_COOLDOWN_MS) return;
+  if (_backgroundRefreshPromise) return; // already refreshing
+
+  _lastBackgroundRefreshAt = now;
+  _backgroundRefreshPromise = listAllSessionsUncached()
+    .then((sessions) => {
+      globalThis.__deerhuxSessionListCache = {
+        sessions,
+        expiresAt: Date.now() + SESSION_LIST_TTL_MS,
+      };
+    })
+    .catch((err) => {
+      console.error("[session-reader] Background refresh failed:", err);
+    })
+    .finally(() => {
+      _backgroundRefreshPromise = null;
+    });
+}
+
+/**
+ * List all sessions with stale-while-revalidate pattern.
+ *
+ * Under normal conditions returns cached data immediately. When the cache is
+ * stale a *non-blocking* background refresh is scheduled — the stale data is
+ * returned right away so the UI never sees a spinner or timeout.
+ *
+ * Only on the very first call (cold cache) do we block and wait for the full
+ * scan. After that every call returns in O(1) time.
+ */
 export async function listAllSessions(): Promise<SessionInfo[]> {
   const now = Date.now();
   const cached = globalThis.__deerhuxSessionListCache;
-  if (cached && cached.expiresAt > now) return cached.sessions;
+
+  // Stale-while-revalidate: return cached data immediately, refresh in background
+  if (cached && cached.sessions.length > 0) {
+    if (cached.expiresAt <= now) {
+      scheduleBackgroundRefresh();
+    }
+    return cached.sessions;
+  }
+
+  // No cache at all — must wait for the full scan
   if (cached?.inflight) return cached.inflight;
 
   const inflight = listAllSessionsUncached().then((sessions) => {
@@ -63,15 +114,52 @@ export async function listAllSessions(): Promise<SessionInfo[]> {
   });
 
   globalThis.__deerhuxSessionListCache = {
-    sessions: cached?.sessions ?? [],
+    sessions: [],
     expiresAt: 0,
     inflight,
   };
   return inflight;
 }
 
+// ============================================================================
+// Debounced cache invalidation
+// ============================================================================
+let _invalidationTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * Invalidate the session list cache with debouncing.
+ *
+ * Instead of immediately clearing the cache (which forces the next read to do
+ * a blocking full scan), we mark the cache as expired and schedule a debounced
+ * background refresh. This means rapid successive invalidations (e.g. from
+ * concurrent prompts, turn completions, and sidebar polling) are coalesced
+ * into a single background scan.
+ */
 export function invalidateSessionListCache(): void {
+  // Mark as expired so the next caller knows data may be stale
+  const cached = globalThis.__deerhuxSessionListCache;
+  if (cached) cached.expiresAt = 0;
+
+  // Debounce: wait for the burst of invalidations to settle, then refresh once
+  if (_invalidationTimer) clearTimeout(_invalidationTimer);
+  _invalidationTimer = setTimeout(() => {
+    _invalidationTimer = null;
+    scheduleBackgroundRefresh();
+  }, INVALIDATE_DEBOUNCE_MS);
+}
+
+/**
+ * Force an immediate cache clear + refresh. Use sparingly — only when the
+ * session list has structurally changed (fork, delete, new session creation).
+ */
+export function forceRefreshSessionList(): void {
+  if (_invalidationTimer) {
+    clearTimeout(_invalidationTimer);
+    _invalidationTimer = null;
+  }
   globalThis.__deerhuxSessionListCache = undefined;
+  // Fire-and-forget: pre-warm the cache so the next UI read is fast
+  listAllSessions().catch(() => {});
 }
 
 // ============================================================================
@@ -110,6 +198,97 @@ export function getSessionEntries(filePath: string): SessionEntry[] {
   return entries as unknown as SessionEntry[];
 }
 
+// ============================================================================
+// Per-file read cache: avoid re-parsing the same .jsonl on every API hit.
+// Session files are append-only, so (path, mtimeMs, size) uniquely identifies
+// the parsed content. Without this cache, every concurrent background refresh
+// (agent_end, compaction_end, polling, watchdog) re-reads the file and
+// re-runs the CPU-intensive buildSessionContext — enough to pile up and blow
+// past the client's fetch timeout on large sessions.
+// ============================================================================
+interface CachedSessionFile {
+  mtimeMs: number;
+  size: number;
+  entries: SessionEntry[];
+  leafId: string | null;
+  context: SessionContext;
+  header: SessionHeader | null;
+  sessionName: string | undefined;
+}
+
+declare global {
+  var __deerhuxSessionFileCache: Map<string, CachedSessionFile> | undefined;
+}
+
+const SESSION_FILE_CACHE_MAX = 64;
+
+function getSessionFileCache(): Map<string, CachedSessionFile> {
+  if (!globalThis.__deerhuxSessionFileCache) {
+    globalThis.__deerhuxSessionFileCache = new Map();
+  }
+  return globalThis.__deerhuxSessionFileCache;
+}
+
+export function invalidateSessionFileCache(filePath?: string): void {
+  const cache = getSessionFileCache();
+  if (filePath) {
+    cache.delete(filePath);
+  } else {
+    cache.clear();
+  }
+}
+
+/**
+ * Read and fully parse a session file with caching. Returns parsed entries,
+ * resolved context (via buildSessionContext), leaf id, header and session
+ * name. Reuses cached result when the file's mtime + size are unchanged so
+ * concurrent background refreshes don't each pay the parse + build cost.
+ */
+export function readSessionFileCached(filePath: string): {
+  entries: SessionEntry[];
+  leafId: string | null;
+  context: SessionContext;
+  header: SessionHeader | null;
+  sessionName: string | undefined;
+} {
+  const cache = getSessionFileCache();
+
+  let mtimeMs = 0;
+  let size = 0;
+  try {
+    const stat = statSync(filePath);
+    mtimeMs = stat.mtimeMs;
+    size = stat.size;
+  } catch {
+    // stat failed — fall through to uncached read (will likely throw upstream)
+  }
+
+  const cached = cache.get(filePath);
+  if (cached && cached.mtimeMs === mtimeMs && cached.size === size) {
+    // Move to end (LRU-ish: most-recently-used last)
+    cache.delete(filePath);
+    cache.set(filePath, cached);
+    return cached;
+  }
+
+  const sm = SessionManager.open(filePath);
+  const entries = sm.getEntries() as unknown as SessionEntry[];
+  const leafId = sm.getLeafId();
+  const context = buildSessionContext(entries, leafId);
+  const header = sm.getHeader();
+  const sessionName = sm.getSessionName();
+
+  const result: CachedSessionFile = { mtimeMs, size, entries, leafId, context, header, sessionName };
+  cache.set(filePath, result);
+
+  // LRU eviction: drop oldest entry if over capacity.
+  if (cache.size > SESSION_FILE_CACHE_MAX) {
+    const oldestKey = cache.keys().next().value as string | undefined;
+    if (oldestKey && oldestKey !== filePath) cache.delete(oldestKey);
+  }
+  return result;
+}
+
 /**
  * Strip large base64 image data from content blocks to keep API responses small.
  * Session files can contain multi-MB base64-encoded images embedded in
@@ -128,10 +307,16 @@ function stripImageData(content: unknown): unknown {
     const b = block as Record<string, unknown>;
     if (b.type !== "image") return block;
 
+    const source = b.source as Record<string, unknown> | undefined;
+    // URL/file path references are lean — no need to strip them.
+    // Only base64-encoded images have large payloads.
+    if (source && (source.type === "url" || source.type === "file")) {
+      return block;
+    }
+
     // Keep the structure but replace base64 payload with a tiny sentinel.
     // source.data can be 5-10 MB of base64 text; we keep the first ~20 chars
     // so the frontend knows an image was attached without the data bloat.
-    const source = b.source as Record<string, unknown> | undefined;
     if (source && typeof source.data === "string" && source.data.length > 200) {
       return {
         ...b,

@@ -6,7 +6,8 @@ import {
   resolveSessionPath,
   invalidateSessionPathCache,
   invalidateSessionListCache,
-  buildSessionContext,
+  invalidateSessionFileCache,
+  readSessionFileCached,
 } from "@/lib/session-reader";
 import { getRpcSession } from "@/lib/rpc-manager";
 
@@ -21,12 +22,12 @@ export async function GET(
       return NextResponse.json({ error: "Session not found" }, { status: 404 });
     }
 
-    const sm = SessionManager.open(filePath);
-    const entries = sm.getEntries() as never;
-    const leafId = sm.getLeafId();
-    const context = buildSessionContext(entries, leafId);
+    // Cached read: avoids re-parsing the entire .jsonl and re-running the
+    // CPU-intensive buildSessionContext on every concurrent background
+    // refresh (agent_end, polling, watchdog). Cache is keyed on
+    // (path, mtimeMs, size) so any append invalidates it automatically.
+    const { context, leafId, header, sessionName } = readSessionFileCached(filePath);
 
-    const header = sm.getHeader();
     let modified = header?.timestamp ?? new Date().toISOString();
     try { modified = statSync(filePath).mtime.toISOString(); } catch { /* use header timestamp */ }
     let parentSessionId: string | undefined;
@@ -45,7 +46,7 @@ export async function GET(
       path: filePath,
       id: header.id,
       cwd: header.cwd ?? "",
-      name: sm.getSessionName(),
+      name: sessionName,
       created: header.timestamp,
       modified,
       messageCount: context.messages.length,
@@ -102,6 +103,7 @@ export async function PATCH(
     const sm = SessionManager.open(filePath);
     sm.appendSessionInfo(name.trim());
     invalidateSessionListCache();
+    invalidateSessionFileCache(filePath);
     return NextResponse.json({ ok: true });
   } catch (error) {
     return NextResponse.json({ error: String(error) }, { status: 500 });
@@ -152,6 +154,7 @@ export async function DELETE(
     getRpcSession(id)?.destroy();
     unlinkSync(filePath);
     invalidateSessionPathCache(id);
+    invalidateSessionFileCache(filePath);
     return NextResponse.json({ ok: true });
   } catch (error) {
     return NextResponse.json({ error: String(error) }, { status: 500 });

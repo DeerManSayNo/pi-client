@@ -57,6 +57,18 @@ function userTextContent(msg: AgentMessage | Partial<AgentMessage>): string {
     .join("\n");
 }
 
+function userImageCount(msg: AgentMessage | Partial<AgentMessage>): number {
+  const content = (msg as { content?: unknown }).content;
+  if (!Array.isArray(content)) return 0;
+  return content.filter((block) => (
+    typeof block === "object" && block !== null && (block as { type?: unknown }).type === "image"
+  )).length;
+}
+
+function normalizedUserTextForDedupe(msg: AgentMessage | Partial<AgentMessage>): string {
+  return compressSkillText(stripTurnModeContext(userTextContent(msg))).trim();
+}
+
 function isSkillOnlyUserMessage(msg: AgentMessage | Partial<AgentMessage>, skillName?: string | null): boolean {
   if (msg.role !== "user") return false;
   const userSkillName = (msg as { skill?: SkillReference }).skill?.name;
@@ -126,6 +138,20 @@ export interface SessionData {
     thinkingLevel: string;
     model: { provider: string; modelId: string } | null;
     roleId?: string | null;
+    agentMode?: AgentMode;
+  };
+}
+
+/** Shape of the `agentState` field returned by GET /api/sessions/[id]?includeState. */
+export interface AgentStatePayload {
+  running: boolean;
+  state?: {
+    isStreaming?: boolean;
+    isCompacting?: boolean;
+    isRunning?: boolean;
+    contextUsage?: { percent: number | null; contextWindow: number; tokens: number | null } | null;
+    systemPrompt?: string;
+    thinkingLevel?: string;
     agentMode?: AgentMode;
   };
 }
@@ -215,13 +241,23 @@ export interface AttachedImage {
   data: string;
   mimeType: string;
   previewUrl: string;
+  filePath?: string;  // absolute filesystem path for backend to read
+  fileUrl?: string;   // frontend access URL via /api/files/...
 }
 
 function buildUserContent(message: string, images?: AttachedImage[]): UserMessage["content"] {
-  const imageBlocks: ImageContent[] = images?.map((img) => ({
-    type: "image",
-    source: { type: "base64", media_type: img.mimeType, data: img.data },
-  })) ?? [];
+  const imageBlocks: ImageContent[] = images?.map((img) => {
+    if (img.fileUrl) {
+      return {
+        type: "image",
+        source: { type: "url", url: img.fileUrl },
+      } as ImageContent;
+    }
+    return {
+      type: "image",
+      source: { type: "base64", media_type: img.mimeType, data: img.data },
+    } as ImageContent;
+  }) ?? [];
   if (!imageBlocks.length) return message;
 
   const textBlocks: TextContent[] = message.trim() ? [{ type: "text", text: message }] : [];
@@ -395,6 +431,14 @@ type AgentStatus = {
   contentIdleMs?: number | null;
 };
 
+// Circuit breaker: maximum auto-recoveries per logical user turn. Shared by all
+// recovery triggers — the watchdog setInterval, the visibilitychange handler,
+// and the backend `agent_stale_warning` handler — so they draw from the same
+// budget and can't collectively exceed this limit.
+const MAX_AUTO_RECOVERIES_PER_TURN = 3;
+const AWAITING_AGENT_START_TIMEOUT_MS = 60_000;
+const AWAITING_AGENT_START_MAX_CHECKS = 2;
+
 export function useAgentSession(opts: UseAgentSessionOptions) {
   const {
     activeTabId,
@@ -481,9 +525,19 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const abortCompletedRef = useRef(false);
   const receivedAssistantMessageRef = useRef(false);
   const awaitingAgentStartRef = useRef(false);
+  const awaitingAgentStartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const awaitingAgentStartChecksRef = useRef(0);
   const optimisticSessionIdRef = useRef<string | null>(null);
   const adoptingCreatedSessionRef = useRef<string | null>(null);
   const turnIdRef = useRef(0);
+
+  const clearAwaitingAgentStartGuard = useCallback((resetChecks = true) => {
+    if (resetChecks) awaitingAgentStartChecksRef.current = 0;
+    if (awaitingAgentStartTimerRef.current) {
+      clearTimeout(awaitingAgentStartTimerRef.current);
+      awaitingAgentStartTimerRef.current = null;
+    }
+  }, []);
 
   // Shared reset: clears all per-turn tracking state. Called at the start of
   // every new turn (user send, follow_up, agent_start) to prevent stale
@@ -505,6 +559,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setLastModelError(null);
     receivedAssistantMessageRef.current = false;
     awaitingAgentStartRef.current = false;
+    clearAwaitingAgentStartGuard();
     lastAgentEventAtRef.current = Date.now();
     lastContentChangedAtRef.current = Date.now();
     lastContentLengthRef.current = 0;
@@ -533,51 +588,106 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     return total > 0 ? { tokens, cost } : null;
   }, [messages]);
 
+  // Session-level abort controller. Aborted when the active session changes
+  // so orphaned background loadSession / polling requests from the previous
+  // session are cancelled instead of piling up on the backend (which is the
+  // root cause of "background refresh failed: AbortError").
+  const sessionAbortRef = useRef<AbortController | null>(new AbortController());
+  // Inflight loadSession deduplication. Multiple concurrent background callers
+  // (agent_end, compaction_end, recovery, watchdog) share a single network
+  // request to avoid thundering-herd on a slow backend.
+  const loadSessionInflightRef = useRef<{
+    sid: string;
+    promise: Promise<AgentStatePayload | null>;
+  } | null>(null);
+
   const loadSession = useCallback(async (sid: string, showLoading = false, includeState = false) => {
+    // Background refreshes piggyback on an existing inflight request for the
+    // same sid. showLoading callers always start a fresh request so loading
+    // spinner transitions stay tied to user-visible actions.
+    const inflight = loadSessionInflightRef.current;
+    if (!showLoading && inflight && inflight.sid === sid) {
+      return inflight.promise;
+    }
+
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 30000);
-    try {
-      if (showLoading) setLoading(true);
-      const url = includeState
-        ? `/api/sessions/${encodeURIComponent(sid)}?includeState`
-        : `/api/sessions/${encodeURIComponent(sid)}`;
-      const res = await fetch(url, { signal: controller.signal });
-      if (res.status === 404) {
-        if (showLoading) {
-          setData(null);
-          setMessages([]);
-          setError(null);
+    // Link to the session-level abort so a tab switch cancels this request
+    // cleanly instead of letting it race the new session's requests.
+    const sessionSignal = sessionAbortRef.current?.signal;
+    let sessionAborted = false;
+    const onSessionAbort = () => {
+      sessionAborted = true;
+      controller.abort();
+    };
+    if (sessionSignal) {
+      if (sessionSignal.aborted) sessionAborted = true;
+      else sessionSignal.addEventListener("abort", onSessionAbort, { once: true });
+    }
+    // Background refreshes use a shorter timeout: if the backend is slow we'd
+    // rather drop the refresh silently than pile up requests and eventually
+    // log scary AbortError warnings. Foreground (showLoading) keeps 30s so
+    // the user has a chance to see the result.
+    const timeout = setTimeout(() => controller.abort(), showLoading ? 30_000 : 12_000);
+
+    const promise = (async () => {
+      try {
+        if (showLoading) setLoading(true);
+        const url = includeState
+          ? `/api/sessions/${encodeURIComponent(sid)}?includeState`
+          : `/api/sessions/${encodeURIComponent(sid)}`;
+        const res = await fetch(url, { signal: controller.signal, cache: "no-store" });
+        if (res.status === 404) {
+          if (showLoading) {
+            setData(null);
+            setMessages([]);
+            setError(null);
+          }
+          return null;
+        }
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const d = await res.json() as SessionData & { agentState?: AgentStatePayload };
+        if (sid !== sessionIdRef.current) return null;
+        setData(d);
+        const { messages: loadedMessages, entryIds: loadedEntryIds } = normalizeLoadedMessages(d.context.messages, d.context.entryIds);
+        setMessages(loadedMessages);
+        setEntryIds(loadedEntryIds);
+        setCurrentModelOverride(null);
+        setAgentMode(normalizeAgentMode(d.context.agentMode));
+        setError(null);
+        // If no live agent state, fall back to thinking level from session file
+        if (!d.agentState?.state?.thinkingLevel && d.context.thinkingLevel && d.context.thinkingLevel !== "off") {
+          setThinkingLevel(d.context.thinkingLevel as ThinkingLevelOption);
+        }
+        return d.agentState ?? null;
+      } catch (e) {
+        // Swallow aborts caused by a session switch — they're expected cleanup,
+        // not real failures worth warning about.
+        if (sid === sessionIdRef.current && !sessionAborted) {
+          if (showLoading) {
+            setError(e instanceof DOMException && e.name === "AbortError" ? "加载会话超时" : String(e));
+          } else {
+            console.warn("[loadSession] background refresh failed:", e);
+          }
         }
         return null;
+      } finally {
+        clearTimeout(timeout);
+        if (sessionSignal) sessionSignal.removeEventListener("abort", onSessionAbort);
+        if (showLoading && sid === sessionIdRef.current) setLoading(false);
       }
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const d = await res.json() as SessionData & { agentState?: { running: boolean; state?: { isStreaming?: boolean; isCompacting?: boolean; isRunning?: boolean; contextUsage?: { percent: number | null; contextWindow: number; tokens: number | null } | null; systemPrompt?: string; thinkingLevel?: string; agentMode?: AgentMode } } };
-      if (sid !== sessionIdRef.current) return null;
-      setData(d);
-      const { messages: loadedMessages, entryIds: loadedEntryIds } = normalizeLoadedMessages(d.context.messages, d.context.entryIds);
-      setMessages(loadedMessages);
-      setEntryIds(loadedEntryIds);
-      setCurrentModelOverride(null);
-      setAgentMode(normalizeAgentMode(d.context.agentMode));
-      setError(null);
-      // If no live agent state, fall back to thinking level from session file
-      if (!d.agentState?.state?.thinkingLevel && d.context.thinkingLevel && d.context.thinkingLevel !== "off") {
-        setThinkingLevel(d.context.thinkingLevel as ThinkingLevelOption);
-      }
-      return d.agentState ?? null;
-    } catch (e) {
-      if (sid === sessionIdRef.current) {
-        if (showLoading) {
-          setError(e instanceof DOMException && e.name === "AbortError" ? "加载会话超时" : String(e));
-        } else {
-          console.warn("[loadSession] background refresh failed:", e);
+    })();
+
+    // Register the inflight promise so concurrent background callers share
+    // this request. Cleared on settle so the next call can fire.
+    if (!showLoading) {
+      loadSessionInflightRef.current = { sid, promise };
+      promise.finally(() => {
+        if (loadSessionInflightRef.current?.promise === promise) {
+          loadSessionInflightRef.current = null;
         }
-      }
-      return null;
-    } finally {
-      clearTimeout(timeout);
-      if (showLoading && sid === sessionIdRef.current) setLoading(false);
+      });
     }
+    return promise;
   }, []);
 
   const loadTools = useCallback(async (sid: string) => {
@@ -674,6 +784,67 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     return connectEvents(sid);
   }, [connectEvents]);
 
+  const stopStuckAwaitingAgentStart = useCallback(async (sid: string, message: string) => {
+    try {
+      await sendAgentCommand(sid, { type: "abort" }, { timeoutMs: 8_000 });
+    } catch {
+      // The backend may already be gone; local unlock is still the right recovery.
+    }
+    await loadSession(sid);
+    if (sessionIdRef.current !== sid) return;
+    clearAwaitingAgentStartGuard();
+    awaitingAgentStartRef.current = false;
+    agentRunningRef.current = false;
+    setAgentRunning(false);
+    setAgentPhase(null);
+    setStallLevel(null);
+    setRetryInfo(null);
+    dispatch({ type: "end" });
+    setLastModelError(message);
+    const changedFiles = [...changedFilesRef.current];
+    changedFilesRef.current.clear();
+    onAgentEnd?.(sid, changedFiles);
+  }, [clearAwaitingAgentStartGuard, loadSession, onAgentEnd]);
+
+  const scheduleAwaitingAgentStartGuard = useCallback((sid: string, turnId: number) => {
+    clearAwaitingAgentStartGuard(false);
+    awaitingAgentStartTimerRef.current = setTimeout(async () => {
+      awaitingAgentStartTimerRef.current = null;
+      if (
+        sessionIdRef.current !== sid
+        || turnIdRef.current !== turnId
+        || !agentRunningRef.current
+        || !awaitingAgentStartRef.current
+      ) {
+        return;
+      }
+
+      awaitingAgentStartChecksRef.current += 1;
+      try {
+        const res = await fetch(`/api/agent/${encodeURIComponent(sid)}`, { cache: "no-store" });
+        const d = await res.json().catch(() => ({})) as { running?: boolean; status?: AgentStatus };
+        if (!d.running || d.status?.isRunning === false) {
+          await stopStuckAwaitingAgentStart(sid, "请求已结束但前端没有收到开始事件，已自动恢复界面状态。");
+          return;
+        }
+
+        connectEvents(sid);
+        if (awaitingAgentStartChecksRef.current >= AWAITING_AGENT_START_MAX_CHECKS) {
+          await stopStuckAwaitingAgentStart(sid, "请求已提交但长时间没有收到开始事件，已自动中断并解锁界面。");
+          return;
+        }
+
+        scheduleAwaitingAgentStartGuard(sid, turnId);
+      } catch {
+        if (awaitingAgentStartChecksRef.current >= AWAITING_AGENT_START_MAX_CHECKS) {
+          await stopStuckAwaitingAgentStart(sid, "无法确认后端运行状态，已自动解锁界面。");
+          return;
+        }
+        scheduleAwaitingAgentStartGuard(sid, turnId);
+      }
+    }, AWAITING_AGENT_START_TIMEOUT_MS);
+  }, [clearAwaitingAgentStartGuard, connectEvents, stopStuckAwaitingAgentStart]);
+
   const waitForEventsReady = useCallback((sid: string, timeoutMs = 700) => new Promise<void>((resolve) => {
     const es = eventSourceRef.current;
     if (!es || sessionIdRef.current !== sid || es.readyState === EventSource.OPEN) {
@@ -717,6 +888,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     autoRecoveryModelsRef.current = autoRecoveryModels;
   }, [autoRecoveryModels]);
 
+  // executeRecovery is declared further down (after handleAgentEvent), but
+  // handleAgentEvent needs to trigger it for backend `agent_stale_warning`
+  // events. Bridge with a ref to avoid a forward-declaration error.
+  const executeRecoveryRef = useRef<(sid: string, attempt?: number) => Promise<void>>(async () => {});
+
   const handleAgentEvent = useCallback((event: AgentEvent) => {
     lastAgentEventAtRef.current = Date.now();
     switch (event.type) {
@@ -725,6 +901,40 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (typeof filePath === "string" && filePath.trim()) {
           changedFilesRef.current.add(filePath);
         }
+        break;
+      }
+      case "agent_stale_warning": {
+        // Backend is about to destroy this session due to idle timeout.
+        // Trigger an immediate recovery so the model can resume instead of
+        // being killed. SSE delivers this event even when the tab is
+        // backgrounded (EventSource is not throttled like setInterval),
+        // closing the gap where the frontend watchdog missed its window.
+        const staleEvent = event as { idleMs?: number; destroyInMs?: number };
+        console.log('[Watchdog] Received agent_stale_warning from backend', {
+          idleMs: staleEvent.idleMs,
+          destroyInMs: staleEvent.destroyInMs,
+        });
+        const staleSid = sessionIdRef.current;
+        if (!staleSid || !agentRunningRef.current) break;
+        if (autoRecoveryMode === "off") break;
+        if (autoContinueSentRef.current) break;
+        if (autoRecoveryAttemptsRef.current >= MAX_AUTO_RECOVERIES_PER_TURN) {
+          console.log('[Watchdog] Max auto-recoveries reached, ignoring stale_warning');
+          break;
+        }
+        // Conservative mode normally only warns, but a backend stale_warning
+        // means the session is about to die — escalate to a real recovery.
+        //
+        // Note: unlike the watchdog setInterval, we do NOT skip this when tools
+        // are running. The backend emits stale_warning only after
+        // TOOL_EXEC_IDLE_TIMEOUT_MS - LEAD_MS (~28 min) of total silence, which
+        // means the tool is almost certainly hung (a healthy npm install / bash
+        // produces output that resets the timer). Aborting a truly hung tool is
+        // the correct action and strictly better than letting the 30-min hard
+        // destroy kill it with no follow_up.
+        autoRecoveryAttemptsRef.current += 1;
+        console.log('[Watchdog] stale_warning recovery (attempt %d/%d)', autoRecoveryAttemptsRef.current, MAX_AUTO_RECOVERIES_PER_TURN);
+        void executeRecoveryRef.current(staleSid, autoRecoveryAttemptsRef.current);
         break;
       }
       case "agent_start":
@@ -737,6 +947,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         dispatch({ type: "start" });
         break;
       case "agent_end": {
+        clearAwaitingAgentStartGuard();
+        awaitingAgentStartRef.current = false;
         // If the stale-event protection gate is still open (set by a
         // watchdog recovery cycle that sent abort), and abortCompletedRef
         // has NOT been set yet, this agent_end is from the aborted old
@@ -795,14 +1007,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         dispatch({ type: "end" });
         setPlanReady(!endedWithError && agentModeRef.current === "plan");
         if (sessionIdRef.current && !endedWithError) {
-          loadSession(sessionIdRef.current);
-          fetch(`/api/agent/${encodeURIComponent(sessionIdRef.current)}`)
-            .then((r) => r.json())
-            .then((d: { state?: { contextUsage?: { percent: number | null; contextWindow: number; tokens: number | null } | null; systemPrompt?: string } }) => {
-              if (d.state?.contextUsage !== undefined) setContextUsage(d.state.contextUsage ?? null);
-              if (d.state?.systemPrompt !== undefined) setSystemPrompt(d.state.systemPrompt ?? null);
-            })
-            .catch(() => {});
+          // Single request fetches both the updated messages AND the live
+          // agent state (contextUsage, systemPrompt). Previously this was
+          // two concurrent fetches that piled up on a slow backend.
+          loadSession(sessionIdRef.current, false, true).then((agentState) => {
+            const state = agentState?.state as { contextUsage?: { percent: number | null; contextWindow: number; tokens: number | null } | null; systemPrompt?: string } | undefined;
+            if (state?.contextUsage !== undefined) setContextUsage(state.contextUsage ?? null);
+            if (state?.systemPrompt !== undefined) setSystemPrompt(state.systemPrompt ?? null);
+          });
         }
         // Reload session even on error to capture any partial output
         if (sessionIdRef.current && endedWithError) {
@@ -842,6 +1054,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
               const completedKey = userContentKey(normalized);
               const lastUser = [...prev].reverse().find((m) => m.role === "user");
               if (completedKey && lastUser && userContentKey(lastUser) === completedKey) {
+                return prev;
+              }
+              // Image prompts may be emitted back by the server with a different
+              // image source representation (base64 placeholder vs file URL).
+              // If the visible text and image count match the latest optimistic
+              // user message, treat it as the same local send and skip it.
+              if (
+                lastUser
+                && normalizedUserTextForDedupe(lastUser) === normalizedUserTextForDedupe(normalized)
+                && userImageCount(lastUser) === userImageCount(normalized)
+              ) {
                 return prev;
               }
               // Skill-only sends: SDK injects a display prefix (e.g., "使用技能：xxx")
@@ -928,7 +1151,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         }
         break;
     }
-  }, [loadSession, onAgentEnd]);
+  }, [loadSession, onAgentEnd, autoRecoveryMode]);
   handleAgentEventRef.current = handleAgentEvent;
 
   const handleSend = useCallback(async (message: string, images?: AttachedImage[], roleId?: string, references?: FileReference[], skill?: SkillReference) => {
@@ -944,6 +1167,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     resetTurnTracking();
     autoRecoveryAttemptsRef.current = 0;
     awaitingAgentStartRef.current = true;
+    const currentTurnId = turnIdRef.current;
     setPlanReady(false);
 
     const userMsg: AgentMessage = {
@@ -976,7 +1200,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       onSessionStarted?.(optimisticNewSession);
     }
 
-    const piImages = images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
+    const piImages = images?.map((img) => ({
+      type: "image" as const,
+      data: img.data,
+      filePath: img.filePath,
+      mimeType: img.mimeType,
+    }));
     let createdRealSession = false;
 
     try {
@@ -1007,6 +1236,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         optimisticSessionIdRef.current = null;
         connectEvents(realId);
         await waitForEventsReady(realId);
+        scheduleAwaitingAgentStartGuard(realId, currentTurnId);
         createdRealSession = true;
         onSessionCreated?.({
           id: realId,
@@ -1027,6 +1257,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         });
       } else if (session) {
         ensureEventsConnected(session.id);
+        scheduleAwaitingAgentStartGuard(session.id, currentTurnId);
         await sendAgentCommand(session.id, {
           type: "prompt",
           message,
@@ -1039,6 +1270,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } catch (e) {
       if (optimisticNewSession && !createdRealSession) onSessionStarted?.(null);
       awaitingAgentStartRef.current = false;
+      clearAwaitingAgentStartGuard();
       optimisticSessionIdRef.current = null;
       adoptingCreatedSessionRef.current = null;
       console.error("Failed to send message:", e);
@@ -1070,7 +1302,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       eventSourceRef.current?.close();
       eventSourceRef.current = null;
     }
-  }, [isNew, newSessionCwd, newSessionModel, agentMode, thinkingLevel, session, connectEvents, ensureEventsConnected, waitForEventsReady, onSessionCreated, onSessionStarted]);
+  }, [isNew, newSessionCwd, newSessionModel, agentMode, thinkingLevel, session, connectEvents, ensureEventsConnected, waitForEventsReady, scheduleAwaitingAgentStartGuard, clearAwaitingAgentStartGuard, onSessionCreated, onSessionStarted]);
 
   const handleAbort = useCallback(async () => {
     const sid = sessionIdRef.current;
@@ -1143,7 +1375,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       ...(skill ? { skill } : {}),
       timestamp: Date.now(),
     } as AgentMessage]);
-    const piImages = images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
+    const piImages = images?.map((img) => ({
+      type: "image" as const,
+      data: img.data,
+      filePath: img.filePath,
+      mimeType: img.mimeType,
+    }));
     try {
       await sendAgentCommand(sid, {
         type: "steer",
@@ -1173,7 +1410,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     autoContinueInProgressRef.current = false;
     resetTurnTracking();
     autoRecoveryAttemptsRef.current = 0;
-    const piImages = images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
+    const piImages = images?.map((img) => ({
+      type: "image" as const,
+      data: img.data,
+      filePath: img.filePath,
+      mimeType: img.mimeType,
+    }));
     try {
       await sendAgentCommand(sid, {
         type: "follow_up",
@@ -1263,6 +1505,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       dispatch({ type: "end" });
     }
   }, [connectEvents, loadSession]);
+
+  // Keep executeRecoveryRef in sync so handleAgentEvent (declared above) can
+  // invoke the latest version without listing it as a dependency.
+  useEffect(() => {
+    executeRecoveryRef.current = executeRecovery;
+  }, [executeRecovery]);
 
   // Keep a lightweight UI-facing counter so users can see when the watchdog is
   // getting close to intervening.
@@ -1429,14 +1677,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // Without this, aggressive mode could loop indefinitely when the
         // model consistently fails (bad API key, persistent provider error).
         if (recoverMs > 0 && contentIdleMs >= recoverMs && !autoContinueSentRef.current) {
-          const MAX_AUTO_RECOVERIES = 3;
-          if (autoRecoveryAttemptsRef.current >= MAX_AUTO_RECOVERIES) {
-            console.log('[Watchdog] Max auto-recoveries (%d) reached, stopping', MAX_AUTO_RECOVERIES);
+          if (autoRecoveryAttemptsRef.current >= MAX_AUTO_RECOVERIES_PER_TURN) {
+            console.log('[Watchdog] Max auto-recoveries (%d) reached, stopping', MAX_AUTO_RECOVERIES_PER_TURN);
             await recoverStop(sid);
             return;
           }
           autoRecoveryAttemptsRef.current += 1;
-          console.log('[Watchdog] Phase 3: auto-recovering (attempt %d/%d)', autoRecoveryAttemptsRef.current, MAX_AUTO_RECOVERIES);
+          console.log('[Watchdog] Phase 3: auto-recovering (attempt %d/%d)', autoRecoveryAttemptsRef.current, MAX_AUTO_RECOVERIES_PER_TURN);
           await recoverWithContinue(sid);
           return;
         }
@@ -1450,6 +1697,51 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
     return () => clearInterval(id);
   }, [agentRunning, autoRecoveryMode, thinkingLevel, connectEvents, loadSession, retryInfo, stallLevel, executeRecovery]);
+
+  // Visibility recovery: when the tab becomes visible again after being
+  // backgrounded, the watchdog setInterval above may have been throttled
+  // (Chrome throttles background timers to ~1/min) and missed the aggressive
+  // recovery window. Run an immediate check and recover if the turn is stale.
+  // This complements the backend `agent_stale_warning` event (which fires much
+  // later, right before idle destroy) by catching stalls earlier in
+  // aggressive mode once the user returns to the tab.
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const onVisibilityChange = () => {
+      if (document.visibilityState !== "visible") return;
+      if (!agentRunningRef.current) return;
+      if (autoRecoveryMode === "off") return;
+      if (autoContinueSentRef.current) return;
+      // Skip while tools are running — tool execution has its own longer
+      // backend idle budget (TOOL_EXEC_IDLE_TIMEOUT_MS).
+      if (agentPhaseRef.current?.kind === "running_tools") return;
+      if (retryInfo) return;
+
+      const isAggressive = autoRecoveryMode === "aggressive";
+      const baseRecoverMs = isAggressive ? 120_000 : 0;
+      const thinkingMultiplier =
+        thinkingLevel === "xhigh" ? 2.0 :
+        thinkingLevel === "high" ? 1.5 : 1.0;
+      const recoverMs = baseRecoverMs > 0 ? Math.round(baseRecoverMs * thinkingMultiplier) : 0;
+      if (recoverMs <= 0) return;
+
+      const contentIdleMs = Date.now() - lastContentChangedAtRef.current;
+      if (contentIdleMs < recoverMs) return;
+      // Require at least some content to have been received — recovering an
+      // empty turn that never produced output is likely to loop.
+      if (lastContentLengthRef.current === 0) return;
+
+      if (autoRecoveryAttemptsRef.current >= MAX_AUTO_RECOVERIES_PER_TURN) return;
+      const visSid = sessionIdRef.current;
+      if (!visSid) return;
+
+      autoRecoveryAttemptsRef.current += 1;
+      console.log('[Watchdog] visibilitychange recovery (attempt %d/%d), contentIdleMs=%d', autoRecoveryAttemptsRef.current, MAX_AUTO_RECOVERIES_PER_TURN, contentIdleMs);
+      void executeRecovery(visSid, autoRecoveryAttemptsRef.current);
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", onVisibilityChange);
+  }, [autoRecoveryMode, thinkingLevel, retryInfo, executeRecovery]);
 
   // Manual recovery trigger — user clicks "中断并继续" when stall warning shown
   const handleAutoRecover = useCallback(async () => {
@@ -1549,10 +1841,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setPlanReady(false);
     agentRunningRef.current = true;
     turnIdRef.current += 1;
+    const currentTurnId = turnIdRef.current;
     autoContinueSentRef.current = false;
     autoContinueInProgressRef.current = false;
     resetTurnTracking();
     autoRecoveryAttemptsRef.current = 0;
+    awaitingAgentStartRef.current = true;
     setAgentRunning(true);
     setAgentPhase({ kind: "waiting_model", reason: "initial" });
     dispatch({ type: "start" });
@@ -1563,8 +1857,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } as AgentMessage]);
     try {
       connectEvents(sid);
+      scheduleAwaitingAgentStartGuard(sid, currentTurnId);
       await sendAgentCommand(sid, { type: "follow_up", message: "请按刚才用户批准的计划开始实施。" });
     } catch (e) {
+      awaitingAgentStartRef.current = false;
+      clearAwaitingAgentStartGuard();
       console.error("Failed to build plan:", e);
       agentRunningRef.current = false;
       setAgentRunning(false);
@@ -1572,7 +1869,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       dispatch({ type: "end" });
       setLastModelError(e instanceof Error ? e.message : String(e));
     }
-  }, [connectEvents, handleAgentModeChange]);
+  }, [clearAwaitingAgentStartGuard, connectEvents, handleAgentModeChange, scheduleAwaitingAgentStartGuard]);
 
   const scrollToBottom = useCallback((behavior: ScrollBehavior = "smooth") => {
     messagesEndRef.current?.scrollIntoView({ behavior });
@@ -1612,6 +1909,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
     eventSourceRef.current?.close();
     eventSourceRef.current = null;
+    // Abort any inflight background loadSession / polling requests from the
+    // previous session so they don't keep hitting the backend (and racing
+    // this new session's requests). A fresh controller is installed for the
+    // new session.
+    sessionAbortRef.current?.abort();
+    sessionAbortRef.current = new AbortController();
+    loadSessionInflightRef.current = null;
     agentRunningRef.current = false;
     awaitingAgentStartRef.current = false;
     optimisticSessionIdRef.current = null;
@@ -1715,12 +2019,34 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (!activeSessionId || newSessionCwd) return;
     let stopped = false;
     let inFlight = false;
+    let tickController: AbortController | null = null;
 
     const tick = async () => {
+      // Skip while the agent is running: SSE already pushes every message
+      // event, so polling would only add load to a busy backend. Also bail
+      // if the user has switched away from this session.
       if (stopped || inFlight || sessionIdRef.current !== activeSessionId) return;
+      if (agentRunningRef.current) return;
+
       inFlight = true;
+      tickController = new AbortController();
+      // Honour session-level abort too — covers tab switches that happen
+      // while the fetch is in flight.
+      const sessionSignal = sessionAbortRef.current?.signal;
+      const onSessionAbort = () => tickController?.abort();
+      if (sessionSignal) {
+        if (sessionSignal.aborted) tickController.abort();
+        else sessionSignal.addEventListener("abort", onSessionAbort, { once: true });
+      }
+      // Bound the request: an unbounded polling fetch on a slow backend is
+      // exactly what produces the "loadSession background refresh failed"
+      // cascade of warnings.
+      const timeout = setTimeout(() => tickController?.abort(), 10_000);
       try {
-        const res = await fetch(`/api/sessions/${encodeURIComponent(activeSessionId)}`, { cache: "no-store" });
+        const res = await fetch(`/api/sessions/${encodeURIComponent(activeSessionId)}`, {
+          cache: "no-store",
+          signal: tickController.signal,
+        });
         if (!res.ok) return;
         const d = await res.json() as SessionData;
         if (stopped || sessionIdRef.current !== activeSessionId) return;
@@ -1737,16 +2063,23 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           setError(null);
         }
       } catch {
-        // ignore transient polling errors
+        // ignore transient polling errors (incl. abort on session switch)
       } finally {
+        clearTimeout(timeout);
+        if (sessionSignal) sessionSignal.removeEventListener("abort", onSessionAbort);
         inFlight = false;
       }
     };
 
-    const timer = window.setInterval(tick, 2500);
+    // 6s cadence (was 2.5s): the SSE channel covers live updates; this is
+    // only a fallback for external writers (e.g. wechat-bot) when SSE
+    // delivery is unreliable. Combined with the agent-running skip above,
+    // this cuts background request volume by ~80% during active turns.
+    const timer = window.setInterval(tick, 6000);
     return () => {
       stopped = true;
       window.clearInterval(timer);
+      tickController?.abort();
     };
   }, [activeSessionId, newSessionCwd]);
 

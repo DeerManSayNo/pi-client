@@ -45,7 +45,28 @@ interface PreparedTurnContext {
   systemPromptBlock: string;
 }
 
-type RuntimeImage = { type: "image"; data: string; mimeType: string };
+type RuntimeImage = {
+  type: "image";
+  data?: string;      // base64 (legacy, may be empty when filePath is set)
+  filePath?: string;   // absolute filesystem path (new — backend reads from disk)
+  mimeType: string;
+};
+
+/** SDK image format — data is always a non-empty string when passed to the model. */
+type SdkImage = { type: "image"; data: string; mimeType: string };
+
+/** Filter RuntimeImage[] down to only those with resolved data, for SDK calls. */
+function toSdkImages(images?: RuntimeImage[]): SdkImage[] | undefined {
+  if (!images?.length) return undefined;
+  const out: SdkImage[] = [];
+  for (const img of images) {
+    if (typeof img.data === "string" && img.data.length > 0) {
+      out.push({ type: "image", data: img.data, mimeType: img.mimeType });
+    }
+  }
+  return out.length > 0 ? out : undefined;
+}
+
 type DisplayUserContent = string | (TextContent | ImageContent)[];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -85,10 +106,19 @@ function buildDisplayUserContent(message: string, images?: RuntimeImage[]): Disp
   if (!images?.length) return message;
   return [
     ...(message.trim() ? [{ type: "text" as const, text: message }] : []),
-    ...images.map((image) => ({
-      type: "image" as const,
-      source: { type: "base64" as const, media_type: image.mimeType, data: image.data },
-    })),
+    ...images.map((image) => {
+      if (image.filePath) {
+        // Use file URL reference so session files stay lean (no base64 bloat)
+        return {
+          type: "image" as const,
+          source: { type: "url" as const, url: `/api/files${image.filePath}?type=read` },
+        };
+      }
+      return {
+        type: "image" as const,
+        source: { type: "base64" as const, media_type: image.mimeType, data: image.data ?? "" },
+      };
+    }),
   ];
 }
 
@@ -153,6 +183,74 @@ function setEffectiveSystemPrompt(session: AgentSessionLike, prompt: string): vo
   // the UI preview looks correct but the next new prompt silently uses the old
   // built-in prompt again. Keep the base prompt in sync as well.
   (session as unknown as { _baseSystemPrompt?: string })._baseSystemPrompt = prompt;
+}
+
+type ProjectContextFile = { path: string; content: string };
+
+const PROJECT_CONTEXT_COMPACT_THRESHOLD = 2500;
+
+function extractMarkdownSection(content: string, heading: string): string {
+  const escaped = heading.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = content.match(new RegExp(`(^|\n)## ${escaped}\n([\s\S]*?)(?=\n## |$)`));
+  return match?.[2]?.trim() ?? "";
+}
+
+function extractImportantBullets(section: string, limit = 12): string[] {
+  const bullets: string[] = [];
+  for (const line of section.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("-") && !trimmed.startsWith("**")) continue;
+    if (/^---+$/.test(trimmed)) continue;
+    bullets.push(trimmed.replace(/\s+/g, " "));
+    if (bullets.length >= limit) break;
+  }
+  return bullets;
+}
+
+function compactProjectContextContent(filePath: string, content: string): string {
+  const fileName = path.basename(filePath).toLowerCase();
+  if (!fileName.startsWith("agents") && !fileName.startsWith("claude")) return content;
+  if (content.length <= PROJECT_CONTEXT_COMPACT_THRESHOLD) return content;
+
+  const codingRules = extractImportantBullets(extractMarkdownSection(content, "编码规范"), 8);
+  const quickStart = extractMarkdownSection(content, "快速开始");
+  const quickStartLines = quickStart.split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("```") && (/npm run dev|tsc --noEmit|next lint|next build|绝不要/.test(line)))
+    .slice(0, 6);
+  const architectureLines = [
+    "- 浏览器通过 /api/sessions 只读读取 session；发送消息走 POST /api/agent/[id]；事件流走 GET /api/agent/[id]/events。",
+    "- session 读取主要在 lib/session-reader.ts；AgentSession 生命周期与进程内注册表主要在 lib/rpc-manager.ts。",
+  ].filter(Boolean);
+  const pitfalls = extractImportantBullets(extractMarkdownSection(content, "关键设计决策与陷阱"), 18);
+  const sessionFormat = extractMarkdownSection(content, "DeerHux Session 文件格式");
+  const sessionLines = sessionFormat.split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => /存放位置|parentSession|session_info|SessionContext|entryIds/.test(line))
+    .slice(0, 6);
+
+  const lines = [
+    `# Project instructions summary for ${filePath}`,
+    "",
+    "This is a compact summary of the project context file. The full file can be read from the path above when a task requires detailed architecture, file maps, session format, or edge-case behavior.",
+  ];
+
+  if (codingRules.length > 0) lines.push("", "## 编码规范", ...codingRules);
+  if (quickStartLines.length > 0) lines.push("", "## 快速开始与校验", ...quickStartLines.map((line) => line.startsWith("-") ? line : `- ${line}`));
+  lines.push("", "## 架构要点", ...architectureLines);
+  if (pitfalls.length > 0) lines.push("", "## 关键陷阱", ...pitfalls);
+  if (sessionLines.length > 0) lines.push("", "## Session 文件提示", ...sessionLines.map((line) => line.startsWith("-") ? line : `- ${line}`));
+
+  return lines.join("\n");
+}
+
+function compactProjectContextFiles(base: { agentsFiles: ProjectContextFile[] }): { agentsFiles: ProjectContextFile[] } {
+  return {
+    agentsFiles: base.agentsFiles.map((file) => ({
+      ...file,
+      content: compactProjectContextContent(file.path, file.content),
+    })),
+  };
 }
 
 const MIN_AUTO_RETRY_DELAY_MS = 5000;
@@ -287,6 +385,8 @@ export class AgentSessionWrapper {
   private pendingToolEvents = new Map<string, AgentEvent>();
   private unsubscribe: (() => void) | null = null;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
+  private staleWarningTimer: ReturnType<typeof setTimeout> | null = null;
+  private staleWarningSent = false;
   private onDestroyCallback: (() => void) | null = null;
   private _alive = true;
   private roleId: string | null = null;
@@ -538,14 +638,64 @@ export class AgentSessionWrapper {
   // execution to avoid killing the session mid-build / mid-install.
   private static readonly IDLE_TIMEOUT_MS = 10 * 60 * 1000;
   private static readonly TOOL_EXEC_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
+  // How long before the hard idle destroy we emit an `agent_stale_warning`
+  // event, giving the frontend a chance to auto-recover (abort + follow_up)
+  // instead of letting the session be torn down silently. This closes the gap
+  // where the frontend watchdog missed its recovery window (e.g. the tab was
+  // backgrounded and setInterval was throttled, or retry/tools phases skipped
+  // the check). SSE pushes this event regardless of tab throttling.
+  private static readonly IDLE_STALE_WARNING_LEAD_MS = 2 * 60 * 1000;
 
   private resetIdleTimer(): void {
     if (this.idleTimer) clearTimeout(this.idleTimer);
+    if (this.staleWarningTimer) clearTimeout(this.staleWarningTimer);
+    // Any new event means the turn is making progress — allow the next idle
+    // window to fire a fresh stale warning.
+    this.staleWarningSent = false;
     const hasActiveTools = this.pendingToolEvents.size > 0;
     const timeout = hasActiveTools
       ? AgentSessionWrapper.TOOL_EXEC_IDLE_TIMEOUT_MS
       : AgentSessionWrapper.IDLE_TIMEOUT_MS;
     this.idleTimer = setTimeout(() => this.destroy(), timeout);
+
+    // Only schedule a stale warning while a turn is actively running. An idle
+    // session (no active turn) has nothing to recover — destroying it is the
+    // correct behavior, and emitting a warning would only spam the UI.
+    if (this._isRunning) {
+      const warningDelay = Math.max(
+        timeout - AgentSessionWrapper.IDLE_STALE_WARNING_LEAD_MS,
+        60_000,
+      );
+      if (warningDelay < timeout) {
+        this.staleWarningTimer = setTimeout(() => this.emitStaleWarning(), warningDelay);
+      }
+    }
+  }
+
+  private emitStaleWarning(): void {
+    if (!this._alive || this.staleWarningSent) return;
+    const idleMs = this.lastEventAt ? Date.now() - this.lastEventAt : 0;
+    // Defensive floor: if the last event was very recent, the turn is making
+    // progress. This guards against misconfiguration (IDLE_STALE_WARNING_LEAD_MS
+    // set so large that warningDelay collapses toward 0 and the timer fires
+    // shortly after turn start) or future bugs that fail to clear the timer.
+    // It cannot fully eliminate the event-loop race where a timer callback
+    // (timers phase) runs just before a queued SDK I/O callback (poll phase)
+    // that would have reset the timer — that window is tiny and the fallout
+    // (one abort + follow_up) is acceptable, so we don't add setImmediate
+    // indirection just for it.
+    if (idleMs < 60_000) return;
+    this.staleWarningSent = true;
+    for (const l of this.listeners) {
+      l({
+        type: "agent_stale_warning",
+        idleMs,
+        destroyInMs: AgentSessionWrapper.IDLE_STALE_WARNING_LEAD_MS,
+        isRunning: this._isRunning,
+        isStreaming: Boolean(this.inner.isStreaming),
+        lastEventType: this.lastEventType,
+      });
+    }
   }
 
   private recordEventStatus(event: AgentEvent): void {
@@ -635,7 +785,6 @@ export class AgentSessionWrapper {
       for (const l of this.listeners) l({ type: "agent_end", messages: [], willRetry: false, error: msg });
     }).finally(() => {
       if (this.activeTurnId !== turnId) return;
-      invalidateSessionListCache();
       this.activeTurnPromise = null;
       if (this._isRunning && !this.inner.isStreaming && this.sawAssistantEventInTurn) {
         this._isRunning = false;
@@ -729,23 +878,53 @@ export class AgentSessionWrapper {
   ): Promise<{ message: string; images?: RuntimeImage[]; displayContent?: DisplayUserContent }> {
     if (!images?.length) return { message, images };
 
-    const displayContent = buildDisplayUserContent(displayMessage, images);
+    // Resolve filePath → base64 data for images that are stored on disk.
+    // This keeps session files lean (only file references) while still
+    // sending actual image data to the model API when needed.
+    const fs = await import("fs");
+    const resolvedImages = await Promise.all(images.map(async (img) => {
+      if (img.filePath && !img.data) {
+        try {
+          const fileData = fs.readFileSync(img.filePath);
+          const base64 = fileData.toString("base64");
+          return { ...img, data: base64 };
+        } catch {
+          // File read failed — pass through without data
+          return img;
+        }
+      }
+      return img;
+    }));
+
+    const displayContent = buildDisplayUserContent(displayMessage, resolvedImages);
     const supportsImageInput = (this.inner.model as { input?: string[] } | null | undefined)?.input?.includes("image") ?? false;
-    if (supportsImageInput) return { message, images, displayContent };
+    if (supportsImageInput) return { message, images: resolvedImages, displayContent };
 
     const mcpRuntime = await this.ensureMcpRuntimeLoaded(false).catch(() => null);
-    const descriptions = await mcpRuntime?.describeImages(images, message).catch((error: unknown) => [
-      `MCP 图片识别失败：${error instanceof Error ? error.message : String(error)}`,
-    ]);
-    const imageContext = descriptions?.length
-      ? descriptions.map((text, index) => `图片 ${index + 1}:\n${text}`).join("\n\n")
-      : "当前模型未开启图片输入，且没有可用的 MCP 图片识别工具。";
+    if (mcpRuntime) {
+      const sdkFallbackImages = toSdkImages(resolvedImages);
+      if (sdkFallbackImages?.length) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const rawDescriptions = await mcpRuntime.describeImages(sdkFallbackImages as any, message).catch(() => [] as string[]);
+        // Filter out error lines — keep only actual image descriptions.
+        const validDescriptions = rawDescriptions.filter(
+          (text) => !text.startsWith("MCP 图片识别失败") && !/^图片 \d+ 识别失败/.test(text),
+        );
+        if (validDescriptions.length > 0) {
+          const imageContext = validDescriptions
+            .map((text, index) => `图片 ${index + 1}:\n${text}`)
+            .join("\n\n");
+          return {
+            message: `${message}\n\n<image_context source="mcp-vision-fallback">\n${imageContext}\n</image_context>\n\n注意：当前模型配置未勾选图片输入，上面的 image_context 是由 MCP 图片识别服务生成的，请基于该内容回答用户。`,
+            images: undefined,
+            displayContent,
+          };
+        }
+      }
+    }
 
-    return {
-      message: `${message}\n\n<image_context source="mcp-vision-fallback">\n${imageContext}\n</image_context>\n\n注意：当前模型配置未勾选图片输入，上面的 image_context 是由 MCP 图片识别服务生成的，请基于该内容回答用户。`,
-      images: undefined,
-      displayContent,
-    };
+    // No usable MCP vision fallback — just return the message without images.
+    return { message, images: undefined, displayContent };
   }
 
   private async reloadMcpRuntime(): Promise<{ ok: boolean; skipped?: boolean; toolNames?: string[]; serverStatuses?: McpRuntime["serverStatuses"] }> {
@@ -816,9 +995,8 @@ export class AgentSessionWrapper {
 
         this.appendTurnContextMetadata(turnContext.references, turnContext.skill);
         this.appendDisplayUserMessage(displayUserContent, turnContext.references, turnContext.skill);
-        invalidateSessionListCache();
         this.trackTurn(this.withTemporarySystemPrompt(turnContext.systemPromptBlock, () => (
-          this.inner.prompt(prepared.message, prepared.images?.length ? { images: prepared.images } : undefined)
+          this.inner.prompt(prepared.message, toSdkImages(prepared.images) ? { images: toSdkImages(prepared.images)! } : undefined)
         )));
         return null;
       }
@@ -983,7 +1161,7 @@ export class AgentSessionWrapper {
         this.appendTurnContextMetadata(turnContext.references, turnContext.skill);
         this.appendDisplayUserMessage(prepared.displayContent ?? turnContext.displayMessage, turnContext.references, turnContext.skill);
         await this.withTemporarySystemPrompt(turnContext.systemPromptBlock, () => (
-          this.inner.steer(prepared.message, prepared.images?.length ? prepared.images : undefined)
+          this.inner.steer(prepared.message, toSdkImages(prepared.images))
         ));
         return null;
       }
@@ -995,14 +1173,14 @@ export class AgentSessionWrapper {
         const prepared = await this.prepareImageFallback(turnContext.message, followImages, turnContext.displayMessage);
         this.appendTurnContextMetadata(turnContext.references, turnContext.skill);
         this.appendDisplayUserMessage(prepared.displayContent ?? turnContext.displayMessage, turnContext.references, turnContext.skill);
-        const imageOptions = prepared.images?.length ? { images: prepared.images } : undefined;
+        const imageOptions = toSdkImages(prepared.images) ? { images: toSdkImages(prepared.images)! } : undefined;
         const message = prepared.message;
 
         if (this._isRunning || this.inner.isStreaming) {
           // SDK followUp only queues for an already-active turn. It should be
           // sent while the turn is still active so the agent can drain it.
           await this.withTemporarySystemPrompt(turnContext.systemPromptBlock, () => (
-            this.inner.followUp(message, prepared.images?.length ? prepared.images : undefined)
+            this.inner.followUp(message, toSdkImages(prepared.images))
           ));
           return null;
         }
@@ -1079,6 +1257,7 @@ export class AgentSessionWrapper {
     if (!this._alive) return;
     this._alive = false;
     if (this.idleTimer) clearTimeout(this.idleTimer);
+    if (this.staleWarningTimer) clearTimeout(this.staleWarningTimer);
     this.unsubscribe?.();
     // Abort any ongoing agent turn (streaming, tools, retries) so underlying
     // WebSocket connections and child processes are released promptly.
@@ -1162,8 +1341,16 @@ export async function startRpcSession(
   if (inflight) return inflight;
 
   const starting = (async () => {
-    const { SessionManager, getAgentDir } = await import("@earendil-works/pi-coding-agent");
+    const { SessionManager, getAgentDir, DefaultResourceLoader, SettingsManager } = await import("@earendil-works/pi-coding-agent");
     const agentDir = getAgentDir();
+    const settingsManager = SettingsManager.create(cwd, agentDir);
+    const resourceLoader = new DefaultResourceLoader({
+      cwd,
+      agentDir,
+      settingsManager,
+      agentsFilesOverride: compactProjectContextFiles,
+    });
+    await resourceLoader.reload();
 
     const sessionManager = sessionFile
       ? SessionManager.open(sessionFile, undefined)
@@ -1231,6 +1418,8 @@ export async function startRpcSession(
         cwd,
         agentDir,
         sessionManager,
+        resourceLoader,
+        settingsManager,
         ...(toolsOption !== undefined ? { tools: toolsOption } : {}),
         ...(customTools.length > 0 ? { customTools } : {}),
       }));

@@ -113,6 +113,10 @@ export function FilePreviewWindow() {
     postMessage({ type: "close", tabId });
   }, [postMessage]);
 
+  const handleOpenFile = useCallback((filePath: string, fileName: string) => {
+    postMessage({ type: "open", filePath, fileName });
+  }, [postMessage]);
+
   const handleCloseTabs = useCallback((tabIds: string[]) => {
     const ids = new Set(tabIds);
     setState((prev) => {
@@ -136,6 +140,7 @@ export function FilePreviewWindow() {
         onSelectTab={handleSelectTab}
         onCloseTab={handleCloseTab}
         onCloseTabs={handleCloseTabs}
+        onOpenFile={handleOpenFile}
       />
     </main>
   );

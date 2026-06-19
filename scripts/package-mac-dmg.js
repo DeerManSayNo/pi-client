@@ -42,8 +42,10 @@ try {
     "-srcfolder",
     stagingDir,
     "-ov",
+    // ULFO uses LZMA compression — ~10% smaller than zlib's UDZO.
+    // Requires macOS 10.11+ to mount; our minimumSystemVersion is 11.0.
     "-format",
-    "UDZO",
+    "ULFO",
     dmgPath,
   ]);
 

@@ -4,6 +4,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { getLocalStorageItem } from "@/lib/client-storage";
 import { useEffect, useState, useCallback, useRef, useMemo, type CSSProperties } from "react";
 import type { SessionInfo } from "@/lib/types";
+import type { ProjectMeta } from "@/lib/project-meta";
 import { FileExplorer } from "./FileExplorer";
 import { SchedulerRunsBlock } from "./SchedulerRunsBlock";
 import { RemoteConnectionsBlock } from "./RemoteConnectionsBlock";
@@ -37,6 +38,7 @@ interface Props {
   onAtMention?: (relativePath: string) => void;
   compact?: boolean;
   onProjectsChange?: (projects: { cwd: string; displayName: string }[]) => void;
+  onRefreshRunningSessions?: () => void | Promise<void>;
 }
 
 function formatRelativeTime(dateStr: string): string {
@@ -73,52 +75,118 @@ interface ProjectGroup {
   pinned?: boolean;
 }
 
+// Legacy localStorage keys — kept ONLY for one-time migration to the server-side
+// project-meta.json file. After migration these are purged from localStorage.
 const PROJECT_META_STORAGE_KEY = "deerhux.project-meta";
 const CUSTOM_CWDS_STORAGE_KEY = "deerhux.custom-cwds";
 
-interface ProjectMeta {
-  hiddenCwds: string[];
-  pinnedCwds: string[];
-  notes: Record<string, string>;
-  defaultPinInitializedCwds: string[];
-}
+const EMPTY_PROJECT_META: ProjectMeta = {
+  hiddenCwds: [],
+  pinnedCwds: [],
+  notes: {},
+  defaultPinInitializedCwds: [],
+  customCwds: [],
+};
 
-function readJson<T>(key: string, fallback: T): T {
+/** Read legacy localStorage value (used only for one-time migration to file). */
+function readLegacyJson<T>(key: string, fallback: T): T {
   if (typeof window === "undefined") return fallback;
   try {
     const parsed = JSON.parse(getLocalStorageItem(key) ?? "null") as unknown;
-    return parsed && typeof parsed === "object" ? parsed as T : fallback;
+    return parsed && typeof parsed === "object" ? (parsed as T) : fallback;
   } catch {
     return fallback;
   }
 }
 
-function writeJson<T>(key: string, value: T) {
+function mergeStrings(...lists: Array<string[] | undefined>): string[] {
+  const out: string[] = [];
+  for (const list of lists) {
+    if (!Array.isArray(list)) continue;
+    for (const s of list) {
+      if (typeof s === "string" && s.trim() && !out.includes(s)) out.push(s);
+    }
+  }
+  return out;
+}
+
+/**
+ * Load project meta from the server-persisted file
+ * (~/.deerhux/agent/project-meta.json). On first run (file doesn't exist yet),
+ * migrate from the legacy localStorage keys so existing hide/pin/custom-cwd
+ * settings survive the switch to file-based storage. This is what makes
+ * "deleted project references" stick across app reinstalls.
+ */
+async function loadProjectMetaWithMigration(): Promise<ProjectMeta> {
+  let serverMeta: ProjectMeta = { ...EMPTY_PROJECT_META };
+  let serverExists = false;
+  try {
+    const res = await fetch("/api/project-meta", { cache: "no-store" });
+    if (res.ok) {
+      const data = (await res.json()) as { meta?: Partial<ProjectMeta>; exists?: boolean };
+      serverMeta = { ...EMPTY_PROJECT_META, ...data.meta };
+      serverExists = Boolean(data.exists);
+    }
+  } catch {
+    /* network error — fall back to empty meta */
+  }
+
+  // One-time migration: only when the server file has never been written.
+  if (!serverExists && typeof window !== "undefined") {
+    const legacyMeta = readLegacyJson<Partial<ProjectMeta>>(PROJECT_META_STORAGE_KEY, {});
+    const legacyCustomCwds = readLegacyJson<unknown[]>(CUSTOM_CWDS_STORAGE_KEY, [])
+      .filter((v): v is string => typeof v === "string" && v.trim().length > 0);
+
+    const hasLegacy =
+      (legacyMeta.hiddenCwds?.length ?? 0) > 0 ||
+      (legacyMeta.pinnedCwds?.length ?? 0) > 0 ||
+      (legacyMeta.notes && Object.keys(legacyMeta.notes).length > 0) ||
+      (legacyMeta.defaultPinInitializedCwds?.length ?? 0) > 0 ||
+      legacyCustomCwds.length > 0;
+
+    if (hasLegacy) {
+      const migrated: ProjectMeta = {
+        hiddenCwds: mergeStrings(serverMeta.hiddenCwds, legacyMeta.hiddenCwds),
+        pinnedCwds: mergeStrings(serverMeta.pinnedCwds, legacyMeta.pinnedCwds),
+        notes: { ...serverMeta.notes, ...(legacyMeta.notes ?? {}) },
+        defaultPinInitializedCwds: mergeStrings(serverMeta.defaultPinInitializedCwds, legacyMeta.defaultPinInitializedCwds),
+        customCwds: mergeStrings(serverMeta.customCwds, legacyCustomCwds),
+      };
+      try {
+        const res = await fetch("/api/project-meta", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(migrated),
+        });
+        if (res.ok) {
+          // Migration succeeded — purge legacy keys so we never migrate twice.
+          try {
+            window.localStorage.removeItem(PROJECT_META_STORAGE_KEY);
+            window.localStorage.removeItem(CUSTOM_CWDS_STORAGE_KEY);
+          } catch {
+            /* ignore */
+          }
+          return migrated;
+        }
+      } catch {
+        /* keep localStorage as fallback if POST fails */
+      }
+    }
+  }
+
+  return serverMeta;
+}
+
+/** Persist project meta to the server-side file (fire-and-forget). */
+function persistProjectMeta(meta: ProjectMeta) {
   if (typeof window === "undefined") return;
-  window.localStorage.setItem(key, JSON.stringify(value));
-}
-
-function readCustomCwds(): string[] {
-  const value = readJson<unknown[]>(CUSTOM_CWDS_STORAGE_KEY, []);
-  return value.filter((v): v is string => typeof v === "string" && v.trim().length > 0);
-}
-
-function writeCustomCwds(cwds: string[]) {
-  writeJson(CUSTOM_CWDS_STORAGE_KEY, [...new Set(cwds)]);
-}
-
-function readProjectMeta(): ProjectMeta {
-  const meta = readJson<Partial<ProjectMeta>>(PROJECT_META_STORAGE_KEY, {});
-  return {
-    hiddenCwds: Array.isArray(meta.hiddenCwds) ? meta.hiddenCwds.filter((v): v is string => typeof v === "string") : [],
-    pinnedCwds: Array.isArray(meta.pinnedCwds) ? meta.pinnedCwds.filter((v): v is string => typeof v === "string") : [],
-    notes: meta.notes && typeof meta.notes === "object" ? meta.notes as Record<string, string> : {},
-    defaultPinInitializedCwds: Array.isArray(meta.defaultPinInitializedCwds) ? meta.defaultPinInitializedCwds.filter((v): v is string => typeof v === "string") : [],
-  };
-}
-
-function writeProjectMeta(meta: ProjectMeta) {
-  writeJson(PROJECT_META_STORAGE_KEY, meta);
+  void fetch("/api/project-meta", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(meta),
+  }).catch(() => {
+    /* ignore — local state is still correct for this session */
+  });
 }
 
 /** Group projects by cwd and sort by their newest message/session activity. */
@@ -206,14 +274,16 @@ function buildSessionTree(sessions: SessionInfo[]): SessionTreeNode[] {
   return roots;
 }
 
-export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, onInitialRestoreDone, refreshKey, optimisticSession, runningSessionStatuses = new Map(), onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onAtMention, compact = false, onProjectsChange }: Props) {
+export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, onInitialRestoreDone, refreshKey, optimisticSession, runningSessionStatuses = new Map(), onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onAtMention, compact = false, onProjectsChange, onRefreshRunningSessions }: Props) {
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedCwd, setSelectedCwd] = useState<string | null>(null);
   const [defaultCwd, setDefaultCwd] = useState<string | null>(null);
-  const [customCwds, setCustomCwds] = useState<string[]>([]);
-  const [projectMeta, setProjectMeta] = useState<ProjectMeta>({ hiddenCwds: [], pinnedCwds: [], notes: {}, defaultPinInitializedCwds: [] });
+  const [projectMeta, setProjectMeta] = useState<ProjectMeta>({ ...EMPTY_PROJECT_META });
+  const [purging, setPurging] = useState(false);
+  const [confirmPurge, setConfirmPurge] = useState<{ cwd: string; displayName: string } | null>(null);
+  const [purgeResult, setPurgeResult] = useState<{ ok: boolean; message: string } | null>(null);
   const [projectMenu, setProjectMenu] = useState<{ cwd: string; x: number; y: number } | null>(null);
   const [expandedCwds, setExpandedCwds] = useState<Set<string>>(new Set());
   const [allProjectsState, setAllProjectsState] = useState<"expanded" | "compact" | "collapsed">("expanded");
@@ -224,10 +294,15 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const searchInputRef = useRef<HTMLInputElement>(null);
-  // Sync client-only localStorage state after mount to avoid hydration mismatch
+  // Load project meta from the server-persisted file, migrating from legacy
+  // localStorage keys on first run. Runs after mount to avoid hydration mismatch.
   useEffect(() => {
-    setCustomCwds(readCustomCwds());
-    setProjectMeta(readProjectMeta());
+    let cancelled = false;
+    void (async () => {
+      const meta = await loadProjectMetaWithMigration();
+      if (!cancelled) setProjectMeta(meta);
+    })();
+    return () => { cancelled = true; };
   }, []);
 
   const [explorerRefreshDone, setExplorerRefreshDone] = useState(false);
@@ -258,7 +333,10 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 30000);
     try {
-      if (showLoading) setLoading(true);
+      if (showLoading) {
+        setError(null);
+        setLoading(true);
+      }
       const res = await fetch("/api/sessions", { signal: controller.signal });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json() as { sessions: SessionInfo[] };
@@ -356,6 +434,14 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     }
   }, [loading, defaultCwd, ensureDefaultCwd]);
 
+  const updateProjectMeta = useCallback((updater: (prev: ProjectMeta) => ProjectMeta) => {
+    setProjectMeta((prev) => {
+      const next = updater(prev);
+      persistProjectMeta(next);
+      return next;
+    });
+  }, []);
+
   const displayedSessions = useMemo(() => {
     if (!optimisticSession) return allSessions;
     const existing = allSessions.find((s) => s.id === optimisticSession.id);
@@ -398,13 +484,12 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     if (typeof selected === "string") {
       setSelectedCwd(selected);
       setExpandedCwds((prev) => new Set(prev).add(selected));
-      setCustomCwds((prev) => {
-        const next = [selected, ...prev.filter((cwd) => cwd !== selected)];
-        writeCustomCwds(next);
-        return next;
-      });
+      updateProjectMeta((prev) => ({
+        ...prev,
+        customCwds: [selected, ...prev.customCwds.filter((cwd) => cwd !== selected)],
+      }));
     }
-  }, []);
+  }, [updateProjectMeta]);
 
   const handleNewSession = useCallback(async () => {
     const recentCwd = buildProjectGroups(displayedSessions)[0]?.cwd;
@@ -422,7 +507,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const allProjects = useMemo(() => {
     const byCwd = new Map<string, ProjectGroup>();
     for (const project of sessionProjects) byCwd.set(project.cwd, project);
-    for (const cwd of customCwds) {
+    for (const cwd of projectMeta.customCwds) {
       if (!byCwd.has(cwd)) byCwd.set(cwd, { cwd, sessions: [], latestModified: "" });
     }
     if (defaultCwd && !byCwd.has(defaultCwd)) {
@@ -446,7 +531,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         if (aPinned) return aIdx - bIdx;
         return b.latestModified.localeCompare(a.latestModified);
       });
-  }, [sessionProjects, customCwds, defaultCwd, projectMeta]);
+  }, [sessionProjects, defaultCwd, projectMeta]);
 
   const normalizedSearchQuery = searchQuery.trim().toLowerCase();
   const projects = useMemo(() => {
@@ -480,14 +565,6 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   useEffect(() => {
     if (searchOpen) setTimeout(() => searchInputRef.current?.focus(), 0);
   }, [searchOpen]);
-
-  const updateProjectMeta = useCallback((updater: (prev: ProjectMeta) => ProjectMeta) => {
-    setProjectMeta((prev) => {
-      const next = updater(prev);
-      writeProjectMeta(next);
-      return next;
-    });
-  }, []);
 
   const handleProjectNote = useCallback((cwd: string) => {
     const current = projectMeta.notes[cwd] ?? "";
@@ -523,12 +600,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       ...prev,
       hiddenCwds: prev.hiddenCwds.includes(cwd) ? prev.hiddenCwds : [...prev.hiddenCwds, cwd],
       pinnedCwds: prev.pinnedCwds.filter((item) => item !== cwd),
+      customCwds: prev.customCwds.filter((item) => item !== cwd),
     }));
-    setCustomCwds((prev) => {
-      const next = prev.filter((item) => item !== cwd);
-      writeCustomCwds(next);
-      return next;
-    });
     if ((selectedCwdProp ?? selectedCwd) === cwd) void handleDefaultCwd();
   }, [defaultCwd, selectedCwdProp, selectedCwd, updateProjectMeta, handleDefaultCwd]);
 
@@ -540,18 +613,15 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       if (notes[cwd] && !notes[selected]) notes[selected] = notes[cwd];
       delete notes[cwd];
       return {
+        ...prev,
         hiddenCwds: prev.hiddenCwds.includes(cwd) ? prev.hiddenCwds : [...prev.hiddenCwds, cwd],
         pinnedCwds: prev.pinnedCwds.includes(cwd)
           ? [selected, ...prev.pinnedCwds.filter((item) => item !== cwd && item !== selected)]
           : prev.pinnedCwds.filter((item) => item !== selected),
+        customCwds: [selected, ...prev.customCwds.filter((item) => item !== cwd && item !== selected)],
         notes,
         defaultPinInitializedCwds: prev.defaultPinInitializedCwds.map((item) => item === cwd ? selected : item),
       };
-    });
-    setCustomCwds((prev) => {
-      const next = [selected, ...prev.filter((item) => item !== cwd && item !== selected)];
-      writeCustomCwds(next);
-      return next;
     });
     setSelectedCwd(selected);
     setExpandedCwds((prev) => {
@@ -561,6 +631,42 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       return next;
     });
   }, [updateProjectMeta]);
+
+  const handlePurgeProjectSessions = useCallback((cwd: string) => {
+    if (cwd === defaultCwd) return;
+    const displayName = isScheduledTasksCwd(cwd) ? "定时任务" : getProjectName(cwd);
+    setConfirmPurge({ cwd, displayName });
+  }, [defaultCwd]);
+
+  // Actually performs the destructive session deletion. Triggered by the
+  // confirm modal's "确认删除" button — kept separate so the confirmation UI
+  // can live entirely in React (Tauri blocks window.confirm/alert).
+  const executePurge = useCallback(async () => {
+    const target = confirmPurge;
+    if (!target) return;
+    const { cwd } = target;
+    setConfirmPurge(null);
+    setPurging(true);
+    try {
+      const res = await fetch("/api/projects/clear-sessions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cwd }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = (await res.json()) as { deletedCount?: number };
+      // Server already cleaned cwd out of project-meta; reload the canonical copy.
+      const meta = await loadProjectMetaWithMigration();
+      setProjectMeta(meta);
+      await loadSessions();
+      if ((selectedCwdProp ?? selectedCwd) === cwd) void handleDefaultCwd();
+      setPurgeResult({ ok: true, message: `已彻底删除 ${data.deletedCount ?? 0} 个会话文件。` });
+    } catch (e) {
+      setPurgeResult({ ok: false, message: `删除失败：${String(e)}` });
+    } finally {
+      setPurging(false);
+    }
+  }, [confirmPurge, selectedCwdProp, selectedCwd, loadSessions, handleDefaultCwd]);
 
   useEffect(() => {
     if (!projectMenu) return;
@@ -618,14 +724,25 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   }, []);
 
   const handleRefreshProjects = useCallback(async () => {
-    setCustomCwds(readCustomCwds());
-    setProjectMeta(readProjectMeta());
-    await loadSessions(true);
-    void ensureDefaultCwd();
-    setProjectsRefreshDone(true);
-    if (projectsRefreshTimerRef.current) clearTimeout(projectsRefreshTimerRef.current);
-    projectsRefreshTimerRef.current = setTimeout(() => setProjectsRefreshDone(false), 2000);
-  }, [ensureDefaultCwd, loadSessions]);
+    setError(null);
+    setLoading(true);
+    try {
+      const [meta] = await Promise.all([
+        loadProjectMetaWithMigration(),
+        loadSessions(true),
+        onRefreshRunningSessions?.(),
+      ]);
+      setProjectMeta(meta);
+      void ensureDefaultCwd();
+      setProjectsRefreshDone(true);
+      if (projectsRefreshTimerRef.current) clearTimeout(projectsRefreshTimerRef.current);
+      projectsRefreshTimerRef.current = setTimeout(() => setProjectsRefreshDone(false), 2000);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, [ensureDefaultCwd, loadSessions, onRefreshRunningSessions]);
 
   useEffect(() => {
     return () => {
@@ -1049,9 +1166,115 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             >
               删除项目引入
             </button>
+            <button
+              style={{ ...itemStyle, color: isDefault ? "var(--text-dim)" : "#b91c1c", cursor: isDefault || purging ? "default" : "pointer", opacity: isDefault || purging ? 0.45 : 1 }}
+              disabled={isDefault || purging}
+              title={isDefault ? "默认项目不支持彻底删除" : "永久删除该项目下的全部会话文件"}
+              onClick={() => { setProjectMenu(null); handlePurgeProjectSessions(project.cwd); }}
+            >
+              {purging ? "删除中…" : "彻底删除所有会话"}
+            </button>
           </div>
         );
       })()}
+
+      {/* Purge confirmation modal (Tauri blocks window.confirm, so we use React) */}
+      {confirmPurge && (
+        <div
+          onClick={() => setConfirmPurge(null)}
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 2000,
+            background: "rgba(0,0,0,0.45)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: "min(440px, calc(100vw - 40px))",
+              background: "var(--bg-panel)",
+              border: "1px solid var(--border)",
+              borderRadius: 12,
+              boxShadow: "0 16px 40px rgba(0,0,0,0.3)",
+              padding: 18,
+            }}
+          >
+            <div style={{ fontSize: 14, fontWeight: 600, color: "var(--text)", marginBottom: 10 }}>
+              彻底删除该项目所有会话？
+            </div>
+            <div style={{ fontSize: 12, color: "var(--text-muted)", lineHeight: 1.6, marginBottom: 6 }}>
+              项目：<b style={{ color: "var(--text)" }}>{confirmPurge.displayName}</b>
+            </div>
+            <div
+              style={{ fontSize: 11, color: "var(--text-dim)", lineHeight: 1.5, marginBottom: 14, wordBreak: "break-all" }}
+            >
+              {confirmPurge.cwd}
+            </div>
+            <div style={{ fontSize: 12, color: "#ef4444", lineHeight: 1.6, marginBottom: 16, padding: "8px 10px", background: "rgba(239,68,68,0.08)", borderRadius: 8, border: "1px solid rgba(239,68,68,0.2)" }}>
+              此操作不可恢复，将永久删除该项目目录下的全部会话文件（.jsonl）。如仅需从侧边栏隐藏，请使用“删除项目引入”。
+            </div>
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+              <button
+                onClick={() => setConfirmPurge(null)}
+                style={{ padding: "7px 16px", background: "transparent", border: "1px solid var(--border)", borderRadius: 7, color: "var(--text-muted)", cursor: "pointer", fontSize: 12 }}
+              >
+                取消
+              </button>
+              <button
+                disabled={purging}
+                onClick={() => { void executePurge(); }}
+                style={{ padding: "7px 16px", background: purging ? "#b91c1c99" : "#dc2626", border: "none", borderRadius: 7, color: "#fff", cursor: purging ? "default" : "pointer", fontSize: 12, fontWeight: 600 }}
+              >
+                {purging ? "删除中…" : "确认删除"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Purge result modal (replaces window.alert) */}
+      {purgeResult && (
+        <div
+          onClick={() => setPurgeResult(null)}
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 2000,
+            background: "rgba(0,0,0,0.45)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: "min(400px, calc(100vw - 40px))",
+              background: "var(--bg-panel)",
+              border: "1px solid var(--border)",
+              borderRadius: 12,
+              boxShadow: "0 16px 40px rgba(0,0,0,0.3)",
+              padding: 18,
+            }}
+          >
+            <div style={{ fontSize: 13, color: "var(--text)", lineHeight: 1.6, marginBottom: 16 }}>
+              {purgeResult.message}
+            </div>
+            <div style={{ display: "flex", justifyContent: "flex-end" }}>
+              <button
+                onClick={() => setPurgeResult(null)}
+                style={{ padding: "7px 16px", background: "var(--accent)", border: "none", borderRadius: 7, color: "#fff", cursor: "pointer", fontSize: 12, fontWeight: 600 }}
+              >
+                确定
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* SchedulerRunsBlock */}
       {!compact && (

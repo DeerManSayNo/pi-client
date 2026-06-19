@@ -1,8 +1,7 @@
 import { NextResponse } from "next/server";
 import { addAllowedRoot } from "@/lib/file-access";
-import { resolveSessionPath, buildSessionContext } from "@/lib/session-reader";
+import { resolveSessionPath, readSessionFileCached } from "@/lib/session-reader";
 import { startRpcSession, getRpcSession } from "@/lib/rpc-manager";
-import { SessionManager } from "@earendil-works/pi-coding-agent";
 
 // POST /api/agent/[id] - Send a command to an existing session
 export async function POST(
@@ -26,9 +25,10 @@ export async function POST(
       return NextResponse.json({ error: "Session not found" }, { status: 404 });
     }
 
-    const sm = SessionManager.open(filePath);
-    const cwd = sm.getHeader()?.cwd ?? process.cwd();
-    const context = buildSessionContext(sm.getEntries() as never, sm.getLeafId());
+    // Cold-start path: reuse the per-file cache so concurrent cold-start
+    // POSTs (and any racing GET /api/sessions/[id]) share one parse pass.
+    const { context, header } = readSessionFileCached(filePath);
+    const cwd = header?.cwd ?? process.cwd();
 
     const { session } = await startRpcSession(id, filePath, cwd, undefined, context.roleId ?? null, context.agentMode ?? "agent");
     addAllowedRoot(cwd);

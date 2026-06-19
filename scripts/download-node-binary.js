@@ -140,6 +140,26 @@ download(url, tmpArchive)
       fs.chmodSync(destPath, 0o755);
     }
 
+    // macOS: the official Node.js darwin tarball ships a UNIVERSAL binary
+    // (x86_64 + arm64 ≈ 227M). Strip it to a single architecture so we don't
+    // ship ~115M of dead code for the other CPU. e.g. a build targeting
+    // aarch64-apple-darwin only needs arm64.
+    if (platform === "darwin") {
+      const lipoArch = arch === "arm64" ? "arm64" : "x86_64";
+      const before = fs.statSync(destPath).size;
+      const thinned = `${destPath}.thin`;
+      execSync(`lipo -thin ${lipoArch} "${destPath}" -output "${thinned}"`, {
+        stdio: "inherit",
+      });
+      fs.renameSync(thinned, destPath);
+      fs.chmodSync(destPath, 0o755);
+      const after = fs.statSync(destPath).size;
+      console.log(
+        `🔪 Stripped universal binary to ${lipoArch}: ` +
+          `${(before / 1024 / 1024).toFixed(0)}M → ${(after / 1024 / 1024).toFixed(0)}M`
+      );
+    }
+
     // Cleanup
     fs.rmSync(path.join(binariesDir, extractedDir), { recursive: true, force: true });
     fs.unlinkSync(tmpArchive);

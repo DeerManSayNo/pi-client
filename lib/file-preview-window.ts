@@ -21,6 +21,7 @@ export type FilePreviewChannelMessage =
   | { type: "ready" }
   | { type: "state"; state: FilePreviewState }
   | { type: "select"; tabId: string }
+  | { type: "open"; filePath: string; fileName: string }
   | { type: "close"; tabId: string }
   | { type: "closeMany"; tabIds: string[] }
   | { type: "closed" };

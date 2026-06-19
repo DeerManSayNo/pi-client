@@ -12,6 +12,7 @@ interface Props {
   onSelectTab: (tabId: string) => void;
   onCloseTab: (tabId: string) => void;
   onCloseTabs?: (tabIds: string[]) => void;
+  onOpenFile?: (filePath: string, fileName: string) => void;
   onDetach?: () => void;
 }
 
@@ -51,7 +52,7 @@ function DetachButton({ onDetach }: { onDetach: () => void }) {
   );
 }
 
-export function FilePreviewPanel({ tabs, activeTabId, cwd, viewerCwd, onSelectTab, onCloseTab, onCloseTabs, onDetach }: Props) {
+export function FilePreviewPanel({ tabs, activeTabId, cwd, viewerCwd, onSelectTab, onCloseTab, onCloseTabs, onOpenFile, onDetach }: Props) {
   const activeTab = tabs.find((tab) => tab.id === activeTabId) ?? null;
 
   return (
@@ -71,7 +72,7 @@ export function FilePreviewPanel({ tabs, activeTabId, cwd, viewerCwd, onSelectTa
       )}
       <div style={{ flex: 1, overflow: "hidden", position: "relative" }}>
         {activeTab?.filePath ? (
-          <FileViewer filePath={activeTab.filePath} cwd={viewerCwd ?? cwd ?? undefined} />
+          <FileViewer filePath={activeTab.filePath} cwd={viewerCwd ?? cwd ?? undefined} onOpenFile={onOpenFile} />
         ) : (
           <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-dim)", fontSize: 12 }}>
             未打开任何文件

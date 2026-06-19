@@ -252,31 +252,40 @@ export function AppShell() {
       .catch(() => {});
   }, []);
 
+  const loadRunningSessions = useCallback(async () => {
+    try {
+      const res = await fetch("/api/agent/running", { cache: "no-store" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json() as { runningSessionIds?: string[]; sessions?: RunningSessionStatus[] };
+      setRunningSessionStatuses(new Map((data.sessions ?? []).map((session) => [session.sessionId, session])));
+    } catch {
+      setRunningSessionStatuses(new Map());
+    }
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
-    const loadRunningSessions = () => {
-      fetch("/api/agent/running")
-        .then((res) => res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`)))
-        .then((data: { runningSessionIds?: string[]; sessions?: RunningSessionStatus[] }) => {
-          if (!cancelled) setRunningSessionStatuses(new Map((data.sessions ?? []).map((session) => [session.sessionId, session])));
-        })
-        .catch(() => {});
+    const run = async () => {
+      if (cancelled) return;
+      await loadRunningSessions();
     };
-    loadRunningSessions();
+    run();
     const interval = window.setInterval(loadRunningSessions, 2000);
     return () => {
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, []);
+  }, [loadRunningSessions]);
 
   // Periodically refresh the sidebar session list while any session is running,
   // so newly created sessions and updated modified timestamps are reflected.
+  // Uses stale-while-revalidate: API returns cached data instantly, background
+  // refresh handles updates without blocking the UI.
   useEffect(() => {
     if (runningSessionStatuses.size === 0) return;
     const interval = setInterval(() => {
       setRefreshKey((k) => k + 1);
-    }, 4000);
+    }, 10000);
     return () => clearInterval(interval);
   }, [runningSessionStatuses.size]);
 
@@ -937,6 +946,10 @@ export function AppShell() {
         .catch(() => {});
       return;
     }
+    if (message.type === "open") {
+      handleOpenFile(message.filePath, message.fileName);
+      return;
+    }
     if (message.type === "select") {
       setActiveFileTabId(message.tabId);
       return;
@@ -969,7 +982,7 @@ export function AppShell() {
     if (message.type === "closed") {
       restoreEmbeddedFilePreview();
     }
-  }, [restoreEmbeddedFilePreview]);
+  }, [handleOpenFile, restoreEmbeddedFilePreview]);
 
   useEffect(() => {
     if (typeof BroadcastChannel === "undefined") return;
@@ -1152,6 +1165,7 @@ export function AppShell() {
         explorerRefreshKey={explorerRefreshKey}
         onAtMention={handleAtMention}
         onProjectsChange={handleProjectsChange}
+        onRefreshRunningSessions={loadRunningSessions}
       />
       <div style={{ padding: "8px", flexShrink: 0, display: "flex", flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 4 }}>
         {([
@@ -1865,6 +1879,7 @@ export function AppShell() {
           onSelectTab={handleSelectFileTab}
           onCloseTab={handleCloseFileTab}
           onCloseTabs={handleCloseFileTabs}
+          onOpenFile={handleOpenFile}
           onDetach={handleDetachFilePreview}
         />
       </div>

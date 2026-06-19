@@ -6,9 +6,11 @@ import type { AgentMode } from "@/lib/agent-modes";
 import type { FileReference, SkillReference } from "@/lib/types";
 
 export interface AttachedImage {
-  data: string;   // base64, no prefix
+  data: string;   // base64, no prefix (legacy, kept for compatibility)
   mimeType: string;
-  previewUrl: string; // object URL for display
+  previewUrl: string; // object URL for temporary preview before upload
+  filePath?: string;  // absolute filesystem path (backend reads from here)
+  fileUrl?: string;   // frontend access URL via /api/files/...?type=read
 }
 
 interface ModelOption {
@@ -269,24 +271,36 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const processImageFiles = useCallback(async (files: File[]) => {
     const imageFiles = files.filter((f) => f.type.startsWith("image/"));
     if (!imageFiles.length) return;
+    if (!cwd) {
+      console.warn("Cannot upload images: no cwd available");
+      return;
+    }
     const newImages = await Promise.all(
-      imageFiles.map(
-        (file) =>
-          new Promise<AttachedImage>((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onload = () => {
-              const result = reader.result as string;
-              // result is "data:<mime>;base64,<data>"
-              const base64 = result.split(",")[1];
-              resolve({ data: base64, mimeType: file.type, previewUrl: URL.createObjectURL(file) });
-            };
-            reader.onerror = reject;
-            reader.readAsDataURL(file);
-          })
-      )
+      imageFiles.map(async (file) => {
+        // Upload image to server, save as file in project assets/chats/
+        const formData = new FormData();
+        formData.append("image", file);
+        formData.append("cwd", cwd);
+        const res = await fetch("/api/chat-image-upload", {
+          method: "POST",
+          body: formData,
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({ error: "Upload failed" }));
+          throw new Error(err.error || "Upload failed");
+        }
+        const result = await res.json() as { path: string; url: string; mimeType: string };
+        return {
+          data: "",
+          mimeType: result.mimeType,
+          previewUrl: URL.createObjectURL(file),
+          filePath: result.path,
+          fileUrl: result.url,
+        };
+      })
     );
     setAttachedImages((prev) => [...prev, ...newImages]);
-  }, []);
+  }, [cwd]);
 
   const removeImage = useCallback((index: number) => {
     setAttachedImages((prev) => {

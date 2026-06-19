@@ -12,6 +12,7 @@ import { encodeFilePathForApi, getFileName, getRelativeFilePath, joinFilePath, n
 interface Props {
   filePath: string;
   cwd?: string;
+  onOpenFile?: (filePath: string, fileName: string) => void;
 }
 
 interface FileData {
@@ -78,6 +79,40 @@ function resolveMarkdownResourcePath(src: string | undefined, markdownPath: stri
     return cwd ? joinFilePath(cwd, pathPart.slice(1)) : pathPart;
   }
   return joinFilePath(getDirectoryPath(markdownPath), pathPart);
+}
+
+function isLocalHtmlLink(href: string): boolean {
+  const trimmed = href.trim();
+  return Boolean(trimmed) && !/^(?:https?:|data:|blob:|mailto:|tel:|#|javascript:|\/\/)/i.test(trimmed);
+}
+
+function resolveHtmlLinkPath(href: string, htmlPath: string, cwd?: string): string | null {
+  const trimmed = href.trim();
+  if (!isLocalHtmlLink(trimmed)) return null;
+
+  if (/^file:/i.test(trimmed)) {
+    try {
+      return decodeResourcePath(new URL(trimmed).pathname);
+    } catch {
+      return null;
+    }
+  }
+
+  const pathPart = decodeResourcePath(trimmed.split(/[?#]/, 1)[0]);
+  if (!pathPart) return null;
+  if (pathPart.startsWith("/")) {
+    return cwd ? joinFilePath(cwd, pathPart.slice(1)) : pathPart;
+  }
+  return joinFilePath(getDirectoryPath(htmlPath), pathPart);
+}
+
+function htmlPreviewSrcDoc(content: string): string {
+  const bridgeScript = `\n<script>\n(() => {\n  document.addEventListener('click', (event) => {\n    const anchor = event.target && event.target.closest ? event.target.closest('a[href]') : null;\n    if (!anchor) return;\n    const href = anchor.getAttribute('href') || '';\n    if (!href || /^(?:https?:|data:|blob:|mailto:|tel:|#|javascript:|\\/\\/)/i.test(href)) return;\n    event.preventDefault();\n    window.parent.postMessage({ type: 'deerhux:html-link', href }, '*');\n  }, true);\n})();\n</script>`;
+
+  if (/<\/body\s*>/i.test(content)) {
+    return content.replace(/<\/body\s*>/i, `${bridgeScript}</body>`);
+  }
+  return `${content}${bridgeScript}`;
 }
 
 function markdownResourceUrl(src: string | undefined, markdownPath: string, cwd?: string): string | undefined {
@@ -1333,7 +1368,7 @@ function VideoViewer({ filePath, cwd }: { filePath: string; cwd?: string }) {
   );
 }
 
-export function FileViewer({ filePath, cwd }: Props) {
+export function FileViewer({ filePath, cwd, onOpenFile }: Props) {
   if (isImagePath(filePath)) {
     return <ImageViewer filePath={filePath} cwd={cwd} />;
   }
@@ -1343,10 +1378,10 @@ export function FileViewer({ filePath, cwd }: Props) {
   if (isVideoPath(filePath)) {
     return <VideoViewer filePath={filePath} cwd={cwd} />;
   }
-  return <TextFileViewer filePath={filePath} cwd={cwd} />;
+  return <TextFileViewer filePath={filePath} cwd={cwd} onOpenFile={onOpenFile} />;
 }
 
-function TextFileViewer({ filePath, cwd }: Props) {
+function TextFileViewer({ filePath, cwd, onOpenFile }: Props) {
   const { isDark } = useTheme();
   const [data, setData] = useState<FileData | null>(null);
   const [prevContent, setPrevContent] = useState<string | null>(null);
@@ -1369,6 +1404,8 @@ function TextFileViewer({ filePath, cwd }: Props) {
   const latestContentRef = useRef("");
   const markdownPreviewRootRef = useRef<HTMLDivElement | null>(null);
   const htmlPreviewFrameRef = useRef<HTMLIFrameElement | null>(null);
+  const htmlFrameInitialLoadDoneRef = useRef(false);
+  const [htmlFrameKey, setHtmlFrameKey] = useState(0);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const contentScrollRef = useRef<HTMLDivElement | null>(null);
 
@@ -1473,6 +1510,32 @@ function TextFileViewer({ filePath, cwd }: Props) {
       url: markdownResourceUrl(result.markdownPath, filePath, cwd) ?? result.markdownPath,
     };
   }, [cwd, filePath]);
+
+  const handleHtmlFrameLoad = useCallback(() => {
+    if (!htmlFrameInitialLoadDoneRef.current) {
+      htmlFrameInitialLoadDoneRef.current = true;
+      return;
+    }
+    // Subsequent load means the iframe navigated somewhere
+    if (!onOpenFile || !htmlPreviewFrameRef.current) return;
+    try {
+      const navigatedUrl = htmlPreviewFrameRef.current.contentWindow?.location?.href;
+      if (!navigatedUrl || navigatedUrl === "about:blank" || navigatedUrl === "about:srcdoc") return;
+      const urlObj = new URL(navigatedUrl);
+      let path = decodeURIComponent(urlObj.pathname);
+      if (!path || path === "/") return;
+      if (path.startsWith("/")) path = path.slice(1);
+      const resolvedPath = resolveHtmlLinkPath(path, filePath, cwd);
+      if (resolvedPath) {
+        onOpenFile(resolvedPath, getFileName(resolvedPath));
+      }
+    } catch {
+      // Ignore cross-origin access errors
+    }
+    // Reset the iframe back to original content
+    htmlFrameInitialLoadDoneRef.current = false;
+    setHtmlFrameKey((k) => k + 1);
+  }, [cwd, filePath, onOpenFile]);
 
   const isSearchingMarkdownPreview = data?.language === "markdown" && previewMode && viewMode === "source";
   const searchContent = data
@@ -1629,6 +1692,21 @@ function TextFileViewer({ filePath, cwd }: Props) {
     return () => cancelAnimationFrame(frame);
   }, [activeSearchIndex, isSearchingMarkdownPreview, searchMatches.length, searchOpen, searchQuery]);
 
+  useEffect(() => {
+    if (!onOpenFile) return;
+
+    const handleHtmlPreviewMessage = (event: MessageEvent) => {
+      const payload = event.data as { type?: unknown; href?: unknown } | null;
+      if (!payload || payload.type !== "deerhux:html-link" || typeof payload.href !== "string") return;
+      const resolvedPath = resolveHtmlLinkPath(payload.href, filePath, cwd);
+      if (!resolvedPath) return;
+      onOpenFile(resolvedPath, getFileName(resolvedPath));
+    };
+
+    window.addEventListener("message", handleHtmlPreviewMessage);
+    return () => window.removeEventListener("message", handleHtmlPreviewMessage);
+  }, [cwd, filePath, onOpenFile]);
+
   if (loading) {
     return (
       <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-muted)", fontSize: 13 }}>
@@ -1658,6 +1736,7 @@ function TextFileViewer({ filePath, cwd }: Props) {
     : saveState === "saved" ? "已保存"
     : saveState === "error" ? "保存失败"
     : null;
+  const htmlSrcDoc = isHtml ? htmlPreviewSrcDoc(data.content) : "";
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
@@ -1904,9 +1983,11 @@ function TextFileViewer({ filePath, cwd }: Props) {
           <DiffView oldContent={prevContent!} newContent={sourceContent} language={data.language} />
         ) : isHtml && previewMode ? (
           <iframe
+            key={htmlFrameKey}
             ref={htmlPreviewFrameRef}
-            srcDoc={data.content}
-            sandbox="allow-scripts"
+            srcDoc={htmlSrcDoc}
+            sandbox="allow-scripts allow-same-origin"
+            onLoad={handleHtmlFrameLoad}
             style={{ width: "100%", height: "100%", border: "none", background: "var(--bg)" }}
             title="HTML 预览"
           />
