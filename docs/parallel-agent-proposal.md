@@ -4,6 +4,14 @@
 >
 > 并行化分四个阶段推进：代码索引 → SDK 只读并行 → 只读并行 Agent → 隔离编辑 Agent。每个阶段独立可交付。
 
+> ## ⚠️ 文档状态：部分已过时（2026-06 更新）
+>
+> 本提案的 Phase 3（只读并行 Agent）与 Phase 4（隔离编辑 Agent）所描述的独立 orchestrator 架构（`orchestrator.ts` / `isolated-orchestrator.ts` / `parallel-runs` / `isolated-runs`）已在后续重构中删除。
+>
+> **当前实际实现**为 collaboration 模式（多 worker 在共享 worktree 中协作），见 `lib/parallel-agent/collaboration-orchestrator.ts` 与 `app/api/agent-runs/`。Phase 1（代码索引）与 Phase 2（SDK 只读工具并行）仍有效。
+>
+> 下文保留原始设计内容作为历史参考。
+
 ---
 
 ## 目录

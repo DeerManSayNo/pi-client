@@ -1,5 +1,14 @@
 # DeerHux 项目审视报告
 
+> ## 📌 历史快照（2026-06-07）
+>
+> 本文是 2026-06-07 时点的项目审视快照，**其中提到的端点与架构此后经历了重大重构**：
+> - `subagent-tasks` / `parallel-runs` / `isolated-runs` 端点已全部删除，collaboration 端点统一为 `app/api/agent-runs/`
+> - message-send-reply 生命周期重构（turnId 协议、recover 命令、单次往返新会话、EventStore + SSE replay）
+> - parallel-agent 旧 orchestrator 架构已删除，仅保留 collaboration 模式
+>
+> 当前架构以代码为准。下文保留原始审视内容作为历史参考。
+
 生成时间：2026-06-07  
 项目路径：`/Users/huanghaoqi/Documents/DeerManNotesAir/LuYuAllProject/DeerManProject/DeerHux`  
 版本：`0.6.12`
