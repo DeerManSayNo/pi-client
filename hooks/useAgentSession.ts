@@ -893,33 +893,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }, AWAITING_AGENT_START_TIMEOUT_MS);
   }, [clearAwaitingAgentStartGuard, connectEvents, loadSession, stopStuckAwaitingAgentStart]);
 
-  const waitForEventsReady = useCallback((sid: string, timeoutMs = 700) => new Promise<void>((resolve) => {
-    const es = eventSourceRef.current;
-    if (!es || sessionIdRef.current !== sid || es.readyState === EventSource.OPEN) {
-      resolve();
-      return;
-    }
-
-    let settled = false;
-    let timeout: ReturnType<typeof setTimeout> | null = null;
-    const cleanup = () => {
-      if (timeout) clearTimeout(timeout);
-      es.removeEventListener("open", done);
-      es.removeEventListener("message", done);
-      es.removeEventListener("error", done);
-    };
-    const done = () => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      resolve();
-    };
-    timeout = setTimeout(done, timeoutMs);
-    es.addEventListener("open", done);
-    es.addEventListener("message", done);
-    es.addEventListener("error", done);
-  }), []);
-
   useEffect(() => {
     agentRunningRef.current = agentRunning;
   }, [agentRunning]);
@@ -989,6 +962,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         turnIdRef.current += 1;
         // A fresh turn has started — reset all per-turn tracking.
         resetTurnTracking();
+        // Recovery's fresh turn started — close the abort-swallowing gate so
+        // this turn's agent_end is processed normally.
+        autoContinueInProgressRef.current = false;
         awaitingAgentStartRef.current = false;
         setAgentRunning(true);
         setAgentPhase({ kind: "waiting_model", reason: "initial" });
@@ -1269,17 +1245,25 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (isNew && newSessionCwd) {
         const selectedModel = newSessionModel;
         if (selectedModel) setPendingModel(selectedModel);
+        // Single round-trip: create + send prompt in one POST. The backend
+        // writes all events to the event-store, and SSE replays them on
+        // first connect (getSince returns full history when no Last-Event-ID),
+        // so we no longer need a separate `type=create` round-trip.
         const res = await fetch("/api/agent/new", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             cwd: newSessionCwd,
-            type: "create",
+            type: "prompt",
+            message,
+            clientMessageId,
             agentMode,
+            ...(sentReferences ? { references: sentReferences } : {}),
             ...(piImages?.length ? { images: piImages } : {}),
             ...(selectedModel ? { provider: selectedModel.provider, modelId: selectedModel.modelId } : {}),
             ...(thinkingLevel !== "auto" ? { thinkingLevel } : {}),
             ...(roleId ? { roleId } : {}),
+            ...(skill ? { skillName: skill.name } : {}),
           }),
         });
         if (!res.ok) {
@@ -1292,7 +1276,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         adoptingCreatedSessionRef.current = realId;
         optimisticSessionIdRef.current = null;
         connectEvents(realId);
-        await waitForEventsReady(realId);
         scheduleAwaitingAgentStartGuard(realId, currentTurnId);
         createdRealSession = true;
         onSessionCreated?.({
@@ -1304,14 +1287,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           modified: new Date().toISOString(),
           messageCount: 1,
           firstMessage: message,
-        });
-        await sendAgentCommand(realId, {
-          type: "prompt",
-          message,
-          clientMessageId,
-          ...(sentReferences ? { references: sentReferences } : {}),
-          ...(piImages?.length ? { images: piImages } : {}),
-          ...(skill ? { skillName: skill.name } : {}),
         });
       } else if (session) {
         ensureEventsConnected(session.id);
@@ -1361,7 +1336,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       eventSourceRef.current?.close();
       eventSourceRef.current = null;
     }
-  }, [isNew, newSessionCwd, newSessionModel, agentMode, thinkingLevel, session, connectEvents, ensureEventsConnected, waitForEventsReady, scheduleAwaitingAgentStartGuard, clearAwaitingAgentStartGuard, onSessionCreated, onSessionStarted]);
+  }, [isNew, newSessionCwd, newSessionModel, agentMode, thinkingLevel, session, connectEvents, ensureEventsConnected, scheduleAwaitingAgentStartGuard, clearAwaitingAgentStartGuard, onSessionCreated, onSessionStarted]);
 
   const handleAbort = useCallback(async () => {
     const sid = sessionIdRef.current;
@@ -1492,8 +1467,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const WATCHDOG_STALE_EVENT_MS = parseInt(process.env.NEXT_PUBLIC_WATCHDOG_STALE_EVENT_MS || '', 10) || 60_000;  // 60 seconds (was 30s)
   const WATCHDOG_STALE_CONTENT_MS = parseInt(process.env.NEXT_PUBLIC_WATCHDOG_STALE_CONTENT_MS || '', 10) || 90_000;  // 90 seconds (was 45s)
 
-  // Shared recovery flow: abort stuck turn, reload session, send follow_up.
+  // Shared recovery flow: sends a single atomic `recover` command.
   // Used by both the automatic watchdog (tiered) and the manual "中断并继续" button.
+  //
+  // Backend handles: abort + settle + optional set_model + fresh prompt turn.
+  // This replaces the old manual abort + while-wait + sleep(150) + follow_up.
   const executeRecovery = useCallback(async (sid: string, attempt = 1) => {
     if (autoContinueSentRef.current) return;
     autoContinueSentRef.current = true;
@@ -1502,59 +1480,26 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
     autoContinueInProgressRef.current = true;
     abortCompletedRef.current = false;
-    try {
-      await sendAgentCommand(sid, { type: "abort" });
-    } catch {
-      abortCompletedRef.current = true;
-    }
 
-    // Wait for the old turn's agent_end so it doesn't kill the new follow-up
-    if (!abortCompletedRef.current) {
-      const MAX_WAIT_MS = 8_000;
-      const startWait = Date.now();
-      while (!abortCompletedRef.current && (Date.now() - startWait) < MAX_WAIT_MS) {
-        await new Promise((r) => setTimeout(r, 100));
-      }
-      // If we timed out without seeing abort's agent_end, mark it as
-      // handled so the follow_up's agent_end isn't swallowed by the gate.
-      if (!abortCompletedRef.current) {
-        abortCompletedRef.current = true;
-      }
-    }
-
-    await loadSession(sid);
-
-    turnIdRef.current += 1;
-    resetTurnTracking();
-    setRetryInfo(null);
-    setAgentPhase({ kind: "waiting_model", reason: "recovery" });
-    dispatch({ type: "reset" });
-    dispatch({ type: "start" });
-
-    agentRunningRef.current = true;
-    setAgentRunning(true);
-    setMessages((prev) => [...prev, { role: "user", content: `[continue] ${AUTO_CONTINUE_MESSAGE}`, timestamp: Date.now() } as AgentMessage]);
-
+    // Ensure SSE is connected so recovery events arrive promptly.
     connectEvents(sid);
-    // Settle before firing follow_up so the server-side subscription is ready
-    await new Promise((r) => setTimeout(r, 150));
 
     try {
-      if (fallbackModel) {
-        await sendAgentCommand(sid, {
-          type: "set_model",
-          provider: fallbackModel.provider,
-          modelId: fallbackModel.modelId,
-        });
-        setCurrentModelOverride(fallbackModel);
-      }
-      await sendAgentCommand(sid, { type: "follow_up", message: AUTO_CONTINUE_MESSAGE });
+      // Backend atomically: abort + settle + optional set_model + fresh prompt
+      // turn. The continue message is echoed back via message_end/user SSE.
+      await sendAgentCommand(sid, {
+        type: "recover",
+        message: AUTO_CONTINUE_MESSAGE,
+        ...(fallbackModel ? { provider: fallbackModel.provider, modelId: fallbackModel.modelId } : {}),
+      });
+      if (fallbackModel) setCurrentModelOverride(fallbackModel);
+      // Capture any partial output from the aborted turn.
+      await loadSession(sid);
       setStallLevel(null);
-      // Recovery succeeded — close the gate so the follow_up's agent_end
-      // is processed normally (not swallowed).
-      autoContinueInProgressRef.current = false;
+      // Gate is closed by agent_start handler when the recovery's fresh turn
+      // begins, not here — the abort's agent_end may still be in-flight.
     } catch (e) {
-      console.error("Recovery follow_up failed:", e);
+      console.error("Recovery failed:", e);
       autoContinueInProgressRef.current = false;
       autoContinueSentRef.current = false;
       agentRunningRef.current = false;

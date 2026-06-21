@@ -424,6 +424,10 @@ export class AgentSessionWrapper {
   private _isRunning = false;
   private activeTurnId = 0;
   private activeTurnPromise: Promise<void> | null = null;
+  /** Stable string key for the currently-running turn, e.g. "sess:t3".
+   * Attached to every stored/broadcast event so clients can filter by turn
+   * and reconnect with precise replay boundaries. */
+  private currentTurnKey: string | null = null;
   private sawAssistantEventInTurn = false;
   /** When true, the spawn_subagent tool is kept in the active tool set. */
   private _subagentEnabled = false;
@@ -647,14 +651,19 @@ export class AgentSessionWrapper {
     liveIsland.trackSession(this.inner.sessionId, cwd);
 
     this.unsubscribe = this.inner.subscribe((event: AgentEvent) => {
+      const turnKey = this.currentTurnKey;
+      // Tag every event with the current turn key so real-time broadcasts
+      // match SSE replay semantics (where turnId comes from the store).
+      const tagged = turnKey ? { ...event, turnId: turnKey } as AgentEvent : event;
       getAgentEventStore().append({
         sessionId: this.inner.sessionId,
         runId: this.inner.sessionId,
+        ...(turnKey ? { turnId: turnKey } : {}),
         event,
       });
       this.recordEventStatus(event);
       this.resetIdleTimer();
-      for (const l of this.listeners) l(event);
+      for (const l of this.listeners) l(tagged);
 
       // Forward to AIControls Live Island
       const currentCwd = this.inner.sessionManager.getCwd();
@@ -678,9 +687,10 @@ export class AgentSessionWrapper {
           getAgentEventStore().append({
             sessionId: this.inner.sessionId,
             runId: this.inner.sessionId,
+            ...(this.currentTurnKey ? { turnId: this.currentTurnKey } : {}),
             event: fileChangedEvent,
           });
-          for (const l of this.listeners) l(fileChangedEvent);
+          for (const l of this.listeners) l(turnKey ? { ...fileChangedEvent, turnId: turnKey } as AgentEvent : fileChangedEvent);
         }
       }
     });
@@ -828,8 +838,7 @@ export class AgentSessionWrapper {
     this.onDestroyCallback = cb;
   }
 
-  private trackTurn(promise: Promise<void>): void {
-    const turnId = ++this.activeTurnId;
+  private trackTurn(turnId: number, promise: Promise<void>): void {
     this.activeTurnPromise = promise;
 
     promise.catch((err: unknown) => {
@@ -1010,6 +1019,51 @@ export class AgentSessionWrapper {
     return { ok: true, toolNames: nextRuntime.toolNames, serverStatuses: nextRuntime.serverStatuses };
   }
 
+  /**
+   * Prepare + commit + track a fresh prompt turn. Shared by `prompt` and
+   * `recover` so both follow identical event/persistence semantics
+   * (display_user_message append, message_end/user echo, trackTurn).
+   */
+  private async commitAndTrackPromptTurn(
+    rawMessage: string,
+    references: unknown,
+    skillName: unknown,
+    images: Array<{ type: "image"; data: string; mimeType: string }> | undefined,
+    clientMessageId: string | undefined,
+  ): Promise<{ turnId: string }> {
+    const turnNum = ++this.activeTurnId;
+    const turnKey = `${this.inner.sessionId}:t${turnNum}`;
+    this.currentTurnKey = turnKey;
+    const turnContext = await this.prepareTurnContext(rawMessage, references, skillName);
+    if (turnContext.displayMessage) {
+      getLiveIslandClient().recordPrompt(this.inner.sessionId, turnContext.displayMessage);
+    }
+    const prepared = await this.prepareImageFallback(turnContext.message, images, turnContext.displayMessage);
+
+    const displayUserContent = prepared.displayContent ?? turnContext.displayMessage;
+    for (const l of this.listeners) {
+      l({
+        type: "message_end",
+        message: {
+          role: "user",
+          content: displayUserContent,
+          ...(turnContext.references.length ? { references: turnContext.references } : {}),
+          ...(turnContext.skill ? { skill: turnContext.skill } : {}),
+          ...(clientMessageId ? { clientMessageId } : {}),
+          agentMode: this.agentMode,
+          timestamp: Date.now(),
+        },
+      });
+    }
+
+    this.appendTurnContextMetadata(turnContext.references, turnContext.skill);
+    this.appendDisplayUserMessage(displayUserContent, turnContext.references, turnContext.skill, clientMessageId);
+    this.trackTurn(turnNum, this.withTemporarySystemPrompt(turnContext.systemPromptBlock, () => (
+      this.inner.prompt(prepared.message, toSdkImages(prepared.images) ? { images: toSdkImages(prepared.images)! } : undefined)
+    )));
+    return { turnId: turnKey };
+  }
+
   async send(command: Record<string, unknown>): Promise<unknown> {
     this.resetIdleTimer();
     const type = command.type as string;
@@ -1020,45 +1074,11 @@ export class AgentSessionWrapper {
           this.setRole(command.roleId);
         }
         const promptText = typeof command.message === "string" ? command.message : "";
-        const turnContext = await this.prepareTurnContext(promptText, command.references, command.skillName);
-        // Record prompt text for Live Island display
-        if (turnContext.displayMessage) {
-          getLiveIslandClient().recordPrompt(this.inner.sessionId, turnContext.displayMessage);
-        }
-        // Fire and forget — events come via subscribe. Track the promise so an
-        // abort + follow_up recovery can wait for the old turn to settle.
         const promptImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
-        const clientMessageId = typeof command.clientMessageId === "string" && command.clientMessageId.trim()
+        const promptClientMessageId = typeof command.clientMessageId === "string" && command.clientMessageId.trim()
           ? command.clientMessageId.trim()
           : undefined;
-        const prepared = await this.prepareImageFallback(turnContext.message, promptImages, turnContext.displayMessage);
-
-        // 外部远程连接（如微信 Bot）触发 prompt 时，前端没有本地乐观追加 user 消息。
-        // SDK 不一定会通过 subscribe 立即广播 user message，因此这里统一补发一条
-        // message_end/user 事件，让已打开的 session 能第一时间显示远程用户刚发来的消息。
-        // 前端本地输入框发送时已有去重逻辑，会跳过同内容的 user message_end，不会重复。
-        const displayUserContent = prepared.displayContent ?? turnContext.displayMessage;
-        for (const l of this.listeners) {
-          l({
-            type: "message_end",
-            message: {
-              role: "user",
-              content: displayUserContent,
-              ...(turnContext.references.length ? { references: turnContext.references } : {}),
-              ...(turnContext.skill ? { skill: turnContext.skill } : {}),
-              ...(clientMessageId ? { clientMessageId } : {}),
-              agentMode: this.agentMode,
-              timestamp: Date.now(),
-            },
-          });
-        }
-
-        this.appendTurnContextMetadata(turnContext.references, turnContext.skill);
-        this.appendDisplayUserMessage(displayUserContent, turnContext.references, turnContext.skill, clientMessageId);
-        this.trackTurn(this.withTemporarySystemPrompt(turnContext.systemPromptBlock, () => (
-          this.inner.prompt(prepared.message, toSdkImages(prepared.images) ? { images: toSdkImages(prepared.images)! } : undefined)
-        )));
-        return null;
+        return this.commitAndTrackPromptTurn(promptText, command.references, command.skillName, promptImages, promptClientMessageId);
       }
 
       case "set_role": {
@@ -1088,6 +1108,36 @@ export class AgentSessionWrapper {
       case "abort":
         await this.abortAndSettleCurrentTurn();
         return null;
+
+      case "recover": {
+        // Atomic abort-and-continue: settle the old turn, optionally switch
+        // model, then start a fresh prompt turn. Replaces the frontend's
+        // manual abort + while-wait + sleep(150) + follow_up choreography.
+        await this.abortAndSettleCurrentTurn();
+
+        const provider = typeof command.provider === "string" ? command.provider.trim() : undefined;
+        const modelId = typeof command.modelId === "string" ? command.modelId.trim() : undefined;
+        let modelChanged = false;
+        if (provider && modelId) {
+          const registry = this.inner.modelRegistry;
+          let model = registry.find(provider, modelId);
+          if (!model) {
+            const { AuthStorage, ModelRegistry } = await import("@earendil-works/pi-coding-agent");
+            model = ModelRegistry.create(AuthStorage.create()).find(provider, modelId);
+          }
+          if (!model) throw new Error(`Model not found: ${provider}/${modelId}`);
+          await this.inner.setModel(model);
+          modelChanged = true;
+        }
+
+        const recoverText = typeof command.message === "string" ? command.message : "";
+        const recoverImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
+        const recoverClientMessageId = typeof command.clientMessageId === "string" && command.clientMessageId.trim()
+          ? command.clientMessageId.trim()
+          : undefined;
+        const recoverTurn = await this.commitAndTrackPromptTurn(recoverText, command.references, command.skillName, recoverImages, recoverClientMessageId);
+        return { recovered: true, modelChanged, turnId: recoverTurn.turnId };
+      }
 
       case "get_state": {
         const model = this.inner.model;
@@ -1247,7 +1297,9 @@ export class AgentSessionWrapper {
 
         // If the previous turn was already aborted/stopped, followUp would only
         // sit in the queue and never trigger a model call. Start a fresh turn.
-        this.trackTurn(this.withTemporarySystemPrompt(turnContext.systemPromptBlock, () => (
+        const followTurnNum = ++this.activeTurnId;
+        this.currentTurnKey = `${this.inner.sessionId}:t${followTurnNum}`;
+        this.trackTurn(followTurnNum, this.withTemporarySystemPrompt(turnContext.systemPromptBlock, () => (
           this.inner.prompt(message, imageOptions)
         )));
         return null;
