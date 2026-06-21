@@ -121,6 +121,11 @@ interface ConsumedStream {
   aborted: boolean;
   /** 错误消息（非 abort）。 */
   errorMessage: string | undefined;
+  /** ★ M4 修复：consumeStreamWithRetry 是否已发射最终的 message_start+message_end。
+   *
+   *  当发生重试时，最终轮的 message_end 必须在 auto_retry_end 【之前】发射（事件顺序契约）。
+   *  consumeStreamWithRetry 负责发，prompt 主循环看到此标记就跳过，避免重复。 */
+  messageEndEmitted?: boolean;
   /** stream 的 stopReason（done.reason 或 error.reason）。 */
   stopReason: string | undefined;
 }
@@ -358,9 +363,17 @@ export class DeerLoopEngine implements AgentEnginePort {
 
         // abort / error：收尾后跳出循环。
         if (consumed.aborted || consumed.errorMessage) {
-          this.emitMessageStartIfNeeded(consumed);
-          this.emit({ type: "message_end", message: consumed.endMessage });
-          this._messages.push(consumed.endMessage);
+          // ★ M4 修复：若 consumeStreamWithRetry 已发过 message_end（重试场景的最终轮），
+          //   这里不重复发；否则补发。
+          if (!consumed.messageEndEmitted) {
+            this.emitMessageStartIfNeeded(consumed);
+            this.emit({ type: "message_end", message: consumed.endMessage });
+          }
+          // ★ M4 修复（问题 #3）：abort 时不 push endMessage 到 transcript（aborted 不算有效对话）。
+          //   error（不可重试/全部重试失败）仍 push（保留错误上下文，下次 prompt LLM 能看到）。
+          if (!consumed.aborted) {
+            this._messages.push(consumed.endMessage);
+          }
           if (consumed.errorMessage) agentError = consumed.errorMessage;
           break;
         }
@@ -381,14 +394,18 @@ export class DeerLoopEngine implements AgentEnginePort {
 
         if (!wantsTools || toolCalls.length === 0) {
           // LLM 不再要工具 → 正常结束（emit message_end 后跳出循环）。
-          this.emitMessageStartIfNeeded(consumed);
-          this.emit({ type: "message_end", message: assistantMessage });
+          if (!consumed.messageEndEmitted) {
+            this.emitMessageStartIfNeeded(consumed);
+            this.emit({ type: "message_end", message: assistantMessage });
+          }
           break;
         }
 
         // 有 toolCall：本轮 assistant 消息结束（emit message_end），接下来是工具执行。
-        this.emitMessageStartIfNeeded(consumed);
-        this.emit({ type: "message_end", message: assistantMessage });
+        if (!consumed.messageEndEmitted) {
+          this.emitMessageStartIfNeeded(consumed);
+          this.emit({ type: "message_end", message: assistantMessage });
+        }
 
         // 防死循环：超过 maxToolRounds 强制停。
         toolRounds++;
@@ -611,14 +628,16 @@ export class DeerLoopEngine implements AgentEnginePort {
     while (true) {
       const consumed = await this.consumeStream(context);
 
-      // 成功或 abort：不重试。如果之前重试过且现在成功，补发 auto_retry_end{success:true}。
+      // 成功或 abort：不重试。
+      // ★ M4 修复（事件顺序契约）：重试后的最终轮，先发 message_start+message_end，
+      //   再发 auto_retry_end——保证 message_end 在 auto_retry_end 之前。
       if (!consumed.errorMessage || consumed.aborted) {
         if (retryCount > 0 && !consumed.aborted) {
-          this.emit({
-            type: "auto_retry_end",
-            success: true,
-            attempt: retryCount,
-          });
+          // 重试后成功：先补 message_start（如未发）+ message_end，再发 auto_retry_end{success:true}
+          this.emitMessageStartIfNeeded(consumed);
+          this.emit({ type: "message_end", message: consumed.endMessage });
+          this.emit({ type: "auto_retry_end", success: true, attempt: retryCount });
+          return { ...consumed, messageEndEmitted: true };
         }
         return consumed;
       }
@@ -641,13 +660,17 @@ export class DeerLoopEngine implements AgentEnginePort {
       // 不可重试或超过 maxAttempts
       if (!decision.retry || nextAttempt > policy.maxAttempts) {
         if (retryCount > 0) {
-          // 之前重试过但最终失败：补发 auto_retry_end{success:false}
+          // ★ M4 修复（事件顺序契约）：重试后最终失败，先发 message_start+message_end，
+          //   再发 auto_retry_end{success:false}。
+          this.emitMessageStartIfNeeded(consumed);
+          this.emit({ type: "message_end", message: consumed.endMessage });
           this.emit({
             type: "auto_retry_end",
             success: false,
             attempt: retryCount,
             finalError: consumed.errorMessage,
           });
+          return { ...consumed, messageEndEmitted: true };
         }
         return consumed;
       }
@@ -678,13 +701,33 @@ export class DeerLoopEngine implements AgentEnginePort {
 
       // abort 打断 sleep：立即停止重试
       if (this.abortController?.signal.aborted) {
+        // ★ M4 修复（问题 #2）：重新 resolve endMessage 为 aborted 版本。
+        //   原本 consumed.endMessage 是失败轮次的 error 消息，
+        //   abort 后应该发 message_end{stopReason:"aborted"}（语义正确）。
+        const abortedMessage = this.resolveEndMessage(
+          consumed.endMessage,
+          null,
+          true, // aborted
+          undefined,
+        );
+        // ★ M4 修复（问题 #1）：先发 message_start+message_end{aborted}，再发 auto_retry_end。
+        this.emitMessageStartIfNeeded(consumed);
+        this.emit({ type: "message_end", message: abortedMessage });
         this.emit({
           type: "auto_retry_end",
           success: false,
           attempt: nextAttempt,
           finalError: "aborted",
         });
-        return { ...consumed, aborted: true, errorMessage: undefined };
+        // ★ M4 修复（问题 #3）：abort 不污染 transcript——返回 abortedMessage
+        //   但标记不 push（prompt 主循环检查 aborted 分支不 push）。
+        return {
+          ...consumed,
+          endMessage: abortedMessage,
+          aborted: true,
+          errorMessage: undefined,
+          messageEndEmitted: true,
+        };
       }
 
       retryCount = nextAttempt;

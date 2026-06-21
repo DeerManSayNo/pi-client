@@ -122,6 +122,21 @@ console.log("\n[用例 1] 前 2 次失败、第 3 次成功 → 重试成功");
   // 总耗时合理（2 次 retry，每次 settleMs(5) + delayMs(10,20) ≈ 15+25=40ms，加上容差）
   assert(elapsed < 500, `总耗时 < 500ms（实际 ${elapsed}ms）`, elapsed);
 
+  // ★ M4 修复验证：auto_retry_end 在 message_end 【之后】（不在之前）
+  // 找最后一次 auto_retry_end 的位置，它之前应该有 message_end
+  const lastRetryEndIdx = types.lastIndexOf("auto_retry_end");
+  if (lastRetryEndIdx > 0) {
+    // 反向找最近的 message_end
+    let lastMsgEndBeforeRetry = -1;
+    for (let i = lastRetryEndIdx - 1; i >= 0; i--) {
+      if (types[i] === "message_end") { lastMsgEndBeforeRetry = i; break; }
+    }
+    assert(lastMsgEndBeforeRetry > 0, "auto_retry_end 前有 message_end（事件顺序契约）");
+  }
+  // transcript 不含失败轮次（重试后成功，transcript 应只有 user + 最终 assistant）
+  const finalEnd2 = collected.filter((e) => e.type === "agent_end").pop();
+  assert(finalEnd2.messages.length === 2, "transcript=user+assistant（2 条，失败轮不入）", finalEnd2.messages.length);
+
   console.log("    事件序列:", types.join(" → "));
 }
 
@@ -151,6 +166,15 @@ console.log("\n[用例 2] 全部失败 → agent_end{error}");
   assert(finalEnd.willRetry === false, "最终 agent_end.willRetry=false");
   assert(finalEnd.error !== undefined, "agent_end 带 error", finalEnd.error);
   assert(/persistent failure/.test(finalEnd.error), "error 含原始消息", finalEnd.error);
+
+  // ★ M4 补强：auto_retry_end{success:false} 字段验证
+  const retryEnds2 = collected.filter((e) => e.type === "auto_retry_end");
+  assert(retryEnds2.length === 1, "补强：有 1 次 auto_retry_end", retryEnds2.length);
+  assert(retryEnds2[0].success === false, "补强：success=false");
+  assert(/persistent failure/.test(retryEnds2[0].finalError), "补强：finalError 含原始消息", retryEnds2[0].finalError);
+
+  // ★ M4 补强：transcript 在全部失败后含 user + 失败的 assistant（错误上下文保留）
+  assert(finalEnd.messages.length === 2, "transcript=user+失败assistant（2 条）", finalEnd.messages.length);
 }
 
 // ---------------------------------------------------------------------------
@@ -224,6 +248,20 @@ console.log("\n[用例 4] abort during retry sleep");
 
   // abort 打断 sleep：总耗时应远小于 delayMs(2000)
   assert(elapsed < 1000, `abort 打断 sleep，总耗时 < 1000ms（实际 ${elapsed}ms，delayMs=2000）`, elapsed);
+
+  // ★ M4 修复验证（问题 #2）：abort 后的 message_end.stopReason === "aborted"
+  const lastMsgEnd = collected.filter((e) => e.type === "message_end").pop();
+  assert(lastMsgEnd.message.stopReason === "aborted", "abort 后 message_end.stopReason=aborted（修复 #2）", lastMsgEnd.message.stopReason);
+
+  // ★ M4 修复验证（问题 #3）：abort 不污染 transcript
+  const finalEnd3 = collected.filter((e) => e.type === "agent_end").pop();
+  assert(finalEnd3.messages.length === 1, "abort 后 transcript 只有 user（1 条，失败轮不入，修复 #3）", finalEnd3.messages.length);
+
+  // ★ M4 补强：auto_retry_end 在 message_end 之后（事件顺序契约）
+  const types4 = collected.map((e) => e.type);
+  const mEndIdx = types4.lastIndexOf("message_end");
+  const rEndIdx = types4.lastIndexOf("auto_retry_end");
+  assert(mEndIdx > 0 && rEndIdx > mEndIdx, "auto_retry_end 在 message_end 之后（修复 #1）", { mEndIdx, rEndIdx });
 }
 
 // ---------------------------------------------------------------------------
@@ -273,6 +311,31 @@ console.log("\n[用例 6] installRetryHardening 安装默认 policy");
   // 运行时关闭
   engine.setAutoRetryEnabled(false);
   assert(engine.autoRetryEnabled === false, "setAutoRetryEnabled(false) 生效");
+}
+
+// ---------------------------------------------------------------------------
+// 用例 7：maxAttempts=0 via policy（禁用重试）
+// ---------------------------------------------------------------------------
+console.log("\n[用例 7] maxAttempts=0 via policy → 不重试");
+{
+  let streamCallCount = 0;
+  const mockStreamFn = () => {
+    streamCallCount++;
+    return makeStream(errorStream("any error"));
+  };
+
+  const engine = new DeerLoopEngine({
+    model: FAKE_MODEL, cwd: "/tmp", sessionId: "retry-max0",
+    streamFn: mockStreamFn,
+    retryPolicy: new DefaultRetryPolicy({ maxAttempts: 0, minDelayMs: 10, settleMs: 5 }),
+  });
+  const collected = collectEvents(engine);
+
+  await engine.prompt("hi");
+
+  assert(streamCallCount === 1, "streamFn 只调 1 次（maxAttempts=0 禁用重试）", streamCallCount);
+  const retryStarts = collected.filter((e) => e.type === "auto_retry_start");
+  assert(retryStarts.length === 0, "无 auto_retry_start", retryStarts.length);
 }
 
 // ---------------------------------------------------------------------------
