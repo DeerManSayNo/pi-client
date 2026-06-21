@@ -61,18 +61,6 @@ function userTextContent(msg: AgentMessage | Partial<AgentMessage>): string {
     .join("\n");
 }
 
-function userImageCount(msg: AgentMessage | Partial<AgentMessage>): number {
-  const content = (msg as { content?: unknown }).content;
-  if (!Array.isArray(content)) return 0;
-  return content.filter((block) => (
-    typeof block === "object" && block !== null && (block as { type?: unknown }).type === "image"
-  )).length;
-}
-
-function normalizedUserTextForDedupe(msg: AgentMessage | Partial<AgentMessage>): string {
-  return compressSkillText(stripTurnModeContext(userTextContent(msg))).trim();
-}
-
 function isSkillOnlyUserMessage(msg: AgentMessage | Partial<AgentMessage>, skillName?: string | null): boolean {
   if (msg.role !== "user") return false;
   const userSkillName = (msg as { skill?: SkillReference }).skill?.name;
@@ -268,47 +256,6 @@ function buildUserContent(message: string, images?: AttachedImage[]): UserMessag
 
   const textBlocks: TextContent[] = message.trim() ? [{ type: "text", text: message }] : [];
   return [...textBlocks, ...imageBlocks];
-}
-
-function userContentKey(msg: AgentMessage | Partial<AgentMessage>): string | null {
-  if (msg.role !== "user") return null;
-  const content = (msg as { content?: unknown }).content;
-  if (typeof content === "string") {
-    return JSON.stringify([{ type: "text", text: compressSkillText(stripTurnModeContext(content)).trim() }]);
-  }
-  if (!Array.isArray(content)) return null;
-
-  const parts = content.map((block) => {
-    if (typeof block !== "object" || block === null || !("type" in block)) return block;
-    const blockRecord = block as Record<string, unknown>;
-    if (blockRecord.type === "text" && typeof blockRecord.text === "string") {
-      return { type: "text", text: compressSkillText(stripTurnModeContext(blockRecord.text)).trim() };
-    }
-    if (blockRecord.type === "image") {
-      const source = typeof blockRecord.source === "object" && blockRecord.source !== null
-        ? blockRecord.source as Record<string, unknown>
-        : null;
-      const mediaType = source
-        ? (typeof source.media_type === "string" ? source.media_type
-          : typeof source.mediaType === "string" ? source.mediaType
-          : typeof source.mimeType === "string" ? source.mimeType
-          : typeof source.mime_type === "string" ? source.mime_type
-          : "")
-        : (typeof blockRecord.mimeType === "string" ? blockRecord.mimeType
-          : typeof blockRecord.mediaType === "string" ? blockRecord.mediaType
-          : typeof blockRecord.media_type === "string" ? blockRecord.media_type
-          : "");
-      const data = source
-        ? (typeof source.data === "string" ? source.data : "")
-        : (typeof blockRecord.data === "string" ? blockRecord.data : "");
-      const url = source
-        ? (typeof source.url === "string" ? source.url : "")
-        : (typeof blockRecord.url === "string" ? blockRecord.url : "");
-      return { type: "image", mediaType, data, url };
-    }
-    return block;
-  });
-  return JSON.stringify(parts);
 }
 
 function fileReferenceName(filePath: string): string {
@@ -1072,46 +1019,23 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           if (completedRole === "assistant") receivedAssistantMessageRef.current = true;
           const normalized = normalizeVisibleUserMessage(normalizeCompletedMessage(completed));
           setMessages((prev) => {
-            // We optimistically append the user's prompt in handleSend/handleFollowUp.
-            // DeerHux may later emit a message_end for that same user message; don't append it again.
+            // We optimistically append the user's prompt in handleSend/handleFollowUp/handleBuildPlan,
+            // each carrying a clientMessageId. DeerHux later emits a message_end for
+            // that same user message — dedupe by clientMessageId.
+            //
+            // If the incoming user message has NO clientMessageId, it was triggered
+            // remotely (e.g., WeChat Bot) and the frontend never optimistically
+            // appended it — always display it.
             if (normalized.role === "user") {
               const incomingClientMessageId = normalized.clientMessageId;
               if (
                 incomingClientMessageId
                 && prev.some((m): m is UserMessage => m.role === "user" && m.clientMessageId === incomingClientMessageId)
               ) {
-                return prev;
+                return prev; // locally optimistic-appended, dedupe
               }
-              const completedKey = userContentKey(normalized);
-              const lastUser = [...prev].reverse().find((m) => m.role === "user");
-              if (completedKey && lastUser && userContentKey(lastUser) === completedKey) {
-                return prev;
-              }
-              // Image prompts may be emitted back by the server with a different
-              // image source representation (base64 placeholder vs file URL).
-              // If the visible text and image count match the latest optimistic
-              // user message, treat it as the same local send and skip it.
-              if (
-                lastUser
-                && normalizedUserTextForDedupe(lastUser) === normalizedUserTextForDedupe(normalized)
-                && userImageCount(lastUser) === userImageCount(normalized)
-              ) {
-                return prev;
-              }
-              // Skill-only sends: SDK injects a display prefix (e.g., "使用技能：xxx")
-              // into user content, which doesn't match our optimistic empty-string content.
-              // If both messages share the same skill, treat them as duplicates.
-              if (normalized.skill?.name && lastUser?.skill?.name === normalized.skill.name) {
-                return prev;
-              }
-              // Also handle the case where SDK's message_end/user carries no skill
-              // field but the content is a pure SDK-injected prefix (e.g.,
-              // "Use the selected skill: ccomit-auto-git."). Match against the
-              // skill name on the optimistic user message.
-              const injectedFromSdk = getSdkInjectedSkillName(userTextContent(normalized));
-              if (injectedFromSdk && lastUser && isSkillOnlyUserMessage(lastUser, injectedFromSdk)) {
-                return prev;
-              }
+              // No clientMessageId (remote-triggered) or id unmatched — append for display
+              return [...prev, normalized];
             }
             return [...prev, normalized];
           });
@@ -1432,11 +1356,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const sid = sessionIdRef.current;
     if (!sid) return;
     const sentReferences = references?.length ? references : undefined;
+    const clientMessageId = createClientMessageId();
     setMessages((prev) => [...prev, {
       role: "user",
       content: buildUserContent(message, images),
       ...(sentReferences ? { references: sentReferences } : {}),
       ...(skill ? { skill } : {}),
+      clientMessageId,
       timestamp: Date.now(),
     } as AgentMessage]);
     // Explicitly clear recovery state — a user-initiated follow_up always starts a fresh turn
@@ -1454,6 +1380,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       await sendAgentCommand(sid, {
         type: "follow_up",
         message,
+        clientMessageId,
         ...(sentReferences ? { references: sentReferences } : {}),
         ...(piImages?.length ? { images: piImages } : {}),
         ...(skill ? { skillName: skill.name } : {}),
@@ -1876,15 +1803,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setAgentRunning(true);
     setAgentPhase({ kind: "waiting_model", reason: "initial" });
     dispatch({ type: "start" });
+    const clientMessageId = createClientMessageId();
     setMessages((prev) => [...prev, {
       role: "user",
       content: "请按刚才用户批准的计划开始实施。",
+      clientMessageId,
       timestamp: Date.now(),
     } as AgentMessage]);
     try {
       connectEvents(sid);
       scheduleAwaitingAgentStartGuard(sid, currentTurnId);
-      await sendAgentCommand(sid, { type: "follow_up", message: "请按刚才用户批准的计划开始实施。" });
+      await sendAgentCommand(sid, { type: "follow_up", message: "请按刚才用户批准的计划开始实施。", clientMessageId });
     } catch (e) {
       awaitingAgentStartRef.current = false;
       clearAwaitingAgentStartGuard();
