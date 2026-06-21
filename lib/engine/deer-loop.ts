@@ -128,6 +128,17 @@ const DEFAULT_MAX_TOOL_ROUNDS = 20;
  *  持续 push 且 LLM 始终不再调工具，会无限循环。这里设上限兜底。 */
 const DEFAULT_MAX_FOLLOW_UPS = 10;
 
+/** ★ M5 验收修复：队列容量上限（防内存 DoS）。
+ *
+ *  DeerHux 是本地桌面应用，正常使用不会超 10 条。 50 是宽松上限。
+ *  超限时 enqueueBounded 丢弃最旧条目。 */
+const MAX_QUEUE_LENGTH = 50;
+
+/** ★ M5 验收修复：queue_update 事件中每条文本的最大暴露长度（防大文本进事件流）。
+ *
+ *  超过截断并加 ... 后缀。Drain 时仍用完整 text（只限制事件广播）。 */
+const QUEUE_UPDATE_TEXT_TRUNCATE = 200;
+
 /** ★ M5：队列条目类型（文本 + 可选图片，对齐 Port steer/followUp 的签名）。 */
 interface QueueEntry {
   text: string;
@@ -940,14 +951,11 @@ export class DeerLoopEngine implements AgentEnginePort {
    *
    * 若当前没有运行中的 prompt，直接 resolve（幂等）。
    *
-   * ★ M5 队列行为决策：abort 【不清空】 steering / followUp 队列。
-   *   理由：用户 abort 当前后可能仍想追问（followUp）或重新发插嘴（steer）。
-   *   保留到下次交互：
-   *     - 下次 prompt 的首轮 consumeStream 之前会 drain steering（自动重放）
-   *     - followUp 只在 turn 结束点 drain，所以 abort 后保留的 followUp 会在
-   *       下次 prompt 的 turn 结束时触发（如果用户没主动清）
-   *   如需显式清空，调 clearQueues() 或 clearSteeringQueue()/clearFollowUpQueue()。
-   */
+   * ★ M5 队列行为决策（验收后调整）：abort 清空【steering】但【保留 followUp】。
+   *   理由：steering 是 turn 进行中的「插嘴」，语义绑当前 turn——abort 放弃当前 turn
+   *   时插嘴也应作废（避免下次 prompt 上下文串线 / 旧指令污染）。
+   *   followUp 是 turn 结束后的「追问」，abort 后用户仍可能想继续追问，保留。
+   *   如需全部清空，调 clearQueues()。 */
   async abort(): Promise<void> {
     const controller = this.abortController;
     if (!controller || this._isRunning === false) {
@@ -956,8 +964,12 @@ export class DeerLoopEngine implements AgentEnginePort {
     if (!controller.signal.aborted) {
       controller.abort();
     }
+    // ★ 清空 steering（插嘴绑当前 turn，abort 应作废），保留 followUp。
+    if (this.steeringQueue.length > 0) {
+      this.steeringQueue.splice(0);
+      this.emitQueueUpdate();
+    }
     // 等待 prompt 主循环感知到 abort 并完成收尾。
-    // 用微轮询等待 _isRunning 翻转（M1 简单实现；不引入额外 promise 状态机）。
     await this.waitForIdle();
   }
 
@@ -1221,7 +1233,7 @@ export class DeerLoopEngine implements AgentEnginePort {
   ): Promise<void> {
     // ★ M5 实现：消息入 steeringQueue，emit queue_update。
     //   drain 时机在 prompt 主循环顶部（consumeStream 之前），见 prompt 注释。
-    this.steeringQueue.push({ text, images });
+    this.enqueueBounded(this.steeringQueue, { text, images }, "steering");
     this.emitQueueUpdate();
   }
 
@@ -1233,8 +1245,20 @@ export class DeerLoopEngine implements AgentEnginePort {
     //   drain 时机在 turn 结束点（无工具调用、stopReason=stop），见 prompt 注释。
     //   ★ 注意：rpc-manager 的 follow_up 命令在 turn 活跃时调本方法入队；
     //   turn 已结束时直接调 prompt 开新 turn（不走队列）。两条路径互斥。
-    this.followUpQueue.push({ text, images });
+    this.enqueueBounded(this.followUpQueue, { text, images }, "followUp");
     this.emitQueueUpdate();
+  }
+
+  /** ★ M5 验收修复：有界入队（防内存 DoS）。
+   *
+   *  超过 MAX_QUEUE_LENGTH 时丢弃最旧条目并 console.warn（不 throw，保持 fire-and-forget 语义）。
+   *  DeerHux 是本地桌面应用，DoS 风险低，但加限制是防御性最佳实践。 */
+  private enqueueBounded(queue: QueueEntry[], entry: QueueEntry, name: string): void {
+    queue.push(entry);
+    if (queue.length > MAX_QUEUE_LENGTH) {
+      const dropped = queue.shift();
+      console.warn(`[DeerLoopEngine] ${name} 队列超过上限 ${MAX_QUEUE_LENGTH}，丢弃最旧条目: ${dropped?.text.slice(0, 50)}...`);
+    }
   }
 
   /** ★ M5：设置 steering 队列模式（运行时切换）。
@@ -1300,18 +1324,26 @@ export class DeerLoopEngine implements AgentEnginePort {
       steering: this.steeringQueue.splice(0).map((e) => e.text),
       followUp: this.followUpQueue.splice(0).map((e) => e.text),
     };
-    this.emitQueueUpdate();
+    // ★ 验收修复：只有实际清除内容才 emit（与 clearSteeringQueue/clearFollowUpQueue 一致）
+    if (result.steering.length > 0 || result.followUp.length > 0) {
+      this.emitQueueUpdate();
+    }
     return result;
   }
 
   /** ★ M5：发射 queue_update 事件（每次队列变化时调）。
    *
-   *  只暴露 text（不暴露 images），与 LoopEvent.queue_update 契约一致。 */
+   *  只暴露 text（不暴露 images），与 LoopEvent.queue_update 契约一致。
+   *  ★ 验收修复：每条 text 截断到 QUEUE_UPDATE_TEXT_TRUNCATE 字符（防大文本进事件流）。 */
   private emitQueueUpdate(): void {
+    const truncate = (s: string): string =>
+      s.length > QUEUE_UPDATE_TEXT_TRUNCATE
+        ? s.slice(0, QUEUE_UPDATE_TEXT_TRUNCATE) + "..."
+        : s;
     this.emit({
       type: "queue_update",
-      steering: this.steeringQueue.map((e) => e.text),
-      followUp: this.followUpQueue.map((e) => e.text),
+      steering: this.steeringQueue.map((e) => truncate(e.text)),
+      followUp: this.followUpQueue.map((e) => truncate(e.text)),
     });
   }
 

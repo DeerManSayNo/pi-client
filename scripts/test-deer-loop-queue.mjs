@@ -450,9 +450,9 @@ console.log("\n[用例 8] maxFollowUps 上限防死循环（one-at-a-time）");
 }
 
 // ---------------------------------------------------------------------------
-// 用例 9：abort 不清空队列（保留到下次交互）
+// 用例 9：abort 清 steering 保留 followUp（验收后调整的设计）
 // ---------------------------------------------------------------------------
-console.log("\n[用例 9] abort 不清空队列");
+console.log("\n[用例 9] abort 清 steering 保留 followUp");
 {
   const mockSlow = makeMockTool("slow");
   const slowTool = {
@@ -475,13 +475,9 @@ console.log("\n[用例 9] abort 不清空队列");
     streamFn: () => makeStream(toolRoundStream(toolCall("c1", "slow", {}))),
   });
 
-  // ★ 关键：steer/followUp 要在【第一轮 drain 之后】注入（否则第一轮顶部 drain 会清空）。
-  //   工具执行期间（第一轮 consumeStream 已完成、第二轮 drain 未到）正好是窗口。
   const p = engine.prompt("hi");
-  // 等待 agent_start + 第一轮 consumeStream + 进入工具执行（500ms delay）
   await new Promise((r) => setTimeout(r, 100));
-  // 工具执行期间 steer + followUp（此时队列不会被 drain，因为还在工具执行中）
-  await engine.steer("插嘴保留");
+  await engine.steer("插嘴作废");
   await engine.followUp("追问保留");
   assert(engine.steeringQueueLength === 1, "工具执行期间 steer 入队后 steeringQueueLength=1");
   assert(engine.followUpQueueLength === 1, "followUp 入队后 followUpQueueLength=1");
@@ -489,10 +485,10 @@ console.log("\n[用例 9] abort 不清空队列");
   await engine.abort();
   await p;
 
-  // ★ abort 后队列保留（abort 不调 clearQueues）
-  assert(engine.steeringQueueLength === 1, "abort 后 steering 仍 1 条", engine.steeringQueueLength);
-  assert(engine.followUpQueueLength === 1, "abort 后 followUp 仍 1 条", engine.followUpQueueLength);
-  assert(engine.hasQueuedMessages() === true, "abort 后 hasQueuedMessages=true");
+  // ★ 验收修复：abort 清 steering（插嘴绑当前 turn，abort 应作废），保留 followUp（追问是后续的）
+  assert(engine.steeringQueueLength === 0, "abort 后 steering 清空（插嘴绑当前 turn）", engine.steeringQueueLength);
+  assert(engine.followUpQueueLength === 1, "abort 后 followUp 保留（追问是后续的）", engine.followUpQueueLength);
+  assert(engine.hasQueuedMessages() === true, "abort 后仍有 followUp 排队");
 }
 
 // ---------------------------------------------------------------------------
@@ -613,4 +609,4 @@ if (failures > 0) {
   console.error("\n❌ DeerLoopEngine 队列测试失败：%d 项未通过", failures);
   process.exit(1);
 }
-console.log("\n✅ DeerLoopEngine 队列：全部断言通过（steer/followUp 入队 + drain all/one + followUp 触发新 turn + maxFollowUps + abort 保留 + clear + dispose）");
+console.log("\n✅ DeerLoopEngine 队列：全部断言通过（steer/followUp 入队 + drain all/one + followUp 触发新 turn + maxFollowUps + abort 清steering保followUp + clear + dispose）");
