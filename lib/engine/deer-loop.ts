@@ -259,7 +259,7 @@ export class DeerLoopEngine implements AgentEnginePort {
   private _thinkingLevel: ThinkingLevel | undefined;
 
   /** 当前模型。 */
-  private readonly _model: AnyModel;
+  private _model: AnyModel;
 
   /** stream 函数（默认 streamSimple，可注入）。 */
   private readonly _streamFn: StreamFn;
@@ -1232,8 +1232,13 @@ export class DeerLoopEngine implements AgentEnginePort {
   // Port其余方法：M2-M6 的能力，统一 throw not-implemented
   // -------------------------------------------------------------------------
 
-  async setModel(_model: AnyModel): Promise<void> {
-    throw notImplemented("setModel", "M2 (runtime model switch)");
+  async setModel(model: AnyModel): Promise<void> {
+    if (this._isRunning) {
+      throw new Error("DeerLoopEngine.setModel: 无法切换模型——prompt 正在运行");
+    }
+    // rpc-manager 通常传入 ModelRegistry.find() 返回的完整 Model；若只传 {id, provider}，
+    // 保留当前 model 的 api/contextWindow 等 provider 元数据，只覆盖选择项。
+    this._model = { ...this._model, ...model } as AnyModel;
   }
 
   async navigateTree(
@@ -1253,8 +1258,14 @@ export class DeerLoopEngine implements AgentEnginePort {
     return `deer-loop-custom-${Date.now()}-${customType}`;
   }
 
-  setThinkingLevel(_level: string): void {
-    throw notImplemented("setThinkingLevel", "M2 (runtime thinking switch)");
+  setThinkingLevel(level: string): void {
+    if (level === "off" || !level) {
+      this._thinkingLevel = undefined;
+      this._agentState.thinkingLevel = "off";
+      return;
+    }
+    this._thinkingLevel = level as ThinkingLevel;
+    this._agentState.thinkingLevel = level;
   }
 
   /**

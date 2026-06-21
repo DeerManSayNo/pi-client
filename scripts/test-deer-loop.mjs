@@ -423,13 +423,22 @@ console.log("\n[用例 6] 只读属性 / M2 工具能力 / M3-M6 方法 throw");
       threwCount++;
     }
   };
-  await expectThrow(() => engine.setModel(FAKE_MODEL), "setModel");
+  // M6+ 默认切 DeerLoopEngine 后，setModel / setThinkingLevel 已进入线上路径，必须可用。
+  const switchedModel = { ...FAKE_MODEL, id: "switched-model", provider: "anthropic" };
+  await engine.setModel(switchedModel);
+  assert(engine.model.id === "switched-model", "setModel 写入 model.id", engine.model.id);
+  engine.setThinkingLevel("high");
+  assert(engine.thinkingLevel === "high", "setThinkingLevel 写入 thinkingLevel", engine.thinkingLevel);
+  assert(engine.agent.state.thinkingLevel === "high", "setThinkingLevel 同步 agent.state", engine.agent.state.thinkingLevel);
+  engine.setThinkingLevel("off");
+  assert(engine.thinkingLevel === undefined, "setThinkingLevel off 清空 reasoning", engine.thinkingLevel);
+  assert(engine.agent.state.thinkingLevel === "off", "setThinkingLevel off 同步 agent.state", engine.agent.state.thinkingLevel);
+
   await expectThrow(() => engine.navigateTree("x"), "navigateTree");
-  await expectThrow(() => engine.setThinkingLevel("high"), "setThinkingLevel");
   // ★ M6 后 compact 已实现（不再 throw），验证 isCompacting 变化
   const compactResult = await engine.compact();
   assert(typeof compactResult.summary === "string", "compact 返回 CompactionResult（M6 已实现）");
-  assert(threwCount === 3, "M3-M6 共 3 个方法 throw（compact 已 M6 实现，steer/followUp 已 M5 实现）", threwCount);
+  assert(threwCount === 1, "仅 navigateTree 仍 throw（setModel/setThinkingLevel/compact 均已实现）", threwCount);
   // ★ M5 后 steer/followUp 入队 + 清空
   await engine.steer("steer-msg");
   await engine.followUp("followup-msg");
