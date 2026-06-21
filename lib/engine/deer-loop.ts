@@ -1701,12 +1701,12 @@ function defaultStreamFn(
   context: Context,
   options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
-  // 动态 require 避免 top-level 副作用；pi-ai 的 streamSimple 会注册 provider。
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { streamSimple } = require("@earendil-works/pi-ai") as {
-    streamSimple: StreamFn;
-  };
-  return streamSimple(model, context, options);
+  // pi-ai 是 ESM-only，不能用 require()；这里用动态 import 包一层 async generator，
+  // 既保持 StreamFn 的同步返回契约（返回 AsyncIterable），也避免 top-level provider 注册副作用。
+  return (async function* streamFromPiAi() {
+    const { streamSimple } = await import("@earendil-works/pi-ai");
+    yield* streamSimple(model, context, options);
+  })() as unknown as AssistantMessageEventStream;
 }
 
 // ===========================================================================
