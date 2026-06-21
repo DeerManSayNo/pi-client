@@ -1569,6 +1569,10 @@ async function startDeerLoopSession(
     getApiKey: (provider) => authStorage.getApiKey(provider),
   });
 
+  // ★ M4：安装默认重试策略（消灭 H2/H3/H4）。与 pi 路径的 adapter.installRetryHardening()
+  //   对齐——自研 loop 走公开 RetryPolicy 接口，pi 路径走私有字段 hack。
+  engine.installRetryHardening();
+
   // 用 AgentSessionWrapper 包装（无 mcp / roleId=null / agentMode=null）。
   const wrapper = new AgentSessionWrapper(engine, null, null, null);
   wrapper.start();

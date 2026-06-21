@@ -42,6 +42,11 @@ import { ToolExecutor, toPiAiTool, type ToolExecOutput } from "./tool-executor.t
 import {
   createMinimalExtensionContext,
 } from "./extension-context.ts";
+import {
+  DefaultRetryPolicy,
+  getAssistantContentLength,
+  type RetryPolicy,
+} from "./retry-policy.ts";
 
 /**
  * 不限定具体 Api 的 Model 类型别名。
@@ -92,6 +97,8 @@ export interface DeerLoopOptions {
   toolExecutionModes?: Record<string, "sequential" | "parallel">;
   /** ★ 工具调用循环最大轮数（防 LLM 死循环；默认 20）。 */
   maxToolRounds?: number;
+  /** ★ M4：注入自定义重试策略（测试用极小 delay/settle；不传则 installRetryHardening 时建 DefaultRetryPolicy）。 */
+  retryPolicy?: RetryPolicy;
 }
 
 /** 标记当前处于未实现的里程碑路径抛出的错误。 */
@@ -200,6 +207,16 @@ export class DeerLoopEngine implements AgentEnginePort {
   /** ★ M2：工具调用循环最大轮数（防 LLM 死循环）。 */
   private readonly _maxToolRounds: number;
 
+  /** ★ M4：当前重试策略（null = 未安装，不重试）。
+   *
+   *  installRetryHardening() 安装 DefaultRetryPolicy（封装 H2/H3/H4）。
+   *  自研 loop 不再依赖 pi 的 `_isRetryableError` / `_prepareRetry` / `getRetrySettings`
+   *  三处私有 hack——重试判定与退避全部在 RetryPolicy 里，由 consumeStreamWithRetry 驱动。 */
+  private _retryPolicy: RetryPolicy | null = null;
+
+  /** ★ M4：是否启用自动重试。installRetryHardening 后默认 true；setAutoRetryEnabled 可运行时关闭。 */
+  private _autoRetryEnabled = false;
+
   /**
    * agent.state 的最小代理对象。
    *
@@ -235,6 +252,12 @@ export class DeerLoopEngine implements AgentEnginePort {
     this.registry = new ToolRegistry();
     this.toolExecutor = new ToolExecutor(this.registry);
     this._maxToolRounds = options.maxToolRounds ?? DEFAULT_MAX_TOOL_ROUNDS;
+    // M4：可选注入自定义重试策略（测试用极小 delay/settle）。未传时为 null，
+    // 等 installRetryHardening() 安装 DefaultRetryPolicy（生产路径）。
+    if (options.retryPolicy) {
+      this._retryPolicy = options.retryPolicy;
+      this._autoRetryEnabled = true;
+    }
     if (options.tools && options.tools.length > 0) {
       this.registry.registerAll(options.tools);
       // 未传 activeToolNames 时激活全部已注册工具（方便灰度：传工具即启用）。
@@ -328,8 +351,10 @@ export class DeerLoopEngine implements AgentEnginePort {
             : {}),
         };
 
-        // 消费 stream。
-        const consumed = await this.consumeStream(context);
+        // ★ M4：消费 stream（带重试）。失败时 consumeStreamWithRetry 内部判定是否重试，
+        //   并发射 auto_retry_start/end + agent_end{willRetry:true} 事件。
+        //   返回的 consumed 是【最终结果】（成功 / abort / 不可重试错误 / 全部重试失败）。
+        const consumed = await this.consumeStreamWithRetry(context);
 
         // abort / error：收尾后跳出循环。
         if (consumed.aborted || consumed.errorMessage) {
@@ -483,7 +508,10 @@ export class DeerLoopEngine implements AgentEnginePort {
           } else {
             errorMessage = ev.error.errorMessage ?? ev.reason;
           }
-          finalMessage = ev.error;
+          // ★ 优先保留已生成的 partial 内容（H3 判定需要 contentLength）。
+          //   ev.error 通常是空 content 的错误壳；若 lastPartial 有内容，用它
+          //   并注入 errorMessage，避免丢弃 LLM 已产出的有效内容。
+          finalMessage = lastPartial ?? ev.error;
           stopReason = ev.reason;
           break;
         }
@@ -529,6 +557,168 @@ export class DeerLoopEngine implements AgentEnginePort {
     if (!consumed.started) {
       this.emit({ type: "message_start", message: consumed.endMessage });
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // ★ M4：重试循环（封装 H2/H3/H4）
+  // -------------------------------------------------------------------------
+
+  /**
+   * 带重试的 stream 消费（M4 核心）。
+   *
+   * 在 {@link consumeStream} 外层包一个重试循环。失败时调 {@link RetryPolicy.isRetryable}
+   * 判定是否重试，并发射 `auto_retry_start` / `auto_retry_end` 事件。
+   *
+   * 事件顺序契约（设计文档 §7.1 + wrapper rpc-manager.ts:666-688）：
+   *
+   * 首轮失败 + 可重试：
+   * ```
+   *   message_start → message_update*N → message_end (失败)
+   *   → agent_end{willRetry:true}
+   *   → auto_retry_start{attempt, delayMs, errorMessage}
+   *   → (sleep settleMs + delayMs，可被 abort 打断)
+   *   → message_start → ... (重试)
+   * ```
+   *
+   * 重试后成功：
+   * ```
+   *   → message_end (成功) → auto_retry_end{success:true, attempt}
+   * ```
+   *
+   * 全部重试失败 / 不可重试：
+   * ```
+   *   → auto_retry_end{success:false, attempt, finalError}
+   * ```
+   *
+   * abort 打断 sleep：
+   * ```
+   *   → auto_retry_end{success:false, attempt, finalError:"aborted"}
+   * ```
+   *
+   * ★ 重试与工具循环的交互：本方法只管 consumeStream 的重试，与外层工具循环解耦。
+   *   如果失败发生在工具执行后、第二轮 consumeStream——此时 transcript 已含 toolResult，
+   *   重试第二轮会带上工具结果，这是合理的。工具执行本身的错误不重试（M2 错误隔离已做）。
+   *
+   * ★ transcript 处理：失败轮次的 assistant message 【不】入 transcript（重试是"假装上一轮
+   *   没发生"，否则 LLM 会看到自己的失败消息）。只有最终结果由调用方 push。
+   *
+   * @returns 最终的 ConsumedStream（成功 / abort / 不可重试错误 / 全部重试失败）。
+   *          失败轮次的 message 事件已在本方法内 emit；调用方只需处理最终结果。
+   */
+  private async consumeStreamWithRetry(context: Context): Promise<ConsumedStream> {
+    let retryCount = 0; // 已完成的重试次数（0 = 初始尝试，未重试过）
+
+    while (true) {
+      const consumed = await this.consumeStream(context);
+
+      // 成功或 abort：不重试。如果之前重试过且现在成功，补发 auto_retry_end{success:true}。
+      if (!consumed.errorMessage || consumed.aborted) {
+        if (retryCount > 0 && !consumed.aborted) {
+          this.emit({
+            type: "auto_retry_end",
+            success: true,
+            attempt: retryCount,
+          });
+        }
+        return consumed;
+      }
+
+      // 错误：检查是否可重试
+      const policy = this._retryPolicy;
+      if (!policy || !this._autoRetryEnabled) {
+        return consumed; // 未安装策略或运行时关闭 → 不重试
+      }
+
+      const nextAttempt = retryCount + 1; // 1-indexed：第一次重试 attempt=1
+      const contentLength = getAssistantContentLength(consumed.endMessage);
+      const decision = policy.isRetryable({
+        attempt: nextAttempt,
+        errorMessage: consumed.errorMessage,
+        partialMessage: consumed.endMessage,
+        contentLength,
+      });
+
+      // 不可重试或超过 maxAttempts
+      if (!decision.retry || nextAttempt > policy.maxAttempts) {
+        if (retryCount > 0) {
+          // 之前重试过但最终失败：补发 auto_retry_end{success:false}
+          this.emit({
+            type: "auto_retry_end",
+            success: false,
+            attempt: retryCount,
+            finalError: consumed.errorMessage,
+          });
+        }
+        return consumed;
+      }
+
+      // ★ 可重试：发射失败轮次的收尾事件
+      // message_start（若 consumeStream 未发）+ message_end（失败轮次）
+      this.emitMessageStartIfNeeded(consumed);
+      this.emit({ type: "message_end", message: consumed.endMessage });
+
+      // agent_end{willRetry:true}：告诉前端/ wrapper 本轮失败但会重试（保持 _isRunning=true）
+      this.emit({
+        type: "agent_end",
+        messages: [...this._messages],
+        willRetry: true,
+      });
+
+      // auto_retry_start：通知前端开始重试
+      this.emit({
+        type: "auto_retry_start",
+        attempt: nextAttempt,
+        maxAttempts: policy.maxAttempts,
+        delayMs: decision.delayMs,
+        errorMessage: consumed.errorMessage,
+      });
+
+      // ★ H4（settleMs）+ H2（delayMs）sleep。可被 abort 打断。
+      await this.sleepInterruptible(policy.getSettleMs() + decision.delayMs);
+
+      // abort 打断 sleep：立即停止重试
+      if (this.abortController?.signal.aborted) {
+        this.emit({
+          type: "auto_retry_end",
+          success: false,
+          attempt: nextAttempt,
+          finalError: "aborted",
+        });
+        return { ...consumed, aborted: true, errorMessage: undefined };
+      }
+
+      retryCount = nextAttempt;
+      // 继续循环 → 重新 consumeStream（重试）
+    }
+  }
+
+  /**
+   * 可被 abort 打断的 sleep（M4 关键：abort 优先于 retry）。
+   *
+   * - 若 abortController 已 aborted，立即 resolve。
+   * - 否则设一个 timer，同时监听 abort 信号；任一触发即 resolve。
+   *
+   * 这保证重试 sleep 期间用户点"停止"能立即生效（不等完 delayMs）。
+   */
+  private async sleepInterruptible(ms: number): Promise<void> {
+    const controller = this.abortController;
+    if (!controller) {
+      await new Promise<void>((resolve) => setTimeout(resolve, ms));
+      return;
+    }
+    const signal = controller.signal;
+    if (signal.aborted) return;
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, ms);
+      signal.addEventListener(
+        "abort",
+        () => {
+          clearTimeout(timer);
+          resolve();
+        },
+        { once: true },
+      );
+    });
   }
 
   /**
@@ -665,8 +855,9 @@ export class DeerLoopEngine implements AgentEnginePort {
     return false;
   }
 
+  /** ★ M4：返回真实重试状态（installRetryHardening 后为 true）。 */
   get autoRetryEnabled(): boolean {
-    return false;
+    return this._autoRetryEnabled;
   }
 
   get model(): AnyModel {
@@ -782,11 +973,20 @@ export class DeerLoopEngine implements AgentEnginePort {
   }
 
   /**
-   * 安装自动重试加固（Port hack 方法，消灭 H2/H3/H4）。
-   * M1 无重试：空实现。（M4 实现真正的重试策略）
+   * 安装自动重试加固（Port hack 方法，消灭 H2/H3/H4）。★ M4 真正实现。
+   *
+   * pi 路径（PiEngineAdapter）里这是三处私有字段 hack（getRetrySettings /
+   * _isRetryableError / _prepareRetry）。自研 loop 不需要 hack——直接安装
+   * {@link DefaultRetryPolicy}，重试判定与退避全部走公开接口。
+   *
+   * 安装后 `_autoRetryEnabled` 默认 true（与 pi 行为一致）。可用
+   * {@link setAutoRetryEnabled} 运行时关闭。
+   *
+   * 重复调用幂等：重新安装会覆盖旧策略（便于运行时换策略）。
    */
   installRetryHardening(): void {
-    // M4 no-op（无重试）。
+    this._retryPolicy = new DefaultRetryPolicy();
+    this._autoRetryEnabled = true;
   }
 
   /**
@@ -849,8 +1049,9 @@ export class DeerLoopEngine implements AgentEnginePort {
     // M1 不支持压缩；no-op（避免命令路径抛错，但实际不生效）。
   }
 
-  setAutoRetryEnabled(_enabled: boolean): void {
-    // M1 不支持重试；no-op。
+  /** ★ M4：运行时开关自动重试（set_auto_retry 命令用）。 */
+  setAutoRetryEnabled(enabled: boolean): void {
+    this._autoRetryEnabled = enabled;
   }
 
   async steer(
