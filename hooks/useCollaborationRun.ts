@@ -242,7 +242,7 @@ export function useCollaborationRun(snapshot: CollaborationRunSnapshot | null) {
 
   useEffect(() => {
     if (!runId || !shouldConnect) return;
-    const source = new EventSource(`/api/subagent-tasks/${encodeURIComponent(runId)}/events`);
+    const source = new EventSource(`/api/agent-runs/${encodeURIComponent(runId)}/events`);
     source.onmessage = (message) => {
       try {
         const event = JSON.parse(message.data) as CollaborationRunEvent;
@@ -259,13 +259,13 @@ export function useCollaborationRun(snapshot: CollaborationRunSnapshot | null) {
 
   const abort = useCallback(async () => {
     if (!runId) return;
-    const response = await fetch(`/api/subagent-tasks/${encodeURIComponent(runId)}/abort`, { method: "POST" });
+    const response = await fetch(`/api/agent-runs/${encodeURIComponent(runId)}/abort`, { method: "POST" });
     if (!response.ok) throw new Error(await response.text());
   }, [runId]);
 
   const applyPatches = useCallback(async (workerNames: string[], files?: string[]): Promise<ApplyCollaborationPatchesResult> => {
     if (!runId) throw new Error("Run id is missing");
-    const response = await fetch(`/api/subagent-tasks/${encodeURIComponent(runId)}/apply`, {
+    const response = await fetch(`/api/agent-runs/${encodeURIComponent(runId)}/apply`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ workerNames, ...(files?.length ? { files } : {}) }),
@@ -277,7 +277,7 @@ export function useCollaborationRun(snapshot: CollaborationRunSnapshot | null) {
 
   const continueWorker = useCallback(async (workerId: string, prompt: string) => {
     if (!runId) throw new Error("Run id is missing");
-    const response = await fetch(`/api/subagent-tasks/${encodeURIComponent(runId)}/workers/${encodeURIComponent(workerId)}/resume`, {
+    const response = await fetch(`/api/agent-runs/${encodeURIComponent(runId)}/workers/${encodeURIComponent(workerId)}/resume`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ prompt }),
