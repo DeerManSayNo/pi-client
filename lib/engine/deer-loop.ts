@@ -166,7 +166,11 @@ export class DeerLoopEngine implements AgentEnginePort {
   /** 会话 transcript（pi-ai Message[]，= AgentMessage[]）。 */
   private readonly _messages: AgentMessage[] = [];
 
-  /** 持久系统提示词（M3 会完善 turn_context strip，M1 简单存取）。 */
+  /** 持久系统提示词（loop 自持，天然免疫 H1——见 {@link DeerLoopEngine#setSystemPromptPersistent}）。
+   *
+   *  M3 已验证（scripts/test-system-prompt-persistence.mjs）：每轮 consumeStream
+   *  都读这里的值构建 context，且不被任何外部逻辑重置（pi 的 _baseSystemPrompt
+   *  私有字段覆盖 bug 在自研 loop 路径上不存在）。 */
   private _baseSystemPrompt: string;
 
   /** 当前思考级别（pi-ai ThinkingLevel | undefined）。 */
@@ -310,7 +314,11 @@ export class DeerLoopEngine implements AgentEnginePort {
       let toolRounds = 0;
       // ★ 工具调用循环：每轮 consume stream → 判断 toolUse → 执行工具 → 回填 → 继续。
       while (true) {
-        // 构造 pi-ai Context（messages=transcript；tools 来自 registry 激活集）。
+        // ★ M3 持久性关键：Context 在 while 循环【内】每轮重新构造，
+        //   systemPrompt 直接读 this._baseSystemPrompt（不缓存到循环外）。
+        //   因此 setSystemPromptPersistent 的修改从下一轮 consumeStream 立即生效，
+        //   且连发 N 个 prompt 值恒定不变（免疫 H1）。
+        //   见 scripts/test-system-prompt-persistence.mjs 用例 1/2。
         const activeTools = this.registry.getActive();
         const context: Context = {
           systemPrompt: this._baseSystemPrompt || undefined,
@@ -722,8 +730,22 @@ export class DeerLoopEngine implements AgentEnginePort {
   /**
    * 设置持久 system prompt（Port hack 方法，消灭 H1）。
    *
-   * M1 简单实现：直接写 _baseSystemPrompt + agentState.systemPrompt。
-   * M3 会完善（stripTurnContextBlock / withTemporarySystemPrompt 恢复）。
+   * ★ M3 验证结论（scripts/test-system-prompt-persistence.mjs +
+   *   scripts/test-turn-context-block.mjs 全过）：
+   *   1. 持久性：连发 N 个 prompt，每轮 consumeStream 构建的
+   *      context.systemPrompt 都等于这里写入的值（不被重置）——因为
+   *      DeerLoopEngine 自持 _baseSystemPrompt，没有 pi 那种「外部
+   *      _rebuildSystemPrompt 把 state.systemPrompt 覆盖回私有字段」的问题。
+   *   2. agent.state 同步：_agentState.systemPrompt 与 _baseSystemPrompt
+   *      双写，wrapper 读 this.inner.agent.state.systemPrompt 永远拿到最新值。
+   *   3. turn_context 责任分工：本方法是【纯透传】——set 什么，context 就用什么。
+   *      它【不】自动 stripTurnContextBlock（DeerLoopEngine 不知道 turn_context
+   *      是什么）。strip 是 wrapper 的职责（rpc-manager.ts 的 stripTurnContextBlock
+   *      + applyRolePrompt + withTemporarySystemPrompt.finally）。这样保持语义
+   *      单一：wrapper 全权决定 prompt 内容，loop 只负责「值精确透传 + 持久」。
+   *      若这里加防御性 strip，会与 wrapper 的 strip 重叠且改变 set 的语义（set X
+   *      不一定得 X），故【刻意不加】。
+   *
    * 不能 throw——wrapper 构造时 applyRolePrompt 会立即调用。
    */
   setSystemPromptPersistent(prompt: string): void {

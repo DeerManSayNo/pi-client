@@ -719,13 +719,27 @@ export interface SessionStore {
 - 迁移 `withTemporarySystemPrompt`（`rpc-manager.ts:599`）： DeerLoopEngine 下直接 `setSystemPrompt` + `finally setSystemPrompt(restore)`。
 
 **验收标准**：
-- [ ] 单测：`system-prompt-persistence.test.ts` —— setSystemPrompt 后连发 3 个 prompt，每个 turn 的 context.systemPrompt 都是设置的值（不被重置）。
-- [ ] 单测：`turn-context-block.test.ts` —— withTemporarySystemPrompt 注入 `<turn_context>` 块，turn 结束后恢复，无泄漏。
-- [ ] 灰度验证角色切换：切角色 → 发消息 → 系统提示词含角色段落。
+- [x] 单测：`scripts/test-system-prompt-persistence.mjs` —— setSystemPromptPersistent 后连发 3（实际 5）个 prompt，每个 turn 的 context.systemPrompt 都是设置的值（不被重置）。
+- [x] 单测：`scripts/test-turn-context-block.mjs` —— withTemporarySystemPrompt 注入 `<turn_context>` 块，turn 结束后恢复，无泄漏。
+- [ ] 灰度验证角色切换：切角色 → 发消息 → 系统提示词含角色段落（待默认 on 后端到端验）。
+- [x] `npx tsc --noEmit` 通过 / `npm run lint` 通过（0 errors）。
+- [x] M1+M2 回归全过（test-deer-loop / test-deer-loop-tools / test-tool-registry / test-tool-executor / test-sdk-guard）。
+
+**★ M3 完成注记（实际落地与原计划差异）**：
+
+1. **M1 已做完 M3 的活**：M1 的 `DeerLoopEngine.setSystemPromptPersistent`（`lib/engine/deer-loop.ts:729`）已双写 `_baseSystemPrompt` + `_agentState.systemPrompt`；`consumeStream` 的 while 循环**每轮在循环内**重新构造 context（`systemPrompt: this._baseSystemPrompt || undefined`，`:316`），不缓存到循环外。所以「setSystemPromptPersistent 后连发 N prompt 值恒定」是天然成立的——**DeerLoopEngine 自持 `_baseSystemPrompt`，没有 pi 那种「外部 `_rebuildSystemPrompt` 把 state.systemPrompt 覆盖回私有字段」的 H1 bug**。M3 仅验证 + 补注释，无逻辑改动。
+
+2. **不新增 Port 方法**：wrapper 读 system prompt 全部走 `this.inner.agent.state?.systemPrompt`（rpc-manager.ts 17 处），DeerLoopEngine 的 `get agent()` 返回的 `_agentState` 已与 `_baseSystemPrompt` 双写同步。加 `Port.getSystemPrompt()` 是接口膨胀、无收益，**刻意不加**。
+
+3. **turn_context strip 责任分工（关键决策）**：`setSystemPromptPersistent` 是**纯透传**（set 什么，context 就用什么），**不**自动 `stripTurnContextBlock`。strip 是 wrapper 的职责（rpc-manager.ts 的 `stripTurnContextBlock` + `applyRolePrompt` + `withTemporarySystemPrompt.finally`）。理由：若 loop 也 strip，会与 wrapper 的 strip 重叠，且改变 set 的语义（set X 不一定得 X），破坏可预测性。DeerLoopEngine 不知道 turn_context 是什么，只负责「值精确透传 + 持久」。见 `scripts/test-turn-context-block.mjs` 用例 4。
+
+4. **rpc-manager.ts 零改动**：原计划「`setEffectiveSystemPrompt` 内部 `instanceof DeerLoopEngine` 分发」**不需要**——M0 的 Port 多态已让 `inner.setSystemPromptPersistent()` 自动分发到 DeerLoopEngine（公开 state 写）或 PiEngineAdapter（私有字段 hack）。`applyRolePrompt` / `withTemporarySystemPrompt` 走 Port 接口即可，无需 instanceof。这是 M0 的红利。
+
+5. **PiEngineAdapter 零改动**：H1 hack（`pi-engine-adapter.ts:221-229`）保留，pi 路径稳定。feature flag 默认 off，生产行为不变。
 
 **风险**：低（自研 loop 自己管状态，无外部覆盖）。
 **回退**：flag off。
-**估时**：1 人周。
+**估时**：1 人周（实际：验证 + 测试 + 注释，远小于 1pw）。
 
 ### M4：重试策略公开 API（消灭 H2/H3/H4）
 
