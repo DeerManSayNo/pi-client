@@ -8,6 +8,7 @@ import { PiEngineAdapter } from "./engine/pi-engine-adapter";
 import type { AgentEnginePort } from "./engine/port";
 import { detectPiPrivateFields } from "./engine/sdk-guard";
 import { createDeerLoop } from "./engine/factory";
+import type { AnyToolDefinition } from "./engine/tool-registry";
 import { isDeerLoopEnabled } from "./engine/feature-flag";
 import { getLiveIslandClient } from "./live-island-client";
 import { applyRolePromptToSystemPrompt } from "./roles";
@@ -1354,12 +1355,12 @@ export async function startRpcSession(
   const inflight = locks.get(sessionId);
   if (inflight) return inflight;
 
-  // ★ M1 feature flag：DEERHUX_LOOP_ENGINE=deer 时走自研 DeerLoopEngine。
-  // 仅在「无工具的纯文本对话」路径灰度（toolNames 为空或未传），保证不抢现有工作流。
-  // 其余情况（带工具/MCP/角色）继续走 pi 路径，避免触碰 M2-M5 未完成的能‌力。
-  if (isDeerLoopEnabled() && (toolNames === undefined || toolNames.length === 0)) {
+  // ★ M6+ 默认走 DeerLoopEngine。DEERHUX_LOOP_ENGINE=pi 时回退到 pi 路径（紧急回退用）。
+  if (isDeerLoopEnabled()) {
     const deerStarting = (async () => {
-      const { session, realSessionId } = await startDeerLoopSession(sessionId, cwd);
+      const { session, realSessionId } = await startDeerLoopSession(
+        sessionId, sessionFile, cwd, toolNames, roleId, agentMode,
+      );
       return { session, realSessionId };
     })().finally(() => locks.delete(sessionId));
     locks.set(sessionId, deerStarting);
@@ -1517,27 +1518,31 @@ export async function startRpcSession(
 }
 
 // ===========================================================================
-// ★ M1：自研 DeerLoopEngine 灯度创建路径
+// ★ M6+：自研 DeerLoopEngine 创建路径（默认，不再灰度）
 //
-// DEERHUX_LOOP_ENGINE=deer 且无工具时走这里。完全绕开 pi 的 createAgentSession：
-// 不加载 MCP、不预加载内置工具、不走 pi AgentSession 构造。只创建一个最轻量的
-// DeerLoopEngine（复用 pi-ai 的 streamSimple），用 AgentSessionWrapper 包装后注册。
-// 这样现有 /api/agent/new + /api/agent/[id]/events 端点零改动，发一条纯文本消息
-// 即可验证 Port 契约与流式事件。
+// 取代 pi 的 createAgentSession：用 DeerLoopEngine + ToolRegistry + ToolExecutor 管理
+// 整个 agent loop，pi-ai 只做 LLM 传输。注册与 pi 路径等价的真实工具集（code_search /
+// codegraph / mcp / spawn_subagent），支持角色/模式 prompt 注入，走 SessionManager 做
+// jsonl 持久化。
 // ===========================================================================
 
 /**
- * 创建 DeerLoopEngine 并包装成 AgentSessionWrapper，注册到 registry。
+ * 创建 DeerLoopEngine，注册真实工具，包装成 AgentSessionWrapper，注册到 registry。
  *
- * 灯度限制（M1）：
- * - 不支持工具（调用方传入 toolNames 时上游已拦截）。
- * - 不支持 MCP / spawn_subagent / code_search / codegraph。
- * - 不支持角色 prompt 注入（roleId 透传为 null，wrapper 走默认路径）。
- * - model 从 ModelRegistry 选取第一个可用（或环境变量 DEERHUX_LOOP_MODEL=provider/modelId）。
+ * @param sessionId 前端请求的会话 id
+ * @param sessionFile 已有 jsonl 文件路径（fork/navigateTree/恢复时传入）
+ * @param cwd 工作目录
+ * @param toolNames 激活工具名（undefined=全部可用；[]=纯文本；[...]=指定集）
+ * @param roleId 角色 id（null=无角色；undefined=由前端透传决定）
+ * @param agentMode AgentMode（null=无模式；undefined=默认）
  */
 async function startDeerLoopSession(
   sessionId: string,
+  sessionFile: string,
   cwd: string,
+  toolNames?: string[],
+  roleId?: string | null,
+  agentMode?: AgentMode | null,
 ): Promise<{ session: AgentSessionWrapper; realSessionId: string }> {
   const { AuthStorage, ModelRegistry } = await import("@earendil-works/pi-coding-agent");
   const authStorage = AuthStorage.create();
@@ -1560,25 +1565,130 @@ async function startDeerLoopSession(
     );
   }
 
-  // 构造 DeerLoopEngine。getApiKey 每次调 LLM 前从 AuthStorage 解析（复用 OAuth刷新）。
+  // ─── 工具准备（与 pi 路径对齐：code_search + codegraph + subagent + mcp）───
+  const allCodingToolNames = ["read", "bash", "edit", "write", "grep", "find", "ls"];
+  const hasCodeIndex = indexExists(cwd);
+  const codeSearchTool = hasCodeIndex ? defineTool({
+    name: "code_search",
+    label: "Code Search",
+    description: "Search the codebase using a pre-built index. Returns file paths, line ranges, and concise code snippets.",
+    promptSnippet: "code_search: Search the indexed codebase by keywords and get file paths, line ranges, and snippets.",
+    parameters: Type.Object({
+      query: Type.String({ description: "Search query keywords" }),
+      path: Type.Optional(Type.String({ description: "Restrict to files under this relative path" })),
+      limit: Type.Optional(Type.Number({ description: "Maximum results, default 20" })),
+    }),
+    executionMode: "parallel" as const,
+    execute: async (_toolCallId, params, signal) => {
+      const results = await searchIndex(cwd, params.query, {
+        path: params.path,
+        limit: params.limit ?? 20,
+        signal,
+      });
+      const text = results.length
+        ? results.map(r => `${r.path}:${r.startLine}-${r.endLine} (score ${r.score})\n${r.snippet}`).join("\n\n")
+        : `No indexed results for: ${params.query}`;
+      return { content: [{ type: "text" as const, text }], details: undefined };
+    },
+  }) : null;
+  const codeGraphTools = await createCodeGraphTools(cwd);
+  const sessionIdHolder: { id: string | undefined } = { id: undefined };
+  const subagentTool = createSubagentTool(cwd, { getParentSessionId: () => sessionIdHolder.id });
+
+  const hasExplicitMode = agentMode !== undefined && agentMode !== null;
+  const effectiveMode = normalizeAgentMode(agentMode);
+  const requestedToolNames = toolNames ?? (hasExplicitMode ? getToolNamesForAgentMode(effectiveMode) : []);
+  const shouldLoadMcpAtStartup = (!hasExplicitMode && isFullToolPreset(requestedToolNames)) || includesMcpTool(requestedToolNames);
+  const mcpRuntimeLease = shouldLoadMcpAtStartup
+    ? await import("./mcp-runtime").then(({ acquireMcpRuntime }) => acquireMcpRuntime(cwd))
+    : null;
+  const mcpRuntime = mcpRuntimeLease?.runtime ?? null;
+
+  const customTools: AnyToolDefinition[] = [
+    ...(codeSearchTool ? [codeSearchTool] : []),
+    ...codeGraphTools,
+    subagentTool,
+    ...(mcpRuntime?.tools ?? []),
+  ];
+  const availableToolNames = [
+    ...allCodingToolNames,
+    ...(codeSearchTool ? ["code_search"] : []),
+    ...codeGraphTools.map(t => t.name),
+    ...(mcpRuntime?.toolNames ?? []),
+  ];
+
+  let activeToolNames: string[];
+  if (toolNames !== undefined || hasExplicitMode) {
+    if (requestedToolNames.length === 0) {
+      activeToolNames = [];
+    } else if (!hasExplicitMode && isFullToolPreset(requestedToolNames)) {
+      activeToolNames = availableToolNames;
+    } else {
+      const available = new Set(availableToolNames);
+      activeToolNames = requestedToolNames.filter(name => available.has(name));
+    }
+    if (activeToolNames.length > 0 && !activeToolNames.includes(SUBAGENT_TOOL_NAME)) {
+      activeToolNames.push(SUBAGENT_TOOL_NAME);
+    }
+  } else {
+    // 未传 toolNames 且无 agentMode：激活全部可用工具（与 pi 路径默认行为对齐）
+    activeToolNames = availableToolNames;
+  }
+
+  // ─── system prompt 构造（角色 + 模式）───
+  let systemPrompt = "";
+  if (roleId) {
+    try {
+      // applyRolePromptConfigToPrompt：角色配置文件注入
+      systemPrompt = applyRolePromptConfigToPrompt(systemPrompt, roleId);
+      // applyRolePromptToSystemPrompt：角色 prompt 注入（含 temporarySettings 等）
+      systemPrompt = applyRolePromptToSystemPrompt(systemPrompt, roleId, [], cwd);
+    } catch (e) {
+      console.warn(`DeerLoopEngine: 角色 ${roleId} prompt 注入失败:`, e);
+    }
+  }
+  if (hasExplicitMode) {
+    systemPrompt = applyModePrompt(systemPrompt, effectiveMode);
+  }
+  // 全部工具关闭时清空 system prompt（对齐 pi 路径行为）
+  if (toolNames?.length === 0) {
+    systemPrompt = "";
+  }
+
+  // ─── 构造 DeerLoopEngine ───
   const engine: AgentEnginePort = createDeerLoop({
     model,
     cwd,
     sessionId,
-    systemPrompt: "", // M1 不做角色/模式 prompt 注入
+    systemPrompt,
     getApiKey: (provider) => authStorage.getApiKey(provider),
+    tools: customTools,
+    activeToolNames,
   });
 
-  // ★ M4：安装默认重试策略（消灭 H2/H3/H4）。与 pi 路径的 adapter.installRetryHardening()
-  //   对齐——自研 loop 走公开 RetryPolicy 接口，pi 路径走私有字段 hack。
+  // ★ M4：安装默认重试策略
   engine.installRetryHardening();
 
-  // 用 AgentSessionWrapper 包装（无 mcp / roleId=null / agentMode=null）。
-  const wrapper = new AgentSessionWrapper(engine, null, null, null);
+  // ★ M6 SessionManager（jsonl 持久化）
+  const { SessionManager } = await import("@earendil-works/pi-coding-agent");
+  const sessionManager = sessionFile
+    ? SessionManager.open(sessionFile, undefined)
+    : SessionManager.create(cwd, undefined);
+  // 注入 SessionStore（用 PiSessionStoreAdapter 包装）
+  // TODO: M6 灰度集成——通过 setSessionStore 注入 adapter，使 compact 等能读写 jsonl。
+  //       当前 DeerLoopEngine 的 sessionManager 是 Proxy（getCwd/isPersisted 返回基础值），
+  //       compact 不写 jsonl。后续 patch 替换为 PiSessionStoreAdapter。
+
+  // 用 AgentSessionWrapper 包装
+  const wrapper = new AgentSessionWrapper(engine, roleId, mcpRuntimeLease, hasExplicitMode ? effectiveMode : undefined);
   wrapper.start();
 
   const realSessionId = engine.sessionId;
-  invalidateSessionListCache();
+  sessionIdHolder.id = realSessionId;
+  const realSessionFile = sessionManager.getSessionFile?.() ?? undefined;
+  if (realSessionFile) cacheSessionPath(realSessionId, realSessionFile);
+  if (!sessionFile) invalidateSessionListCache();
+
   wrapper.onDestroy(() => getRegistry().delete(realSessionId));
   getRegistry().set(realSessionId, wrapper);
 
