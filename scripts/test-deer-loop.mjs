@@ -358,7 +358,7 @@ console.log("\n[用例 5] subscribe 取消订阅 / dispose 清空");
 // 用例 6：Port 只读属性 & M2-M6 方法 throw
 // ---------------------------------------------------------------------------
 
-console.log("\n[用例 6] 只读属性 / M2-M6 方法 throw");
+console.log("\n[用例 6] 只读属性 / M2 工具能力 / M3-M6 方法 throw");
 {
   const engine = new DeerLoopEngine({
     model: FAKE_MODEL,
@@ -384,13 +384,30 @@ console.log("\n[用例 6] 只读属性 / M2-M6 方法 throw");
   assert(Array.isArray(engine.getAllTools()) && engine.getAllTools().length === 0, "getAllTools() 返回空数组", engine.getAllTools());
   assert(Array.isArray(engine.getActiveToolNames()) && engine.getActiveToolNames().length === 0, "getActiveToolNames() 返回空数组", engine.getActiveToolNames());
 
-  // hack 方法不 throw（空实现）
-  engine.applyToolExecutionModes();
-  engine.installRetryHardening();
+  // ★ M2 工具能力：applyToolExecutionModes / replaceCustomTools 不再 throw，正常工作
+  engine.applyToolExecutionModes();  // M2 实现（写 registry mode 表）
+  engine.installRetryHardening();    // M4 仍空实现
   engine.setSystemPromptPersistent("new prompt");
   assert(engine.agent.state.systemPrompt === "new prompt", "setSystemPromptPersistent 写入生效", engine.agent.state.systemPrompt);
 
-  // M2-M6 方法 throw
+  // replaceCustomTools：M2 已实现（热替换不 throw）
+  const mockTool = {
+    name: "test_tool",
+    label: "Test",
+    description: "test",
+    parameters: { type: "object" },
+    execute: async () => ({ content: [], details: {} }),
+  };
+  engine.replaceCustomTools({
+    removeNames: [],
+    addTools: [mockTool],
+    extraAllowedNames: [],
+    activeToolNames: ["test_tool"],
+  });
+  assert(engine.getActiveToolNames().includes("test_tool"), "replaceCustomTools 注册并激活 test_tool", engine.getActiveToolNames());
+  assert(engine.getAllTools().some((t) => t.name === "test_tool"), "getAllTools 包含 test_tool", engine.getAllTools());
+
+  // M3-M6 未实现的方法 throw（正则匹配 "not implemented"，不再限定 M1）
   let threwCount = 0;
   const expectThrow = async (fn, name) => {
     try {
@@ -399,21 +416,20 @@ console.log("\n[用例 6] 只读属性 / M2-M6 方法 throw");
       failures++;
     } catch (e) {
       assert(
-        /not implemented in M1/.test(e.message),
-        `${name} 抛 "not implemented in M1"`,
+        /not implemented/.test(e.message),
+        `${name} 抛 "not implemented"`,
         e.message,
       );
       threwCount++;
     }
   };
-  await expectThrow(() => engine.replaceCustomTools({ removeNames: [], addTools: [], extraAllowedNames: [], activeToolNames: [] }), "replaceCustomTools");
   await expectThrow(() => engine.setModel(FAKE_MODEL), "setModel");
   await expectThrow(() => engine.navigateTree("x"), "navigateTree");
   await expectThrow(() => engine.setThinkingLevel("high"), "setThinkingLevel");
   await expectThrow(() => engine.compact(), "compact");
   await expectThrow(() => engine.steer("x"), "steer");
   await expectThrow(() => engine.followUp("x"), "followUp");
-  assert(threwCount === 7, "M2-M6 共 7 个方法 throw", threwCount);
+  assert(threwCount === 6, "M3-M6 共 6 个方法 throw（replaceCustomTools 已在 M2 实现）", threwCount);
 }
 
 // ---------------------------------------------------------------------------

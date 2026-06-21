@@ -8,9 +8,10 @@ import type { AgentEnginePort } from "./port";
 import { DeerLoopEngine, type DeerLoopOptions } from "./deer-loop";
 
 /**
- * 创建一个 DeerLoopEngine 实例（M1 最小骨架）。
+ * 创建一个 DeerLoopEngine 实例。
  *
  * @param options 见 {@link DeerLoopOptions}。model 与 cwd 必填。
+ *   ★ M2 起支持 tools / activeToolNames / toolExecutionModes / maxToolRounds。
  * @returns 实现了 {@link AgentEnginePort} 的 DeerLoopEngine。
  */
 export function createDeerLoop(options: DeerLoopOptions): AgentEnginePort {

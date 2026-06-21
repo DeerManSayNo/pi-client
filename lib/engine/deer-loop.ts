@@ -27,11 +27,21 @@ import type {
   Model,
   SimpleStreamOptions,
   ThinkingLevel,
+  ToolCall,
+  ToolResultMessage,
   UserMessage,
 } from "@earendil-works/pi-ai";
-import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
-import type { AgentEnginePort } from "./port";
-import type { AgentMessage, LoopEvent } from "./loop-event";
+import type {
+  AgentSessionEvent,
+  ToolDefinition,
+} from "@earendil-works/pi-coding-agent";
+import type { AgentEnginePort } from "./port.ts";
+import type { AgentMessage, LoopEvent } from "./loop-event.ts";
+import { ToolRegistry, type AnyToolDefinition } from "./tool-registry.ts";
+import { ToolExecutor, toPiAiTool, type ToolExecOutput } from "./tool-executor.ts";
+import {
+  createMinimalExtensionContext,
+} from "./extension-context.ts";
 
 /**
  * 不限定具体 Api 的 Model 类型别名。
@@ -72,14 +82,62 @@ export interface DeerLoopOptions {
   streamFn?: StreamFn;
   /** API key 解析器（OAuth 短 token 用）。每次 LLM 调用前调。 */
   getApiKey?: (provider: string) => Promise<string | undefined>;
+
+  // ─── M2：工具注册 ───────────────────────────────────────
+  /** ★ 初始工具集（defineTool / createCodeGraphTools 等产物，直接喂给 registry）。 */
+  tools?: AnyToolDefinition[];
+  /** ★ 初始激活工具白名单（仅这些工具暴露给 LLM）。未传则激活全部已注册工具。 */
+  activeToolNames?: string[];
+  /** ★ 单工具 executionMode 覆盖表（消灭 H6/H7/H8）。 */
+  toolExecutionModes?: Record<string, "sequential" | "parallel">;
+  /** ★ 工具调用循环最大轮数（防 LLM 死循环；默认 20）。 */
+  maxToolRounds?: number;
 }
 
-/** 标记当前是否处于 M1 的 not-implemented 路径抛出的错误。 */
+/** 标记当前处于未实现的里程碑路径抛出的错误。 */
 function notImplemented(method: string, milestone: string): Error {
   return new Error(
-    `DeerLoopEngine.${method}: not implemented in M1 (see ${milestone})`,
+    `DeerLoopEngine.${method}: not implemented (see ${milestone})`,
   );
 }
+
+/** ★ M2：工具调用循环最大轮数（防 LLM 无限调工具死循环）。与 pi 默认行为对齐。 */
+const DEFAULT_MAX_TOOL_ROUNDS = 20;
+
+/** consumeStream 的返回值（一轮 LLM 调用的状态快照）。 */
+interface ConsumedStream {
+  /** 本轮的最终 AssistantMessage（done/error 的 message 或 lastPartial 或合成）。 */
+  endMessage: AssistantMessage;
+  /** 是否已 emit 过 message_start（用于补发逻辑）。 */
+  started: boolean;
+  /** 是否被 abort。 */
+  aborted: boolean;
+  /** 错误消息（非 abort）。 */
+  errorMessage: string | undefined;
+  /** stream 的 stopReason（done.reason 或 error.reason）。 */
+  stopReason: string | undefined;
+}
+
+/**
+ * ★ M2：内置工具默认执行模式表（与 PiEngineAdapter.TOOL_EXECUTION_MODES 对齐）。
+ *
+ * read/grep/find/ls/code_search/spawn_subagent = parallel（无副作用，可并发）。
+ * bash/edit/write = sequential（有副作用，必须串行防竞态）。
+ *
+ * 这是应用层预设，rpc-manager 调 applyToolExecutionModes() 时写入 registry 覆盖表。
+ * 自定义工具（codegraph_* / mcp__*）自带 executionMode 字段，不在这里枚举。
+ */
+const DEFAULT_TOOL_EXECUTION_MODES: Record<string, "parallel" | "sequential"> = {
+  read: "parallel",
+  grep: "parallel",
+  find: "parallel",
+  ls: "parallel",
+  code_search: "parallel",
+  spawn_subagent: "parallel",
+  bash: "sequential",
+  edit: "sequential",
+  write: "sequential",
+};
 
 // ===========================================================================
 // DeerLoopEngine
@@ -129,6 +187,15 @@ export class DeerLoopEngine implements AgentEnginePort {
   /** API key 解析器。 */
   private readonly _getApiKey?: (provider: string) => Promise<string | undefined>;
 
+  /** ★ M2：工具注册表（单一数据源，消灭 pi 三份副本）。 */
+  private readonly registry: ToolRegistry;
+
+  /** ★ M2：工具执行器（并行/串行调度 + 错误隔离）。 */
+  private readonly toolExecutor: ToolExecutor;
+
+  /** ★ M2：工具调用循环最大轮数（防 LLM 死循环）。 */
+  private readonly _maxToolRounds: number;
+
   /**
    * agent.state 的最小代理对象。
    *
@@ -159,6 +226,23 @@ export class DeerLoopEngine implements AgentEnginePort {
       systemPrompt: this._baseSystemPrompt,
       thinkingLevel: this._thinkingLevel ?? "off",
     };
+
+    // M2：初始化工具注册表与执行器。
+    this.registry = new ToolRegistry();
+    this.toolExecutor = new ToolExecutor(this.registry);
+    this._maxToolRounds = options.maxToolRounds ?? DEFAULT_MAX_TOOL_ROUNDS;
+    if (options.tools && options.tools.length > 0) {
+      this.registry.registerAll(options.tools);
+      // 未传 activeToolNames 时激活全部已注册工具（方便灰度：传工具即启用）。
+      if (options.activeToolNames !== undefined) {
+        this.registry.setActive(options.activeToolNames);
+      } else {
+        this.registry.setActive(options.tools.map((t) => t.name));
+      }
+    }
+    if (options.toolExecutionModes) {
+      this.registry.setExecutionModes(options.toolExecutionModes);
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -168,14 +252,31 @@ export class DeerLoopEngine implements AgentEnginePort {
   /**
    * 发起一轮 prompt。消费 pi-ai 的 AssistantMessageEventStream，转成 LoopEvent emit。
    *
-   * 事件顺序：agent_start → message_start → message_update*N → message_end → agent_end
+   * ★ M2 改造为工具调用循环（设计文档 §4「核心实现要点」#3）：
+   *   while (true) {
+   *     consume stream → 得到 finalMessage + stopReason
+   *     abort/error → emit message_end + agent_end, break
+   *     push assistant message to transcript
+   *     if (stopReason !== toolUse || 无 toolCall) → emit message_end, break
+   *     emit message_end（本轮 assistant 结束）
+   *     executeBatch(toolCalls) → emit tool_execution_*
+   *     abort 期間 → break
+   *     push ToolResultMessage × N to transcript
+   *     continue（下一轮 LLM 看到工具结果）
+   *   }
    *
-   * abort 行为：abortController.abort() 后，stream 的下一次 yield 会抛 AbortError
-   *（或 stream 自己 emit 一个 reason:"aborted" 的 error 事件），loop 捕获后
-   * emit message_end{stopReason:"aborted"} + agent_end{willRetry:false}。
+   * 事件顺序（单轮无工具）：
+   *   agent_start → message_start → message_update*N → message_end → agent_end
+   * 事件顺序（一轮有工具，工具后不再调）：
+   *   agent_start → message_start → message_update*N → message_end
+   *     → tool_execution_start → tool_execution_update? → tool_execution_end(×N)
+   *     → message_start(第二轮) → ... → message_end → agent_end
    *
-   * 错误行为：stream 抛非 abort 错误，或 emit error 事件，loop emit
-   * message_end{stopReason:"error"} + agent_end{error}。
+   * abort 行为：stream 或工具执行期间 abort，发 message_end{stopReason:"aborted"}
+   * + agent_end{willRetry:false}。
+   * 错误行为：stream 抛非 abort 错误，发 message_end{stopReason:"error"} +
+   * agent_end{error}。工具执行错误被错误隔离（不中断 loop，结果回填给 LLM）。
+   * 防死循环：连续 maxToolRounds 轮仍要工具 → 强制 break + agent_end{error}。
    */
   async prompt(
     text: string,
@@ -185,7 +286,7 @@ export class DeerLoopEngine implements AgentEnginePort {
   ): Promise<void> {
     if (this._isRunning) {
       throw new Error(
-        "DeerLoopEngine.prompt: a prompt is already running (M1 不支持并发 prompt)",
+        "DeerLoopEngine.prompt: a prompt is already running (不支持并发 prompt)",
       );
     }
 
@@ -198,29 +299,146 @@ export class DeerLoopEngine implements AgentEnginePort {
     };
     this._messages.push(userMessage);
 
-    // 2. 构造 pi-ai Context（messages 即 transcript，systemPrompt 来自 baseSystemPrompt）。
-    const context: Context = {
-      systemPrompt: this._baseSystemPrompt || undefined,
-      messages: this._messages as Message[],
-      // M1 不支持工具：不传 tools。
-    };
-
-    // 3. 进入 running 态，发射 agent_start。
+    // 2. 进入 running 态，发射 agent_start。
     this._isRunning = true;
-    this._isStreaming = true;
     this.abortController = new AbortController();
     this.emit({ type: "agent_start" });
 
-    // 跟踪本次 stream 的状态。
-    let started = false; // 是否已 emit message_start
-    let lastPartial: AssistantMessage | null = null; // 最后一次收到的 partial
-    let finalMessage: AssistantMessage | null = null; // done 事件的最终 message
-    let aborted = false; // 是否被 abort
-    let errorMessage: string | undefined; // 错误消息（非 abort）
+    let agentError: string | undefined; // 记录 agent_end 携带的错误消息
+
+    try {
+      let toolRounds = 0;
+      // ★ 工具调用循环：每轮 consume stream → 判断 toolUse → 执行工具 → 回填 → 继续。
+      while (true) {
+        // 构造 pi-ai Context（messages=transcript；tools 来自 registry 激活集）。
+        const activeTools = this.registry.getActive();
+        const context: Context = {
+          systemPrompt: this._baseSystemPrompt || undefined,
+          messages: this._messages as Message[],
+          ...(activeTools.length > 0
+            ? { tools: activeTools.map(toPiAiTool) }
+            : {}),
+        };
+
+        // 消费 stream。
+        const consumed = await this.consumeStream(context);
+
+        // abort / error：收尾后跳出循环。
+        if (consumed.aborted || consumed.errorMessage) {
+          this.emitMessageStartIfNeeded(consumed);
+          this.emit({ type: "message_end", message: consumed.endMessage });
+          this._messages.push(consumed.endMessage);
+          if (consumed.errorMessage) agentError = consumed.errorMessage;
+          break;
+        }
+
+        // 把本轮 assistant 最终消息追加到 transcript。
+        const assistantMessage = consumed.endMessage;
+        this._messages.push(assistantMessage);
+
+        // ★ 提取本轮的 ToolCall（源序）。
+        const toolCalls = assistantMessage.content.filter(
+          (c): c is ToolCall => c.type === "toolCall",
+        );
+
+        // ★ 保守判断进工具循环（踩坑预警 #1）：
+        //   stopReason === "toolUse" 或 content 含 toolCall 即进。
+        const wantsTools =
+          consumed.stopReason === "toolUse" || toolCalls.length > 0;
+
+        if (!wantsTools || toolCalls.length === 0) {
+          // LLM 不再要工具 → 正常结束（emit message_end 后跳出循环）。
+          this.emitMessageStartIfNeeded(consumed);
+          this.emit({ type: "message_end", message: assistantMessage });
+          break;
+        }
+
+        // 有 toolCall：本轮 assistant 消息结束（emit message_end），接下来是工具执行。
+        this.emitMessageStartIfNeeded(consumed);
+        this.emit({ type: "message_end", message: assistantMessage });
+
+        // 防死循环：超过 maxToolRounds 强制停。
+        toolRounds++;
+        if (toolRounds > this._maxToolRounds) {
+          agentError = `DeerLoopEngine: 超过最大工具调用轮数（${this._maxToolRounds}），强制停止`;
+          break;
+        }
+
+        // 构造 ExtensionContext + 执行工具。
+        const ctx = this.buildExtensionContext();
+        const outputs = await this.toolExecutor.executeBatch(
+          toolCalls,
+          this.abortController!.signal,
+          ctx,
+          (e) => this.emit(e),
+        );
+
+        // abort 发生在工具执行期间：回填已有结果后跳出。
+        if (this.abortController?.signal.aborted) {
+          const toolResults = this.buildToolResultMessages(toolCalls, outputs);
+          this._messages.push(...toolResults);
+          agentError = "aborted";
+          break;
+        }
+
+        // 构造 ToolResultMessage × N 入 transcript（源序，对齐 toolCalls）。
+        const toolResults = this.buildToolResultMessages(toolCalls, outputs);
+        this._messages.push(...toolResults);
+
+        // 继续下一轮 LLM 调用（while true 顶部重新构造 context，此时 transcript
+        // 已含工具结果，LLM 会看到）。
+      }
+    } catch (err) {
+      // 兜底：循环内不应抛（abort/error 已在 consumeStream/executeBatch 内部隔离），
+      // 这里只防未预期异常。
+      if (this.isAbortError(err)) {
+        agentError = "aborted";
+      } else {
+        agentError = err instanceof Error ? err.message : String(err);
+      }
+    } finally {
+      this._isStreaming = false;
+      this._isRunning = false;
+      this.abortController = null;
+
+      const agentEndEvent: LoopEvent = {
+        type: "agent_end",
+        messages: [...this._messages],
+        willRetry: false,
+      };
+      if (agentError && agentError !== "aborted") {
+        (agentEndEvent as { error?: string }).error = agentError;
+      }
+      this.emit(agentEndEvent);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // ★ M2：stream 消费 + 工具循环辅助方法
+  // -------------------------------------------------------------------------
+
+  /**
+   * 消费一轮 stream：构造 SimpleStreamOptions → for-await → 跟踪状态 → 返回快照。
+   *
+   * 把 M1 内联在 prompt 里的流式逻辑提取成独立方法，让 prompt 主循环只管
+   * 「消费 → 判断 toolUse → 执行工具 → 回填 → 继续」。
+   *
+   * emit：message_start（首个 partial 时）、message_update（每个 partial）。
+   * **不** emit message_end（交给调用方决定，因为 abort/error/toolUse 的收尾时机不同）。
+   */
+  private async consumeStream(context: Context): Promise<ConsumedStream> {
+    this._isStreaming = true;
+
+    let started = false;
+    let lastPartial: AssistantMessage | null = null;
+    let finalMessage: AssistantMessage | null = null;
+    let aborted = false;
+    let errorMessage: string | undefined;
+    let stopReason: string | undefined;
 
     try {
       const streamOptions: SimpleStreamOptions = {
-        signal: this.abortController.signal,
+        signal: this.abortController!.signal,
         sessionId: this._sessionId,
       };
       if (this._thinkingLevel) {
@@ -246,6 +464,7 @@ export class DeerLoopEngine implements AgentEnginePort {
 
         if (ev.type === "done") {
           finalMessage = ev.message;
+          stopReason = ev.reason;
           break;
         }
 
@@ -257,6 +476,7 @@ export class DeerLoopEngine implements AgentEnginePort {
             errorMessage = ev.error.errorMessage ?? ev.reason;
           }
           finalMessage = ev.error;
+          stopReason = ev.reason;
           break;
         }
 
@@ -279,38 +499,86 @@ export class DeerLoopEngine implements AgentEnginePort {
       } else {
         errorMessage = err instanceof Error ? err.message : String(err);
       }
+    } finally {
+      this._isStreaming = false;
     }
 
-    // 4. 收尾 message 流：保证 message_start / message_end 成对（即便没收到任何 partial）。
     const endMessage = this.resolveEndMessage(
       finalMessage,
       lastPartial,
       aborted,
       errorMessage,
     );
-    if (!started) {
-      // stream 立即结束/出错/abort，从没 emit 过 message_start：补一次。
-      this.emit({ type: "message_start", message: endMessage });
+
+    return { endMessage, started, aborted, errorMessage, stopReason };
+  }
+
+  /**
+   * 若 consumeStream 未 emit message_start（stream 立即结束/出错/abort），补一次。
+   * 保证 message_start / message_end 严格成对。
+   */
+  private emitMessageStartIfNeeded(consumed: ConsumedStream): void {
+    if (!consumed.started) {
+      this.emit({ type: "message_start", message: consumed.endMessage });
     }
-    this.emit({ type: "message_end", message: endMessage });
+  }
 
-    // 把 assistant 最终消息追加到 transcript（user 消息已在开头追加）。
-    this._messages.push(endMessage);
-
-    // 5. 退出 running 态，发射 agent_end。
-    this._isStreaming = false;
-    this._isRunning = false;
-    this.abortController = null;
-
-    const agentEndEvent: LoopEvent = {
-      type: "agent_end",
-      messages: [...this._messages],
-      willRetry: false,
-    };
-    if (errorMessage) {
-      (agentEndEvent as { error?: string }).error = errorMessage;
+  /**
+   * 构造工具 execute 第 5 参用的 MinimalExtensionContext。
+   *
+   * 复用 loop 的最小代理（sessionManager / modelRegistry）与状态（cwd / model /
+   * abortController / _isStreaming）。signal 必非空（工具执行期间在 prompt 调用，
+   * abortController 已创建）。
+   */
+  private buildExtensionContext(): import("./extension-context.ts").ExtensionContext {
+    const signal = this.abortController?.signal;
+    if (!signal) {
+      // 理论上不会发生（buildExtensionContext 只在 prompt 内调，abortController 非空）。
+      throw new Error(
+        "DeerLoopEngine.buildExtensionContext: abortController.signal 不可用（不在 prompt 执行期间）",
+      );
     }
-    this.emit(agentEndEvent);
+    return createMinimalExtensionContext({
+      cwd: this._cwd,
+      model: this._model,
+      signal,
+      abort: () => {
+        void this.abort();
+      },
+      isIdle: () => !this._isStreaming && !this._isRunning,
+      getSystemPrompt: () => this._baseSystemPrompt,
+      sessionManager: this.sessionManager,
+      modelRegistry: this.modelRegistry,
+    });
+  }
+
+  /**
+   * 构造 ToolResultMessage × N（每个 toolCall 一条，源序）。
+   *
+   * pi-ai 的 ToolResultMessage（types.d.ts:203）：
+   *   { role: "toolResult", toolCallId, toolName, content, details?, isError, timestamp }
+   * ★ role 是 "toolResult"（不是 "tool"），每个 toolCall 一条独立消息。
+   * content 从 AgentToolResult.content 透传（[TextContent | ImageContent]）。
+   */
+  private buildToolResultMessages(
+    toolCalls: readonly ToolCall[],
+    outputs: readonly ToolExecOutput[],
+  ): ToolResultMessage[] {
+    const now = Date.now();
+    return toolCalls.map((call, i) => {
+      const output = outputs[i];
+      const content = (output?.result?.content ?? [
+        { type: "text" as const, text: "(no result)" },
+      ]) as ToolResultMessage["content"];
+      return {
+        role: "toolResult" as const,
+        toolCallId: call.id,
+        toolName: call.name,
+        content,
+        isError: output?.isError ?? false,
+        timestamp: now,
+      } satisfies ToolResultMessage;
+    });
   }
 
   // -------------------------------------------------------------------------
@@ -464,32 +732,62 @@ export class DeerLoopEngine implements AgentEnginePort {
   }
 
   /**
-   * 应用工具执行模式（Port hack 方法，消灭 H5/H6/H7/H8）。
-   * M1 无工具：空实现。
+   * 应用工具执行模式（Port hack 方法，消灭 H5/H6/H7/H8）。★ M2 真正实现。
+   *
+   * 对齐 PiEngineAdapter 的逻辑：
+   * - PI_DISABLE_PARALLEL_TOOLS=1 时，全局默认设为 sequential（H5）。
+   * - 按 DEFAULT_TOOL_EXECUTION_MODES 表为内置工具设 sequential/parallel（H6/H7/H8）。
+   *
+   * DeerLoopEngine 只有一份 registry，写入即生效，无需三处同步。
    */
   applyToolExecutionModes(): void {
-    // M1 no-op（无工具）。
+    const forceSequential =
+      process.env.PI_DISABLE_PARALLEL_TOOLS === "1" ||
+      process.env.PI_DISABLE_PARALLEL_TOOLS === "true";
+    if (forceSequential) {
+      this.registry.setDefaultExecutionMode("sequential");
+    }
+    // 为已注册的内置工具应用预设 mode（仅当表里有该工具名时）。
+    for (const tool of this.registry.getAll()) {
+      const mode = DEFAULT_TOOL_EXECUTION_MODES[tool.name];
+      if (mode) {
+        this.registry.setExecutionMode(tool.name, mode);
+      } else if (forceSequential) {
+        // 未在表里的工具，强制串行时也设 sequential。
+        this.registry.setExecutionMode(tool.name, "sequential");
+      }
+    }
   }
 
   /**
    * 安装自动重试加固（Port hack 方法，消灭 H2/H3/H4）。
-   * M1 无重试：空实现。
+   * M1 无重试：空实现。（M4 实现真正的重试策略）
    */
   installRetryHardening(): void {
-    // M1 no-op（无重试）。
+    // M4 no-op（无重试）。
   }
 
   /**
-   * 运行时热替换自定义工具（Port hack 方法，消灭 H9）。
-   * M1 无工具：throw（M2 实现）。
+   * 运行时热替换自定义工具（Port hack 方法，消灭 H9）。★ M2 实现。
+   *
+   * 原子操作：register+unregister+setActive 一次完成。对应 rpc-manager.installMcpRuntime
+   * 里对 pi 私有字段 _customTools / _allowedToolNames / _refreshToolRegistry 的操作。
+   * DeerLoopEngine 走公开 registry.replaceBatch，无中间态。
    */
-  replaceCustomTools(_options: {
+  replaceCustomTools(options: {
     removeNames: readonly string[];
-    addTools: import("@earendil-works/pi-coding-agent").ToolDefinition[];
+    addTools: ToolDefinition[];
     extraAllowedNames: readonly string[];
     activeToolNames: readonly string[];
   }): void {
-    throw notImplemented("replaceCustomTools", "M2");
+    this.registry.replaceBatch({
+      removeNames: options.removeNames,
+      addTools: options.addTools as AnyToolDefinition[],
+      activeToolNames: options.activeToolNames,
+      extraAllowedNames: options.extraAllowedNames,
+    });
+    // 热替换后重新应用执行模式（新注册的工具需要 mode 预设）。
+    this.applyToolExecutionModes();
   }
 
   // -------------------------------------------------------------------------
@@ -547,19 +845,22 @@ export class DeerLoopEngine implements AgentEnginePort {
     throw notImplemented("followUp", "M5 (followUp queue)");
   }
 
-  /** M1 无工具：返回空数组。 */
+  /** ★ M2：返回全部已注册工具的 name/description（给 get_state 命令用）。 */
   getAllTools(): { name: string; description: string }[] {
-    return [];
+    return this.registry.getAll().map((t) => ({
+      name: t.name,
+      description: t.description,
+    }));
   }
 
-  /** M1 无工具：返回空数组。 */
+  /** ★ M2：返回当前激活工具名（白名单）。 */
   getActiveToolNames(): string[] {
-    return [];
+    return this.registry.getActiveNames();
   }
 
-  /** M1 无工具：空实现。 */
-  setActiveToolsByName(_names: string[]): void {
-    // M1 no-op（无工具）。
+  /** ★ M2：重设激活白名单（setActiveToolsByName 命令用）。 */
+  setActiveToolsByName(names: string[]): void {
+    this.registry.setActive(names);
   }
 
   abortCompaction(): void {
