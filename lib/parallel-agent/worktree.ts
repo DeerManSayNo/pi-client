@@ -5,11 +5,6 @@ import os from "os";
 
 const RUNS_BASE_DIR = path.join(os.tmpdir(), "deerhux-runs");
 
-export interface WorktreeResult {
-  worktreePath: string;
-  isValid: boolean;
-}
-
 /**
  * Check if a directory is inside a git repository.
  */

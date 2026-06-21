@@ -28,21 +28,3 @@ export function buildIsolatedWorkerPrompt(question: string, task: string): strin
   ].join("\n");
 }
 
-export function buildAggregatorPrompt(question: string, workerResults: Array<{ name: string; task: string; result: string }>): string {
-  const workerSections = workerResults.map(w =>
-    `### ${w.name}: ${w.task}\n\n${w.result || "(无结果)"}`
-  ).join("\n\n---\n\n");
-
-  return [
-    `你是项目架构分析汇总专家。请分析以下多个 worker 的并行分析结果，`,
-    `合成一份连贯、全面的回答来答复用户的原始问题。不要遗漏重要发现，不要重复。`,
-    ``,
-    `## 用户问题`,
-    question,
-    ``,
-    `## Worker 分析结果`,
-    workerSections,
-    ``,
-    `请给出综合答复。`,
-  ].join("\n");
-}
