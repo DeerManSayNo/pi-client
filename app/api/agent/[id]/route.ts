@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
-import { addAllowedRoot } from "@/lib/file-access";
-import { resolveSessionPath, readSessionFileCached } from "@/lib/session-reader";
-import { startRpcSession, getRpcSession } from "@/lib/rpc-manager";
+import { getRpcSession } from "@/lib/rpc-manager";
+import { ensureRpcSession, SessionNotFoundError } from "@/lib/agent-runtime/session-service";
 
 // POST /api/agent/[id] - Send a command to an existing session
 export async function POST(
@@ -13,29 +12,14 @@ export async function POST(
   try {
     const body = await req.json() as { type: string; [key: string]: unknown };
 
-    // Fast path: already-running session
-    const existing = getRpcSession(id);
-    if (existing?.isAlive()) {
-      const result = await existing.send(body);
-      return NextResponse.json({ success: true, data: result });
-    }
-
-    const filePath = await resolveSessionPath(id);
-    if (!filePath) {
-      return NextResponse.json({ error: "Session not found" }, { status: 404 });
-    }
-
-    // Cold-start path: reuse the per-file cache so concurrent cold-start
-    // POSTs (and any racing GET /api/sessions/[id]) share one parse pass.
-    const { context, header } = readSessionFileCached(filePath);
-    const cwd = header?.cwd ?? process.cwd();
-
-    const { session } = await startRpcSession(id, filePath, cwd, undefined, context.roleId ?? null, context.agentMode ?? "agent");
-    addAllowedRoot(cwd);
+    const session = await ensureRpcSession(id);
     const result = await session.send(body);
 
     return NextResponse.json({ success: true, data: result });
   } catch (error) {
+    if (error instanceof SessionNotFoundError) {
+      return NextResponse.json({ error: "Session not found" }, { status: 404 });
+    }
     return NextResponse.json({ error: String(error) }, { status: 500 });
   }
 }

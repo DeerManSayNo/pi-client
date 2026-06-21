@@ -1124,9 +1124,34 @@ export function AppShell() {
     return [...byCwd.entries()].map(([cwd, displayName]) => ({ cwd, displayName }));
   }, [customCwds, defaultCwd, effectiveProjectCwd, projectOptions]);
 
+  const lastTitlebarPointerDownRef = useRef<{ time: number; x: number; y: number } | null>(null);
+
   const handleWindowDragPointerDown = useCallback((event: PointerEventType<HTMLDivElement>) => {
     if (!shouldStartWindowDrag(event)) return;
     if (typeof window === "undefined" || !window.__TAURI_INTERNALS__) return;
+
+    const now = Date.now();
+    const prev = lastTitlebarPointerDownRef.current;
+    const DOUBLE_CLICK_THRESHOLD_MS = 400;
+    const DOUBLE_CLICK_DISTANCE = 10;
+
+    const isDoubleClick =
+      prev !== null &&
+      now - prev.time < DOUBLE_CLICK_THRESHOLD_MS &&
+      Math.abs(event.clientX - prev.x) < DOUBLE_CLICK_DISTANCE &&
+      Math.abs(event.clientY - prev.y) < DOUBLE_CLICK_DISTANCE;
+
+    lastTitlebarPointerDownRef.current = { time: now, x: event.clientX, y: event.clientY };
+
+    if (isDoubleClick) {
+      // 双击顶栏区域 → 切换窗口最大化/还原
+      void import("@tauri-apps/api/window")
+        .then(({ getCurrentWindow }) => getCurrentWindow().toggleMaximize())
+        .catch(() => {
+          // Browser/dev fallback: ignore.
+        });
+      return;
+    }
 
     // 不使用覆盖层抢事件，而是在空白顶栏区域按下时主动通知 Tauri 开始拖动。
     // 这样顶栏里的按钮、输入框、标签页、右键菜单、resize handle 等元素仍然保留原生左右键/拖拽事件。

@@ -389,7 +389,9 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
     agentPhase,
     isNew,
     stallLevel, autoRecoveryMode,
+    subagentEnabled,
     handleAutoRecover, handleDismissStall, handleAutoRecoveryModeChange,
+    handleSubagentToggle,
     messagesEndRef, scrollContainerRef,
     lastUserMsgRef,
     handleSend, handleAbort, handleFork, handleModelChange,
@@ -879,6 +881,8 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
         onAutoRecover={handleAutoRecover}
         onDismissStall={handleDismissStall}
         onAutoRecoveryModeChange={handleAutoRecoveryModeChange}
+        subagentEnabled={subagentEnabled}
+        onSubagentToggle={handleSubagentToggle}
         initialInputState={savedInputState}
         saveInputStateRef={saveInputStateRef}
       />

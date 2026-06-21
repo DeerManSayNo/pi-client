@@ -1,6 +1,8 @@
 import { startRpcSession } from "@/lib/rpc-manager";
 import type { AgentEvent } from "@/lib/rpc-manager";
 
+const WORKER_INACTIVITY_TIMEOUT_MS = 30 * 60 * 1000;
+
 /**
  * Create a read-only worker session for parallel analysis.
  * Uses a temporary session key and read-only tools only.
@@ -21,15 +23,26 @@ export async function createWorkerSession(cwd: string): Promise<{
     sendPrompt: async (message: string): Promise<string> => {
       return new Promise((resolve, reject) => {
         let settled = false;
-        const settle = (fn: () => void) => { if (!settled) { settled = true; fn(); } };
+        let timeout: ReturnType<typeof setTimeout> | null = null;
+        let unsub: () => void = () => undefined;
+        const settle = (fn: () => void) => {
+          if (settled) return;
+          settled = true;
+          if (timeout) clearTimeout(timeout);
+          unsub();
+          fn();
+        };
 
-        const timeout = setTimeout(() => settle(() => reject(new Error("Worker session timed out after 10 minutes"))), 10 * 60 * 1000);
+        const resetTimeout = () => {
+          if (timeout) clearTimeout(timeout);
+          timeout = setTimeout(() => settle(() => reject(new Error("Worker session made no progress for 30 minutes"))), WORKER_INACTIVITY_TIMEOUT_MS);
+        };
+        resetTimeout();
 
-        const unsub = session.onEvent((event: AgentEvent) => {
+        unsub = session.onEvent((event: AgentEvent) => {
+          resetTimeout();
           if (event.type === "agent_end" && event.messages) {
             settle(() => {
-              clearTimeout(timeout);
-              unsub();
               const messages = event.messages as Array<{ role: string; content?: string | Array<{ type: string; text?: string; thinking?: string }> }>;
               const lastAssistant = [...messages].reverse().find(m => m.role === "assistant");
               if (lastAssistant) {
@@ -48,14 +61,14 @@ export async function createWorkerSession(cwd: string): Promise<{
           }
           if (event.type === "agent_end" && event.error) {
             settle(() => {
-              clearTimeout(timeout);
-              unsub();
               reject(new Error(String(event.error)));
             });
           }
         });
 
-        session.send({ type: "prompt", message }).catch(reject);
+        session.send({ type: "prompt", message }).catch((error: unknown) => {
+          settle(() => reject(error));
+        });
       });
     },
     listen: (listener: (event: AgentEvent) => void) => session.onEvent(listener),

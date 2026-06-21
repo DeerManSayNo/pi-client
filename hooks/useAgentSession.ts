@@ -12,6 +12,10 @@ import { extractTurnMode, normalizeAgentMode, stripTurnModeContext, type AgentMo
 type ToolPreset = "none" | "default" | "full" | "custom";
 const AUTO_CONTINUE_MESSAGE = "请从刚才中断的位置继续，不要重复已经完成的内容。如果上一步有未完成的工具调用或代码修改，请继续完成。";
 
+function createClientMessageId(): string {
+  return `client-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
 /**
  * Compress expanded skill content back to /skill:name form for display.
  * The DeerHux SDK's _expandSkillCommand replaces /skill:name args with the full
@@ -155,6 +159,8 @@ export interface AgentStatePayload {
     agentMode?: AgentMode;
   };
 }
+
+type SessionDataWithAgentState = SessionData & { agentState?: AgentStatePayload };
 
 interface StreamingState {
   isStreaming: boolean;
@@ -493,6 +499,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   });
   const [stallLevel, setStallLevel] = useState<StallLevel>(null);
   const stallDismissedRef = useRef(false);
+
+  // Subagent tool capability toggle persisted in localStorage. When enabled,
+  // the `spawn_subagent` tool is added to the active agent tool set.
+  const [subagentEnabled, setSubagentEnabledState] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    return getLocalStorageItem("deerhux.subagent-enabled") === "true";
+  });
+  const subagentEnabledRef = useRef(subagentEnabled);
   const stallRecoveriesRef = useRef(0);
 
   const eventSourceRef = useRef<EventSource | null>(null);
@@ -601,6 +615,36 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     promise: Promise<AgentStatePayload | null>;
   } | null>(null);
 
+  const applySessionSnapshot = useCallback((d: SessionDataWithAgentState) => {
+    setData(d);
+    const { messages: loadedMessages, entryIds: loadedEntryIds } = normalizeLoadedMessages(d.context.messages, d.context.entryIds);
+    const prevKey = entryIdsRef.current.join("\0");
+    const nextKey = loadedEntryIds.join("\0");
+    const changed = Boolean(nextKey && nextKey !== prevKey);
+    setMessages(loadedMessages);
+    setEntryIds(loadedEntryIds);
+    setCurrentModelOverride(null);
+    setAgentMode(normalizeAgentMode(d.context.agentMode));
+    setError(null);
+
+    if (changed) {
+      lastAgentEventAtRef.current = Date.now();
+      lastContentChangedAtRef.current = Date.now();
+      watchdogStaleRecoveriesRef.current = 0;
+      const lastAssistant = [...loadedMessages].reverse().find((msg) => msg.role === "assistant");
+      lastContentLengthRef.current = Math.max(lastContentLengthRef.current, getStreamingContentLength(lastAssistant));
+    }
+
+    const hasAssistant = loadedMessages.some((msg) => msg.role === "assistant");
+    if (awaitingAgentStartRef.current && (changed || hasAssistant || d.agentState?.running)) {
+      clearAwaitingAgentStartGuard();
+      awaitingAgentStartRef.current = false;
+      setAgentPhase({ kind: "waiting_model", reason: "restored" });
+    }
+
+    return { changed, loadedMessages, loadedEntryIds };
+  }, [clearAwaitingAgentStartGuard]);
+
   const loadSession = useCallback(async (sid: string, showLoading = false, includeState = false) => {
     // Background refreshes piggyback on an existing inflight request for the
     // same sid. showLoading callers always start a fresh request so loading
@@ -645,15 +689,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           return null;
         }
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const d = await res.json() as SessionData & { agentState?: AgentStatePayload };
+        const d = await res.json() as SessionDataWithAgentState;
         if (sid !== sessionIdRef.current) return null;
-        setData(d);
-        const { messages: loadedMessages, entryIds: loadedEntryIds } = normalizeLoadedMessages(d.context.messages, d.context.entryIds);
-        setMessages(loadedMessages);
-        setEntryIds(loadedEntryIds);
-        setCurrentModelOverride(null);
-        setAgentMode(normalizeAgentMode(d.context.agentMode));
-        setError(null);
+        applySessionSnapshot(d);
         // If no live agent state, fall back to thinking level from session file
         if (!d.agentState?.state?.thinkingLevel && d.context.thinkingLevel && d.context.thinkingLevel !== "off") {
           setThinkingLevel(d.context.thinkingLevel as ThinkingLevelOption);
@@ -663,9 +701,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // Swallow aborts caused by a session switch — they're expected cleanup,
         // not real failures worth warning about.
         if (sid === sessionIdRef.current && !sessionAborted) {
+          const isAbort = e instanceof DOMException && e.name === "AbortError";
           if (showLoading) {
-            setError(e instanceof DOMException && e.name === "AbortError" ? "加载会话超时" : String(e));
-          } else {
+            setError(isAbort ? "加载会话超时" : String(e));
+          } else if (!isAbort) {
             console.warn("[loadSession] background refresh failed:", e);
           }
         }
@@ -688,7 +727,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       });
     }
     return promise;
-  }, []);
+  }, [applySessionSnapshot]);
 
   const loadTools = useCallback(async (sid: string) => {
     try {
@@ -714,6 +753,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
     sseReconnectAttemptRef.current = 0;
 
+    // Sync the subagent capability toggle to this (possibly freshly
+    // cold-started) session so spawn_subagent is in/out of the active tool set.
+    void sendAgentCommand(sid, { type: "set_subagent_enabled", enabled: subagentEnabledRef.current }).catch(() => { /* best effort */ });
+
     const es = new EventSource(`/api/agent/${encodeURIComponent(sid)}/events`);
     eventSourceRef.current = es;
     es.onmessage = (e) => {
@@ -734,7 +777,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       fetch(`/api/agent/${encodeURIComponent(sid)}`)
         .then((r) => r.json())
         .then((d: { running?: boolean; status?: AgentStatus }) => {
-          if (awaitingAgentStartRef.current) return;
+          if (awaitingAgentStartRef.current) {
+            loadSession(sid, false, true).catch(() => {});
+            return;
+          }
           if (agentRunningRef.current && (!d.running || d.status?.isRunning === false)) {
             // Session ended while we were disconnected — dispatch a synthetic
             // agent_end so the client state resets cleanly.
@@ -774,7 +820,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }, delay);
     };
     return es;
-  }, []);
+  }, [loadSession]);
 
   const ensureEventsConnected = useCallback((sid: string) => {
     const existing = eventSourceRef.current;
@@ -823,6 +869,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       try {
         const res = await fetch(`/api/agent/${encodeURIComponent(sid)}`, { cache: "no-store" });
         const d = await res.json().catch(() => ({})) as { running?: boolean; status?: AgentStatus };
+        await loadSession(sid, false, true);
+        if (!awaitingAgentStartRef.current) return;
         if (!d.running || d.status?.isRunning === false) {
           await stopStuckAwaitingAgentStart(sid, "请求已结束但前端没有收到开始事件，已自动恢复界面状态。");
           return;
@@ -843,7 +891,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         scheduleAwaitingAgentStartGuard(sid, turnId);
       }
     }, AWAITING_AGENT_START_TIMEOUT_MS);
-  }, [clearAwaitingAgentStartGuard, connectEvents, stopStuckAwaitingAgentStart]);
+  }, [clearAwaitingAgentStartGuard, connectEvents, loadSession, stopStuckAwaitingAgentStart]);
 
   const waitForEventsReady = useCallback((sid: string, timeoutMs = 700) => new Promise<void>((resolve) => {
     const es = eventSourceRef.current;
@@ -1051,6 +1099,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             // We optimistically append the user's prompt in handleSend/handleFollowUp.
             // DeerHux may later emit a message_end for that same user message; don't append it again.
             if (normalized.role === "user") {
+              const incomingClientMessageId = normalized.clientMessageId;
+              if (
+                incomingClientMessageId
+                && prev.some((m): m is UserMessage => m.role === "user" && m.clientMessageId === incomingClientMessageId)
+              ) {
+                return prev;
+              }
               const completedKey = userContentKey(normalized);
               const lastUser = [...prev].reverse().find((m) => m.role === "user");
               if (completedKey && lastUser && userContentKey(lastUser) === completedKey) {
@@ -1170,11 +1225,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const currentTurnId = turnIdRef.current;
     setPlanReady(false);
 
+    const clientMessageId = createClientMessageId();
     const userMsg: AgentMessage = {
       role: "user",
       content: buildUserContent(message, images),
       ...(sentReferences ? { references: sentReferences } : {}),
       ...(skill ? { skill } : {}),
+      clientMessageId,
       timestamp: Date.now(),
     };
     setMessages((prev) => [...prev, userMsg]);
@@ -1251,6 +1308,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         await sendAgentCommand(realId, {
           type: "prompt",
           message,
+          clientMessageId,
           ...(sentReferences ? { references: sentReferences } : {}),
           ...(piImages?.length ? { images: piImages } : {}),
           ...(skill ? { skillName: skill.name } : {}),
@@ -1261,6 +1319,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         await sendAgentCommand(session.id, {
           type: "prompt",
           message,
+          clientMessageId,
           ...(sentReferences ? { references: sentReferences } : {}),
           ...(piImages?.length ? { images: piImages } : {}),
           ...(roleId ? { roleId } : {}),
@@ -1622,6 +1681,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const res = await fetch(`/api/agent/${encodeURIComponent(sid)}`, { cache: "no-store" });
         const d = await res.json().catch(() => ({})) as { running?: boolean; state?: { isStreaming?: boolean; isCompacting?: boolean }; status?: AgentStatus };
         const status = d.status;
+        await loadSession(sid, false, true);
+        if (Date.now() - lastContentChangedAtRef.current < warningMs) {
+          setStallLevel(null);
+          return;
+        }
 
         // Backend compacting — reconnect and wait
         if (d.running && (d.state?.isCompacting || status?.isCompacting)) {
@@ -1765,6 +1829,23 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setAutoRecoveryModeState(mode);
     if (typeof window !== "undefined") {
       window.localStorage.setItem("deerhux.auto-recovery-mode", mode);
+    }
+  }, []);
+
+  // Flip the subagent capability toggle: persists to localStorage and pushes
+  // the new state to the current session (if any).
+  const handleSubagentToggle = useCallback(() => {
+    const next = !subagentEnabledRef.current;
+    subagentEnabledRef.current = next;
+    setSubagentEnabledState(next);
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem("deerhux.subagent-enabled", String(next));
+    }
+    const sid = sessionIdRef.current;
+    if (sid) {
+      sendAgentCommand(sid, { type: "set_subagent_enabled", enabled: next }).catch((e) => {
+        console.error("Failed to toggle subagent capability:", e);
+      });
     }
   }, []);
 
@@ -2022,11 +2103,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     let tickController: AbortController | null = null;
 
     const tick = async () => {
-      // Skip while the agent is running: SSE already pushes every message
-      // event, so polling would only add load to a busy backend. Also bail
-      // if the user has switched away from this session.
       if (stopped || inFlight || sessionIdRef.current !== activeSessionId) return;
-      if (agentRunningRef.current) return;
+      const isRunning = agentRunningRef.current;
+      if (isRunning) {
+        const now = Date.now();
+        const sseQuietMs = now - lastAgentEventAtRef.current;
+        const contentQuietMs = now - lastContentChangedAtRef.current;
+        const shouldPollRunning = awaitingAgentStartRef.current || sseQuietMs > 15_000 || contentQuietMs > 15_000;
+        if (!shouldPollRunning) return;
+      }
 
       inFlight = true;
       tickController = new AbortController();
@@ -2043,25 +2128,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // cascade of warnings.
       const timeout = setTimeout(() => tickController?.abort(), 10_000);
       try {
-        const res = await fetch(`/api/sessions/${encodeURIComponent(activeSessionId)}`, {
+        const url = `/api/sessions/${encodeURIComponent(activeSessionId)}${isRunning ? "?includeState" : ""}`;
+        const res = await fetch(url, {
           cache: "no-store",
           signal: tickController.signal,
         });
         if (!res.ok) return;
-        const d = await res.json() as SessionData;
+        const d = await res.json() as SessionDataWithAgentState;
         if (stopped || sessionIdRef.current !== activeSessionId) return;
-        const prevKey = entryIdsRef.current.join("\0");
-        const nextEntryIds = d.context.entryIds ?? [];
-        const nextKey = nextEntryIds.join("\0");
-        if (nextKey && nextKey !== prevKey) {
-          setData(d);
-          const { messages: loadedMessages2, entryIds: loadedEntryIds2 } = normalizeLoadedMessages(d.context.messages, d.context.entryIds);
-          setMessages(loadedMessages2);
-          setEntryIds(loadedEntryIds2);
-          setCurrentModelOverride(null);
-          setAgentMode(normalizeAgentMode(d.context.agentMode));
-          setError(null);
-        }
+        applySessionSnapshot(d);
       } catch {
         // ignore transient polling errors (incl. abort on session switch)
       } finally {
@@ -2071,17 +2146,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
     };
 
-    // 6s cadence (was 2.5s): the SSE channel covers live updates; this is
-    // only a fallback for external writers (e.g. wechat-bot) when SSE
-    // delivery is unreliable. Combined with the agent-running skip above,
-    // this cuts background request volume by ~80% during active turns.
+    // 6s cadence: SSE is still the primary live channel, but when it goes
+    // quiet during an active turn we read the session snapshot so the UI
+    // recovers the same way a manual reload would.
     const timer = window.setInterval(tick, 6000);
     return () => {
       stopped = true;
       window.clearInterval(timer);
       tickController?.abort();
     };
-  }, [activeSessionId, newSessionCwd]);
+  }, [activeSessionId, applySessionSnapshot, newSessionCwd]);
 
   useEffect(() => {
     onSystemPromptChange?.(systemPrompt);
@@ -2145,6 +2219,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     retryInfo, contextUsage, systemPrompt: systemPrompt ?? lastSystemPromptRef.current, forkingEntryId,
     isCompacting, compactError, lastModelError, currentModel, displayModel, sessionStats,
     agentPhase, watchdogInfo, stallLevel, autoRecoveryMode,
+    subagentEnabled,
     isNew,
     // Refs
     sessionIdRef, eventSourceRef, messagesEndRef, scrollContainerRef,
@@ -2153,7 +2228,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     handleSend, handleAbort, handleFork, handleModelChange,
     handleCompact, handleSteer, handleFollowUp, handleAbortCompaction,
     handleToolPresetChange, handleAgentModeChange, handleBuildPlan, handleThinkingLevelChange, loadTools, setData, setMessages,
-    setSystemPrompt, setLastModelError, handleAutoRecover, handleDismissStall, handleAutoRecoveryModeChange,
+    setSystemPrompt, setLastModelError, handleAutoRecover, handleDismissStall, handleAutoRecoveryModeChange, handleSubagentToggle,
     dispatch, setAgentRunning, setForkingEntryId,
   };
 }

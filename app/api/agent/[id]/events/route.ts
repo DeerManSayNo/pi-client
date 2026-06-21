@@ -1,10 +1,17 @@
 import path from "path";
 import { addAllowedRoot } from "@/lib/file-access";
-import { buildSessionContext, resolveSessionPath } from "@/lib/session-reader";
-import { getRpcSession, startRpcSession } from "@/lib/rpc-manager";
-import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { ensureRpcSession, SessionNotFoundError } from "@/lib/agent-runtime/session-service";
+import { getAgentEventStore } from "@/lib/agent-runtime/event-store";
 
 export const dynamic = "force-dynamic";
+
+function resolveAfterSeq(req: Request): number | undefined {
+  const url = new URL(req.url);
+  const raw = url.searchParams.get("after") ?? req.headers.get("last-event-id");
+  if (!raw) return undefined;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
 
 // GET /api/agent/[id]/events - SSE stream of agent events
 export async function GET(
@@ -13,22 +20,14 @@ export async function GET(
 ) {
   const { id } = await params;
 
-  // Fast path: already-running session
-  let session = getRpcSession(id);
-  if (!session || !session.isAlive()) {
-    const filePath = await resolveSessionPath(id);
-    if (!filePath) {
+  let session;
+  try {
+    session = await ensureRpcSession(id);
+  } catch (error) {
+    if (error instanceof SessionNotFoundError) {
       return new Response("Session not found", { status: 404 });
     }
-    const sm = SessionManager.open(filePath);
-    const cwd = sm.getHeader()?.cwd ?? process.cwd();
-    const context = buildSessionContext(sm.getEntries() as never, sm.getLeafId());
-    try {
-      ({ session } = await startRpcSession(id, filePath, cwd, undefined, context.roleId ?? null, context.agentMode ?? "agent"));
-      addAllowedRoot(cwd);
-    } catch (error) {
-      return new Response(`Failed to start agent: ${error}`, { status: 500 });
-    }
+    return new Response(`Failed to start agent: ${error}`, { status: 500 });
   }
 
   const stream = new ReadableStream({
@@ -40,6 +39,17 @@ export async function GET(
 
       // Send initial connected event
       encode({ type: "connected", sessionId: id });
+
+      const afterSeq = resolveAfterSeq(req);
+      for (const stored of getAgentEventStore().getSince(id, afterSeq)) {
+        encode({
+          ...stored.event,
+          seq: stored.seq,
+          runId: stored.runId,
+          createdAt: stored.createdAt,
+          ...(stored.turnId ? { turnId: stored.turnId } : {}),
+        });
+      }
 
       const unsubscribe = session.onEvent((event) => {
         if (event && typeof event === "object" && "type" in event && event.type === "agent_file_changed") {

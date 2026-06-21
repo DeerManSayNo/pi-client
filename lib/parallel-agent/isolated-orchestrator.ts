@@ -19,6 +19,8 @@ import {
 } from "./worktree";
 import { buildIsolatedWorkerPrompt } from "./prompts";
 
+const WORKER_INACTIVITY_TIMEOUT_MS = 30 * 60 * 1000;
+
 // ============================================================================
 // Run store
 // ============================================================================
@@ -104,15 +106,30 @@ async function createIsolatedWorkerSession(
     runWorker: async (prompt: string) => {
       return new Promise((resolve, reject) => {
         let settled = false;
-        const settle = (fn: () => void) => { if (!settled) { settled = true; fn(); } };
+        let timeout: ReturnType<typeof setTimeout> | null = null;
+        let unsubInner: () => void = () => undefined;
+        const settle = (fn: () => void) => {
+          if (settled) return;
+          settled = true;
+          if (timeout) clearTimeout(timeout);
+          unsubInner();
+          fn();
+        };
 
-        const timeout = setTimeout(() => settle(() => reject(new Error("Isolated worker session timed out after 10 minutes"))), 10 * 60 * 1000);
+        const resetTimeout = () => {
+          if (timeout) clearTimeout(timeout);
+          timeout = setTimeout(() => settle(() => reject(new Error("Isolated worker session made no progress for 30 minutes"))), WORKER_INACTIVITY_TIMEOUT_MS);
+        };
+        resetTimeout();
 
-        const unsubInner = inner.subscribe((event: AgentEvent) => {
+        unsubInner = inner.subscribe((event: AgentEvent) => {
+          resetTimeout();
+          if (event.type === "agent_end" && event.error) {
+            settle(() => reject(new Error(String(event.error))));
+            return;
+          }
           if (event.type === "agent_end" && event.messages) {
             settle(() => {
-              clearTimeout(timeout);
-              unsubInner();
               const messages = event.messages as Array<{ role: string; content?: string | Array<{ type: string; text?: string; thinking?: string }> }>;
               const lastAssistant = [...messages].reverse().find(m => m.role === "assistant");
               if (lastAssistant) {
@@ -131,7 +148,9 @@ async function createIsolatedWorkerSession(
           }
         });
 
-        inner.prompt(prompt).catch(reject);
+        inner.prompt(prompt).catch((error: unknown) => {
+          settle(() => reject(error));
+        });
       });
     },
     abort: async () => { await inner.abort(); },

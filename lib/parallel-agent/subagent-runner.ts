@@ -4,6 +4,8 @@ import { startRpcSession, type AgentEvent } from "@/lib/rpc-manager";
 import { getAgentDir, resolveSessionPath } from "@/lib/session-reader";
 import type { CollaborationRunMode } from "./collaboration-types";
 
+const WORKER_INACTIVITY_TIMEOUT_MS = 30 * 60 * 1000;
+
 export type WorkerSession = {
   sessionId: string;
   sendPrompt: (message: string) => Promise<string>;
@@ -51,29 +53,32 @@ export async function createSubagentWorkerSession(cwd: string, mode: Collaborati
     sessionId: realSessionId,
     sendPrompt: (message: string) => new Promise((resolve, reject) => {
       let settled = false;
+      let timeout: ReturnType<typeof setTimeout> | null = null;
       const settle = (fn: () => void) => {
         if (settled) return;
         settled = true;
+        if (timeout) clearTimeout(timeout);
+        unsubscribe();
         fn();
       };
       let unsubscribe: () => void = () => undefined;
-      const timeout = setTimeout(() => settle(() => {
-        unsubscribe();
-        reject(new Error("Worker session timed out after 10 minutes"));
-      }), 10 * 60 * 1000);
+      const resetTimeout = () => {
+        if (timeout) clearTimeout(timeout);
+        timeout = setTimeout(() => settle(() => {
+          reject(new Error("Worker session made no progress for 30 minutes"));
+        }), WORKER_INACTIVITY_TIMEOUT_MS);
+      };
+      resetTimeout();
       unsubscribe = session.onEvent((event: AgentEvent) => {
+        resetTimeout();
         if (event.type === "agent_end" && event.error) {
           settle(() => {
-            clearTimeout(timeout);
-            unsubscribe();
             reject(new Error(String(event.error)));
           });
           return;
         }
         if (event.type === "agent_end" && Array.isArray(event.messages)) {
           settle(() => {
-            clearTimeout(timeout);
-            unsubscribe();
             const messages = event.messages as Array<{ role: string; content?: unknown; stopReason?: string; errorMessage?: string }>;
             const assistantError = getAssistantError(messages);
             if (assistantError) reject(new Error(assistantError));
@@ -83,8 +88,6 @@ export async function createSubagentWorkerSession(cwd: string, mode: Collaborati
       });
       session.send({ type: "prompt", message }).catch((error: unknown) => {
         settle(() => {
-          clearTimeout(timeout);
-          unsubscribe();
           reject(error);
         });
       });

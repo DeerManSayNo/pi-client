@@ -91,6 +91,8 @@ interface Props {
   onAutoRecover?: () => void;
   onDismissStall?: () => void;
   onAutoRecoveryModeChange?: (mode: AutoRecoveryMode) => void;
+  subagentEnabled?: boolean;
+  onSubagentToggle?: () => void;
 }
 
 export interface ChatInputHandle {
@@ -155,6 +157,8 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   onAutoRecover,
   onDismissStall,
   onAutoRecoveryModeChange,
+  subagentEnabled = false,
+  onSubagentToggle,
   initialInputState,
   saveInputStateRef,
 }: Props, ref) {
@@ -1714,6 +1718,46 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
 
           {/* RIGHT: collapsed assistant controls */}
           <div ref={moreMenuRef} style={{ flex: "0 0 auto", position: "relative", display: "flex", alignItems: "center", marginLeft: "auto" }}>
+            {onSubagentToggle && (
+              <button
+                type="button"
+                onClick={onSubagentToggle}
+                title={subagentEnabled ? "Subagent 能力已开启：主 Agent 可派生隔离子 Agent（点击关闭）" : "开启 Subagent 能力：让主 Agent 可派生隔离子 Agent（点击开启）"}
+                aria-label={subagentEnabled ? "关闭 Subagent 能力" : "开启 Subagent 能力"}
+                aria-pressed={subagentEnabled}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  width: 32,
+                  height: 32,
+                  padding: 0,
+                  marginRight: 2,
+                  background: subagentEnabled ? "rgba(37,99,235,0.10)" : "none",
+                  border: "none",
+                  borderRadius: 9,
+                  color: subagentEnabled ? "var(--accent)" : "var(--text-muted)",
+                  cursor: "pointer",
+                  transition: "background 0.12s, color 0.12s",
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.background = subagentEnabled ? "rgba(37,99,235,0.16)" : "var(--bg-hover)";
+                  e.currentTarget.style.color = "var(--text)";
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = subagentEnabled ? "rgba(37,99,235,0.10)" : "none";
+                  e.currentTarget.style.color = subagentEnabled ? "var(--accent)" : "var(--text-muted)";
+                }}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="12" cy="18" r="2.5" />
+                  <circle cx="5" cy="6" r="2" />
+                  <circle cx="19" cy="6" r="2" />
+                  <path d="M10 16 L7 8" />
+                  <path d="M14 16 L17 8" />
+                </svg>
+              </button>
+            )}
             <button
               type="button"
               onClick={() => setMoreMenuOpen((open) => !open)}

@@ -10,6 +10,8 @@ import { applyRolePromptConfigToPrompt, isRoleSystemPromptSectionEnabled, readRo
 import { indexExists } from "./code-index/database";
 import { searchIndex } from "./code-index/search";
 import { createCodeGraphTools } from "./codegraph/tools";
+import { createSubagentTool, SUBAGENT_TOOL_NAME } from "./parallel-agent/subagent-tool";
+import { getAgentEventStore } from "./agent-runtime/event-store";
 import type { FileReference, ImageContent, SkillReference, TextContent } from "./types";
 import type { McpRuntime, McpRuntimeLease } from "./mcp-runtime";
 import {
@@ -185,6 +187,21 @@ function setEffectiveSystemPrompt(session: AgentSessionLike, prompt: string): vo
   (session as unknown as { _baseSystemPrompt?: string })._baseSystemPrompt = prompt;
 }
 
+const TURN_CONTEXT_BLOCK_RE = /\n*<turn_context>[\s\S]*?<\/turn_context>\s*/g;
+
+/**
+ * Remove any `<turn_context>…</turn_context>` blocks left over from a previous
+ * turn. The per-turn context block is appended to the system prompt by
+ * `withTemporarySystemPrompt` and must never leak into `baseSystemPrompt` —
+ * otherwise the first turn's context (references/skill/mode) would be frozen
+ * into every subsequent turn. Call this whenever we capture the system prompt
+ * back from `agent.state` (where the SDK may still hold a turn-specific value)
+ * into our own `baseSystemPrompt`.
+ */
+function stripTurnContextBlock(prompt: string): string {
+  return prompt.replace(TURN_CONTEXT_BLOCK_RE, "").trimEnd();
+}
+
 type ProjectContextFile = { path: string; content: string };
 
 const PROJECT_CONTEXT_COMPACT_THRESHOLD = 2500;
@@ -334,6 +351,7 @@ const TOOL_EXECUTION_MODES: Record<string, "parallel" | "sequential"> = {
   find: "parallel",
   ls: "parallel",
   code_search: "parallel",
+  [SUBAGENT_TOOL_NAME]: "parallel",
   bash: "sequential",
   edit: "sequential",
   write: "sequential",
@@ -407,12 +425,14 @@ export class AgentSessionWrapper {
   private activeTurnId = 0;
   private activeTurnPromise: Promise<void> | null = null;
   private sawAssistantEventInTurn = false;
+  /** When true, the spawn_subagent tool is kept in the active tool set. */
+  private _subagentEnabled = false;
 
   constructor(public readonly inner: AgentSessionLike, roleId?: string | null, private mcpRuntimeLease?: McpRuntimeLease | null, agentMode?: AgentMode | null) {
     this.roleId = roleId ?? null;
     this.agentMode = normalizeAgentMode(agentMode);
     this.modePromptEnabled = agentMode !== undefined && agentMode !== null;
-    this.baseSystemPrompt = stripModePrompt(inner.agent.state?.systemPrompt ?? "");
+    this.baseSystemPrompt = stripModePrompt(stripTurnContextBlock(inner.agent.state?.systemPrompt ?? ""));
     this.applyRolePrompt();
   }
 
@@ -442,7 +462,21 @@ export class AgentSessionWrapper {
     if (currentKey === nextKey) return;
 
     this.inner.setActiveToolsByName(nextActive);
-    if (this.inner.agent.state) this.baseSystemPrompt = stripModePrompt(this.inner.agent.state.systemPrompt ?? "");
+    if (this.inner.agent.state) this.baseSystemPrompt = stripModePrompt(stripTurnContextBlock(this.inner.agent.state.systemPrompt ?? ""));
+  }
+
+  /** Keep spawn_subagent in (or out of) the active tool set based on the toggle. */
+  private applySubagentToActiveTools(): void {
+    const all = this.inner.getAllTools();
+    if (!all.some((t) => t.name === SUBAGENT_TOOL_NAME)) return; // tool not registered for this session
+    const current = this.inner.getActiveToolNames();
+    if (this._subagentEnabled) {
+      if (!current.includes(SUBAGENT_TOOL_NAME)) {
+        this.inner.setActiveToolsByName([...current, SUBAGENT_TOOL_NAME]);
+      }
+    } else if (current.includes(SUBAGENT_TOOL_NAME)) {
+      this.inner.setActiveToolsByName(current.filter((name) => name !== SUBAGENT_TOOL_NAME));
+    }
   }
 
   private applyRolePrompt(): void {
@@ -472,18 +506,20 @@ export class AgentSessionWrapper {
     } else {
       this.inner.setActiveToolsByName(getToolNamesForAgentMode(this.agentMode));
     }
-    if (this.inner.agent.state) this.baseSystemPrompt = stripModePrompt(this.inner.agent.state.systemPrompt ?? "");
+    this.applySubagentToActiveTools();
+    if (this.inner.agent.state) this.baseSystemPrompt = stripModePrompt(stripTurnContextBlock(this.inner.agent.state.systemPrompt ?? ""));
     this.applyRolePrompt();
     if (persist) this.persistAgentMode();
   }
 
-  private appendDisplayUserMessage(content: unknown, references: FileReference[], skill?: SkillReference): void {
+  private appendDisplayUserMessage(content: unknown, references: FileReference[], skill?: SkillReference, clientMessageId?: string): void {
     if (!this.inner.sessionManager.isPersisted()) return;
     try {
       this.inner.sessionManager.appendCustomEntry("display_user_message", {
         content,
         ...(references.length ? { references } : {}),
         ...(skill ? { skill } : {}),
+        ...(clientMessageId ? { clientMessageId } : {}),
         agentMode: this.agentMode,
       });
     } catch { /* best effort: only affects UI history display */ }
@@ -565,7 +601,13 @@ export class AgentSessionWrapper {
   }
 
   private withTemporarySystemPrompt<T>(turnPromptBlock: string, run: () => Promise<T>): Promise<T> {
-    const currentPrompt = this.inner.agent.state?.systemPrompt ?? "";
+    // Strip any stale <turn_context> block that may have been baked into the
+    // state by a previous turn (e.g. after a tool-set change during the turn
+    // re-synced baseSystemPrompt from agent.state). This guarantees each turn
+    // is assembled from the *current* role/mode config plus this turn's block,
+    // so the model always sees the freshly-assembled prompt instead of the
+    // very first turn's frozen context.
+    const currentPrompt = stripTurnContextBlock(this.inner.agent.state?.systemPrompt ?? "");
     const nextPrompt = turnPromptBlock.trim() ? `${currentPrompt}\n\n${turnPromptBlock.trim()}` : currentPrompt;
     if (turnPromptBlock.trim()) setEffectiveSystemPrompt(this.inner, nextPrompt);
     return run().finally(() => {
@@ -605,6 +647,11 @@ export class AgentSessionWrapper {
     liveIsland.trackSession(this.inner.sessionId, cwd);
 
     this.unsubscribe = this.inner.subscribe((event: AgentEvent) => {
+      getAgentEventStore().append({
+        sessionId: this.inner.sessionId,
+        runId: this.inner.sessionId,
+        event,
+      });
       this.recordEventStatus(event);
       this.resetIdleTimer();
       for (const l of this.listeners) l(event);
@@ -627,16 +674,23 @@ export class AgentSessionWrapper {
       if (changedFilePath && currentCwd) {
         const resolved = resolveChangedFilePath(changedFilePath, currentCwd);
         if (resolved) {
-          for (const l of this.listeners) l({ type: "agent_file_changed", filePath: resolved, toolName: extractToolName(sourceEvent) });
+          const fileChangedEvent: AgentEvent = { type: "agent_file_changed", filePath: resolved, toolName: extractToolName(sourceEvent) };
+          getAgentEventStore().append({
+            sessionId: this.inner.sessionId,
+            runId: this.inner.sessionId,
+            event: fileChangedEvent,
+          });
+          for (const l of this.listeners) l(fileChangedEvent);
         }
       }
     });
     this.resetIdleTimer();
   }
 
-  // Idle timeout: 10 min normally, but extended to 30 min during active tool
-  // execution to avoid killing the session mid-build / mid-install.
+  // Idle timeout: keep inactive wrappers cheap, but never kill a running turn
+  // just because a reasoning model stays quiet for longer than 10 minutes.
   private static readonly IDLE_TIMEOUT_MS = 10 * 60 * 1000;
+  private static readonly ACTIVE_TURN_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
   private static readonly TOOL_EXEC_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
   // How long before the hard idle destroy we emit an `agent_stale_warning`
   // event, giving the frontend a chance to auto-recover (abort + follow_up)
@@ -655,7 +709,9 @@ export class AgentSessionWrapper {
     const hasActiveTools = this.pendingToolEvents.size > 0;
     const timeout = hasActiveTools
       ? AgentSessionWrapper.TOOL_EXEC_IDLE_TIMEOUT_MS
-      : AgentSessionWrapper.IDLE_TIMEOUT_MS;
+      : this._isRunning
+        ? AgentSessionWrapper.ACTIVE_TURN_IDLE_TIMEOUT_MS
+        : AgentSessionWrapper.IDLE_TIMEOUT_MS;
     this.idleTimer = setTimeout(() => this.destroy(), timeout);
 
     // Only schedule a stale warning while a turn is actively running. An idle
@@ -847,7 +903,7 @@ export class AgentSessionWrapper {
     configureToolExecutionModes(this.inner);
 
     if (this.inner.agent.state) {
-      this.baseSystemPrompt = this.inner.agent.state.systemPrompt ?? "";
+      this.baseSystemPrompt = stripTurnContextBlock(this.inner.agent.state.systemPrompt ?? "");
     }
     this.applyRolePrompt();
   }
@@ -972,6 +1028,9 @@ export class AgentSessionWrapper {
         // Fire and forget — events come via subscribe. Track the promise so an
         // abort + follow_up recovery can wait for the old turn to settle.
         const promptImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
+        const clientMessageId = typeof command.clientMessageId === "string" && command.clientMessageId.trim()
+          ? command.clientMessageId.trim()
+          : undefined;
         const prepared = await this.prepareImageFallback(turnContext.message, promptImages, turnContext.displayMessage);
 
         // 外部远程连接（如微信 Bot）触发 prompt 时，前端没有本地乐观追加 user 消息。
@@ -987,6 +1046,7 @@ export class AgentSessionWrapper {
               content: displayUserContent,
               ...(turnContext.references.length ? { references: turnContext.references } : {}),
               ...(turnContext.skill ? { skill: turnContext.skill } : {}),
+              ...(clientMessageId ? { clientMessageId } : {}),
               agentMode: this.agentMode,
               timestamp: Date.now(),
             },
@@ -994,7 +1054,7 @@ export class AgentSessionWrapper {
         }
 
         this.appendTurnContextMetadata(turnContext.references, turnContext.skill);
-        this.appendDisplayUserMessage(displayUserContent, turnContext.references, turnContext.skill);
+        this.appendDisplayUserMessage(displayUserContent, turnContext.references, turnContext.skill, clientMessageId);
         this.trackTurn(this.withTemporarySystemPrompt(turnContext.systemPromptBlock, () => (
           this.inner.prompt(prepared.message, toSdkImages(prepared.images) ? { images: toSdkImages(prepared.images)! } : undefined)
         )));
@@ -1211,7 +1271,7 @@ export class AgentSessionWrapper {
         const requested = Array.isArray(command.toolNames) ? command.toolNames.filter((name): name is string => typeof name === "string") : [];
         if (isReadOnlyAgentMode(this.agentMode)) {
           this.inner.setActiveToolsByName(getToolNamesForAgentMode(this.agentMode));
-          if (this.inner.agent.state) this.baseSystemPrompt = stripModePrompt(this.inner.agent.state.systemPrompt ?? "");
+          if (this.inner.agent.state) this.baseSystemPrompt = stripModePrompt(stripTurnContextBlock(this.inner.agent.state.systemPrompt ?? ""));
           this.applyRolePrompt();
           return null;
         }
@@ -1223,9 +1283,18 @@ export class AgentSessionWrapper {
           ? [...new Set([...requested, ...(this.mcpRuntime?.toolNames ?? [])])]
           : requested;
         this.inner.setActiveToolsByName(toolNames);
-        if (this.inner.agent.state) this.baseSystemPrompt = stripModePrompt(this.inner.agent.state.systemPrompt ?? "");
+        this.applySubagentToActiveTools();
+        if (this.inner.agent.state) this.baseSystemPrompt = stripModePrompt(stripTurnContextBlock(this.inner.agent.state.systemPrompt ?? ""));
         this.applyRolePrompt();
         return null;
+      }
+
+      case "set_subagent_enabled": {
+        this._subagentEnabled = command.enabled === true;
+        this.applySubagentToActiveTools();
+        if (this.inner.agent.state) this.baseSystemPrompt = stripModePrompt(stripTurnContextBlock(this.inner.agent.state.systemPrompt ?? ""));
+        this.applyRolePrompt();
+        return { enabled: this._subagentEnabled };
       }
 
       case "get_mode": {
@@ -1385,6 +1454,10 @@ export async function startRpcSession(
       },
     }) : null;
     const codeGraphTools = await createCodeGraphTools(cwd);
+    // Holder is mutated once the real session id is known so the subagent tool
+    // can attach its runs to this session at execution time.
+    const sessionIdHolder: { id: string | undefined } = { id: undefined };
+    const subagentTool = createSubagentTool(cwd, { getParentSessionId: () => sessionIdHolder.id });
     const hasExplicitMode = agentMode !== undefined && agentMode !== null;
     const effectiveMode = normalizeAgentMode(agentMode);
     const requestedToolNames = toolNames ?? (hasExplicitMode ? getToolNamesForAgentMode(effectiveMode) : []);
@@ -1393,7 +1466,7 @@ export async function startRpcSession(
       ? await import("./mcp-runtime").then(({ acquireMcpRuntime }) => acquireMcpRuntime(cwd))
       : null;
     const mcpRuntime = mcpRuntimeLease?.runtime ?? null;
-    const customTools = [...(codeSearchTool ? [codeSearchTool] : []), ...codeGraphTools, ...(mcpRuntime?.tools ?? [])];
+    const customTools = [...(codeSearchTool ? [codeSearchTool] : []), ...codeGraphTools, subagentTool, ...(mcpRuntime?.tools ?? [])];
     const availableToolNames = [
       ...allCodingToolNames,
       ...(codeSearchTool ? ["code_search"] : []),
@@ -1410,6 +1483,18 @@ export async function startRpcSession(
         const available = new Set(availableToolNames);
         toolsOption = requestedToolNames.filter((name) => available.has(name));
       }
+    }
+
+    // spawn_subagent is registered as a custom tool, but the SDK derives its
+    // allowed-tool whitelist (`allowedToolNames`) from the `tools` option. If
+    // spawn_subagent isn't in that whitelist, `_refreshToolRegistry` filters it
+    // out of the registry entirely — so `getAllTools()` never returns it and
+    // the `set_subagent_enabled` toggle silently no-ops (applySubagentToActiveTools
+    // early-returns). Add it to the whitelist whenever any tools are enabled;
+    // whether it is *active* is still driven by `_subagentEnabled` via
+    // setActiveToolsByName after creation.
+    if (toolsOption && toolsOption.length > 0 && !toolsOption.includes(SUBAGENT_TOOL_NAME)) {
+      toolsOption.push(SUBAGENT_TOOL_NAME);
     }
 
     let inner: AgentSessionLike;
@@ -1454,6 +1539,7 @@ export async function startRpcSession(
     wrapper.start();
 
     const realSessionId = inner.sessionId as string;
+    sessionIdHolder.id = realSessionId;
     const realSessionFile = inner.sessionFile as string | undefined;
     if (realSessionFile) cacheSessionPath(realSessionId, realSessionFile);
     if (!sessionFile) invalidateSessionListCache();

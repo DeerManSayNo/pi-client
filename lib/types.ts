@@ -64,6 +64,8 @@ export interface UserMessage {
   skill?: SkillReference;
   agentMode?: AgentMode;
   timestamp?: number;
+  /** Client-generated id used to reconcile optimistic local user messages with server echoes. */
+  clientMessageId?: string;
 }
 
 export interface AssistantMessage {
