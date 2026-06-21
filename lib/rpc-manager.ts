@@ -1,9 +1,12 @@
 import path from "path";
 import { existsSync, readFileSync } from "fs";
-import { createAgentSession, defineTool, SessionManager, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, defineTool, SessionManager, type AgentSession } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { cacheSessionPath, invalidateSessionListCache } from "./session-reader";
-import type { AgentSessionLike, ToolInfo } from "./deerhux-types";
+import type { ToolInfo } from "./deerhux-types";
+import { PiEngineAdapter } from "./engine/pi-engine-adapter";
+import type { AgentEnginePort } from "./engine/port";
+import { detectPiPrivateFields } from "./engine/sdk-guard";
 import { getLiveIslandClient } from "./live-island-client";
 import { applyRolePromptToSystemPrompt } from "./roles";
 import { applyRolePromptConfigToPrompt, isRoleSystemPromptSectionEnabled, readRoleSystemPromptConfig } from "./system-prompt-decomposer";
@@ -177,16 +180,6 @@ function resolveChangedFilePath(filePath: string, cwd: string): string | null {
   return path.isAbsolute(trimmed) ? path.resolve(trimmed) : path.resolve(cwd, trimmed);
 }
 
-function setEffectiveSystemPrompt(session: AgentSessionLike, prompt: string): void {
-  if (session.agent.state) session.agent.state.systemPrompt = prompt;
-
-  // DeerHux's AgentSession.prompt() resets agent.state.systemPrompt back to its
-  // private _baseSystemPrompt before every turn. If we only mutate state here,
-  // the UI preview looks correct but the next new prompt silently uses the old
-  // built-in prompt again. Keep the base prompt in sync as well.
-  (session as unknown as { _baseSystemPrompt?: string })._baseSystemPrompt = prompt;
-}
-
 const TURN_CONTEXT_BLOCK_RE = /\n*<turn_context>[\s\S]*?<\/turn_context>\s*/g;
 
 /**
@@ -270,92 +263,9 @@ function compactProjectContextFiles(base: { agentsFiles: ProjectContextFile[] })
   };
 }
 
-const MIN_AUTO_RETRY_DELAY_MS = 5000;
-const AUTO_RETRY_SETTLE_MS = 1000;
-const PREMATURE_STREAM_ERROR_RE = /connection.?lost|websocket.?closed|websocket.?error|other side closed|ended without|stream ended before message_stop|http2 request did not get a response|terminated/i;
-
-type AssistantLike = {
-  stopReason?: string;
-  errorMessage?: string;
-  content?: unknown;
-};
-
-function getAssistantContentLength(message: AssistantLike): number {
-  const content = message.content;
-  if (typeof content === "string") return content.trim().length;
-  if (!Array.isArray(content)) return 0;
-
-  let length = 0;
-  for (const block of content) {
-    if (!isRecord(block)) continue;
-    if (typeof block.text === "string") length += block.text.trim().length;
-    else if (typeof block.thinking === "string") length += block.thinking.trim().length;
-  }
-  return length;
-}
-
 function sleepMs(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
-
-function hardenAutoRetry(session: AgentSessionLike): void {
-  const settingsManager = session.settingsManager as unknown as {
-    getRetrySettings?: () => { enabled: boolean; maxRetries: number; baseDelayMs: number };
-  };
-  const originalGetRetrySettings = settingsManager.getRetrySettings?.bind(session.settingsManager);
-  if (originalGetRetrySettings) {
-    settingsManager.getRetrySettings = () => {
-      const settings = originalGetRetrySettings();
-      return { ...settings, baseDelayMs: Math.max(settings.baseDelayMs ?? 0, MIN_AUTO_RETRY_DELAY_MS) };
-    };
-  }
-
-  const rawSession = session as unknown as {
-    _isRetryableError?: (message: AssistantLike) => boolean;
-    _prepareRetry?: (message: AssistantLike) => Promise<boolean>;
-  };
-
-  const originalIsRetryableError = rawSession._isRetryableError?.bind(session);
-  if (originalIsRetryableError) {
-    rawSession._isRetryableError = (message: AssistantLike) => {
-      const retryable = originalIsRetryableError(message);
-      if (!retryable) return false;
-
-      // Premature-stream/transport-close errors are noisy: providers can emit
-      // them after a complete-looking assistant message. Retrying those causes
-      // an unnecessary `continue`. Only retry these when essentially no useful
-      // assistant content was received.
-      const err = message.errorMessage ?? "";
-      if (PREMATURE_STREAM_ERROR_RE.test(err) && getAssistantContentLength(message) >= 20) {
-        return false;
-      }
-
-      return true;
-    };
-  }
-
-  const originalPrepareRetry = rawSession._prepareRetry?.bind(session);
-  if (originalPrepareRetry) {
-    rawSession._prepareRetry = async (message: AssistantLike) => {
-      // Give SSE/tool/agent-end bookkeeping a clean quiet window before deciding
-      // to send `continue`; this avoids racing other async cleanup paths.
-      await sleepMs(AUTO_RETRY_SETTLE_MS);
-      return originalPrepareRetry(message);
-    };
-  }
-}
-
-const TOOL_EXECUTION_MODES: Record<string, "parallel" | "sequential"> = {
-  read: "parallel",
-  grep: "parallel",
-  find: "parallel",
-  ls: "parallel",
-  code_search: "parallel",
-  [SUBAGENT_TOOL_NAME]: "parallel",
-  bash: "sequential",
-  edit: "sequential",
-  write: "sequential",
-};
 
 const FULL_PRESET_MARKERS = ["bash", "edit", "write", "grep", "find", "ls"];
 
@@ -365,32 +275,6 @@ function isFullToolPreset(toolNames: string[]): boolean {
 
 function includesMcpTool(toolNames: string[]): boolean {
   return toolNames.some((name) => name.startsWith("mcp__"));
-}
-
-export function configureToolExecutionModes(session: AgentSessionLike): void {
-  const forceSequential = process.env.PI_DISABLE_PARALLEL_TOOLS === "1" || process.env.PI_DISABLE_PARALLEL_TOOLS === "true";
-  if (forceSequential) {
-    (session.agent as unknown as { toolExecution?: "parallel" | "sequential" }).toolExecution = "sequential";
-  }
-
-  const resolveMode = (name: string) => forceSequential ? "sequential" : TOOL_EXECUTION_MODES[name];
-  const registry = (session as unknown as { _toolRegistry?: Map<string, { name: string; executionMode?: "parallel" | "sequential" }> })._toolRegistry;
-  for (const [name, tool] of registry ?? []) {
-    const mode = resolveMode(name);
-    if (mode) tool.executionMode = mode;
-  }
-
-  const definitions = (session as unknown as { _toolDefinitions?: Map<string, { definition?: { executionMode?: "parallel" | "sequential" } }> })._toolDefinitions;
-  for (const [name, entry] of definitions ?? []) {
-    const mode = resolveMode(name);
-    if (mode && entry.definition) entry.definition.executionMode = mode;
-  }
-
-  const activeTools = (session.agent.state as { tools?: Array<{ name: string; executionMode?: "parallel" | "sequential" }> } | undefined)?.tools;
-  for (const tool of activeTools ?? []) {
-    const mode = resolveMode(tool.name);
-    if (mode) tool.executionMode = mode;
-  }
 }
 
 // ============================================================================
@@ -432,7 +316,7 @@ export class AgentSessionWrapper {
   /** When true, the spawn_subagent tool is kept in the active tool set. */
   private _subagentEnabled = false;
 
-  constructor(public readonly inner: AgentSessionLike, roleId?: string | null, private mcpRuntimeLease?: McpRuntimeLease | null, agentMode?: AgentMode | null) {
+  constructor(public readonly inner: AgentEnginePort, roleId?: string | null, private mcpRuntimeLease?: McpRuntimeLease | null, agentMode?: AgentMode | null) {
     this.roleId = roleId ?? null;
     this.agentMode = normalizeAgentMode(agentMode);
     this.modePromptEnabled = agentMode !== undefined && agentMode !== null;
@@ -492,7 +376,7 @@ export class AgentSessionWrapper {
     const nextPrompt = isRoleSystemPromptSectionEnabled(this.roleId, "role_profile")
       ? applyRolePromptToSystemPrompt(promptWithMode, this.roleId, this.temporaryRoleSettings, this.inner.sessionManager.getCwd())
       : promptWithMode;
-    setEffectiveSystemPrompt(this.inner, nextPrompt);
+    this.inner.setSystemPromptPersistent(nextPrompt);
   }
 
   private persistAgentMode(): void {
@@ -613,7 +497,7 @@ export class AgentSessionWrapper {
     // very first turn's frozen context.
     const currentPrompt = stripTurnContextBlock(this.inner.agent.state?.systemPrompt ?? "");
     const nextPrompt = turnPromptBlock.trim() ? `${currentPrompt}\n\n${turnPromptBlock.trim()}` : currentPrompt;
-    if (turnPromptBlock.trim()) setEffectiveSystemPrompt(this.inner, nextPrompt);
+    if (turnPromptBlock.trim()) this.inner.setSystemPromptPersistent(nextPrompt);
     return run().finally(() => {
       this.applyRolePrompt();
     });
@@ -891,30 +775,19 @@ export class AgentSessionWrapper {
     const nextMcpToolNames = new Set(nextRuntime.toolNames);
     const activeBefore = this.inner.getActiveToolNames();
 
-    const rawSession = this.inner as unknown as {
-      _customTools?: ToolDefinition[];
-      _allowedToolNames?: Set<string>;
-      _refreshToolRegistry?: (options?: { activeToolNames?: string[]; includeAllExtensionTools?: boolean }) => void;
-    };
-
-    if (!Array.isArray(rawSession._customTools) || typeof rawSession._refreshToolRegistry !== "function") {
-      throw new Error("Current AgentSession does not support runtime MCP reload");
-    }
-
-    if (rawSession._allowedToolNames && rawSession._allowedToolNames.size > 0) {
-      for (const toolName of nextMcpToolNames) rawSession._allowedToolNames.add(toolName);
-    }
-
-    rawSession._customTools = [
-      ...rawSession._customTools.filter((tool) => !previousMcpToolNames.has(tool.name) && !tool.name.startsWith("mcp__")),
-      ...nextRuntime.tools,
-    ];
-
     const nextActiveToolNames = activeBefore.filter((name) => !previousMcpToolNames.has(name) && !name.startsWith("mcp__"));
     if (activateMcp) nextActiveToolNames.push(...nextMcpToolNames);
 
-    rawSession._refreshToolRegistry({ activeToolNames: [...new Set(nextActiveToolNames)], includeAllExtensionTools: true });
-    configureToolExecutionModes(this.inner);
+    // H9：运行时热替换自定义工具。对 pi 私有字段（_customTools / _allowedToolNames /
+    // _refreshToolRegistry）的直接操作已收敛到 AgentEnginePort.replaceCustomTools。
+    // 这里只保留“保留哪些工具 / 激活哪些”的编排决策。
+    this.inner.replaceCustomTools({
+      removeNames: [...previousMcpToolNames],
+      addTools: nextRuntime.tools,
+      extraAllowedNames: [...nextMcpToolNames],
+      activeToolNames: nextActiveToolNames,
+    });
+    this.inner.applyToolExecutionModes();
 
     if (this.inner.agent.state) {
       this.baseSystemPrompt = stripTurnContextBlock(this.inner.agent.state.systemPrompt ?? "");
@@ -1105,7 +978,7 @@ export class AgentSessionWrapper {
         const rawPrompt = typeof command.prompt === "string" ? command.prompt : "";
         if (this.inner.agent.state) {
           this.baseSystemPrompt = stripModePrompt(rawPrompt);
-          setEffectiveSystemPrompt(this.inner, rawPrompt);
+          this.inner.setSystemPromptPersistent(rawPrompt);
         }
         this.applyRolePrompt();
         return {
@@ -1567,7 +1440,7 @@ export async function startRpcSession(
       toolsOption.push(SUBAGENT_TOOL_NAME);
     }
 
-    let inner: AgentSessionLike;
+    let inner: AgentSession;
     try {
       ({ session: inner } = await createAgentSession({
         cwd,
@@ -1583,34 +1456,39 @@ export async function startRpcSession(
       throw error;
     }
 
-    configureToolExecutionModes(inner);
-    hardenAutoRetry(inner);
+    // 探测 pi 私有字段是否还在（SDK 升级漂移告警）。不阻断启动。
+    detectPiPrivateFields(inner);
+
+    // 用 Port 包裹 session：9 个 hack 集中到 PiEngineAdapter。
+    const adapter = new PiEngineAdapter(inner);
+    adapter.applyToolExecutionModes();
+    adapter.installRetryHardening();
 
     // If specific tool names were requested (non-empty), narrow active tools now.
     // The frontend preset lists are static, so the "full" preset cannot enumerate
     // dynamically discovered MCP tool names. Treat the built-in full preset as
     // "all available runtime tools", including MCP.
     if (requestedToolNames.length > 0 && (toolNames !== undefined || hasExplicitMode)) {
-      const knownTools = new Set(inner.getAllTools().map((tool: ToolInfo) => tool.name));
+      const knownTools = new Set(adapter.getAllTools().map((tool: ToolInfo) => tool.name));
       const isFullPreset = !hasExplicitMode && isFullToolPreset(requestedToolNames);
       const requested = requestedToolNames.filter(name => knownTools.has(name));
       if (isFullPreset) requested.push(...(mcpRuntime?.toolNames ?? []).filter(name => knownTools.has(name)));
-      inner.setActiveToolsByName([...new Set(requested)]);
+      adapter.setActiveToolsByName([...new Set(requested)]);
     }
 
     // When all tools are disabled, clear the system prompt entirely.
     // DeerHux's buildSystemPrompt always produces a non-empty prompt even with no tools;
     // the only way to truly clear it is to call agent.setSystemPrompt directly.
     if (toolNames?.length === 0) {
-      setEffectiveSystemPrompt(inner, "");
+      adapter.setSystemPromptPersistent("");
     }
 
-    const wrapper = new AgentSessionWrapper(inner, roleId, mcpRuntimeLease, hasExplicitMode ? effectiveMode : undefined);
+    const wrapper = new AgentSessionWrapper(adapter, roleId, mcpRuntimeLease, hasExplicitMode ? effectiveMode : undefined);
     wrapper.start();
 
-    const realSessionId = inner.sessionId as string;
+    const realSessionId = adapter.sessionId;
     sessionIdHolder.id = realSessionId;
-    const realSessionFile = inner.sessionFile as string | undefined;
+    const realSessionFile = adapter.sessionFile;
     if (realSessionFile) cacheSessionPath(realSessionId, realSessionFile);
     if (!sessionFile) invalidateSessionListCache();
 
