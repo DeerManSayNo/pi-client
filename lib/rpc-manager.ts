@@ -7,6 +7,8 @@ import type { ToolInfo } from "./deerhux-types";
 import { PiEngineAdapter } from "./engine/pi-engine-adapter";
 import type { AgentEnginePort } from "./engine/port";
 import { detectPiPrivateFields } from "./engine/sdk-guard";
+import { createDeerLoop } from "./engine/factory";
+import { isDeerLoopEnabled } from "./engine/feature-flag";
 import { getLiveIslandClient } from "./live-island-client";
 import { applyRolePromptToSystemPrompt } from "./roles";
 import { applyRolePromptConfigToPrompt, isRoleSystemPromptSectionEnabled, readRoleSystemPromptConfig } from "./system-prompt-decomposer";
@@ -1352,6 +1354,18 @@ export async function startRpcSession(
   const inflight = locks.get(sessionId);
   if (inflight) return inflight;
 
+  // ★ M1 feature flag：DEERHUX_LOOP_ENGINE=deer 时走自研 DeerLoopEngine。
+  // 仅在「无工具的纯文本对话」路径灰度（toolNames 为空或未传），保证不抢现有工作流。
+  // 其余情况（带工具/MCP/角色）继续走 pi 路径，避免触碰 M2-M5 未完成的能‌力。
+  if (isDeerLoopEnabled() && (toolNames === undefined || toolNames.length === 0)) {
+    const deerStarting = (async () => {
+      const { session, realSessionId } = await startDeerLoopSession(sessionId, cwd);
+      return { session, realSessionId };
+    })().finally(() => locks.delete(sessionId));
+    locks.set(sessionId, deerStarting);
+    return deerStarting;
+  }
+
   const starting = (async () => {
     const { SessionManager, getAgentDir, DefaultResourceLoader, SettingsManager } = await import("@earendil-works/pi-coding-agent");
     const agentDir = getAgentDir();
@@ -1500,4 +1514,69 @@ export async function startRpcSession(
 
   locks.set(sessionId, starting);
   return starting;
+}
+
+// ===========================================================================
+// ★ M1：自研 DeerLoopEngine 灯度创建路径
+//
+// DEERHUX_LOOP_ENGINE=deer 且无工具时走这里。完全绕开 pi 的 createAgentSession：
+// 不加载 MCP、不预加载内置工具、不走 pi AgentSession 构造。只创建一个最轻量的
+// DeerLoopEngine（复用 pi-ai 的 streamSimple），用 AgentSessionWrapper 包装后注册。
+// 这样现有 /api/agent/new + /api/agent/[id]/events 端点零改动，发一条纯文本消息
+// 即可验证 Port 契约与流式事件。
+// ===========================================================================
+
+/**
+ * 创建 DeerLoopEngine 并包装成 AgentSessionWrapper，注册到 registry。
+ *
+ * 灯度限制（M1）：
+ * - 不支持工具（调用方传入 toolNames 时上游已拦截）。
+ * - 不支持 MCP / spawn_subagent / code_search / codegraph。
+ * - 不支持角色 prompt 注入（roleId 透传为 null，wrapper 走默认路径）。
+ * - model 从 ModelRegistry 选取第一个可用（或环境变量 DEERHUX_LOOP_MODEL=provider/modelId）。
+ */
+async function startDeerLoopSession(
+  sessionId: string,
+  cwd: string,
+): Promise<{ session: AgentSessionWrapper; realSessionId: string }> {
+  const { AuthStorage, ModelRegistry } = await import("@earendil-works/pi-coding-agent");
+  const authStorage = AuthStorage.create();
+  const modelRegistry = ModelRegistry.create(authStorage);
+
+  // 选取默认 model：优先环境变量，其次第一个可用 model。
+  let model = modelRegistry.getAvailable()[0];
+  const override = process.env.DEERHUX_LOOP_MODEL;
+  if (override) {
+    const [provider, modelId] = override.split("/");
+    if (provider && modelId) {
+      const found = modelRegistry.find(provider, modelId);
+      if (found) model = found;
+    }
+  }
+  if (!model) {
+    throw new Error(
+      "DeerLoopEngine 启动失败：未找到可用 model。请在 ~/.deerhux/agent 配置 API key，" +
+        "或设 DEERHUX_LOOP_MODEL=provider/modelId 指定模型。",
+    );
+  }
+
+  // 构造 DeerLoopEngine。getApiKey 每次调 LLM 前从 AuthStorage 解析（复用 OAuth刷新）。
+  const engine: AgentEnginePort = createDeerLoop({
+    model,
+    cwd,
+    sessionId,
+    systemPrompt: "", // M1 不做角色/模式 prompt 注入
+    getApiKey: (provider) => authStorage.getApiKey(provider),
+  });
+
+  // 用 AgentSessionWrapper 包装（无 mcp / roleId=null / agentMode=null）。
+  const wrapper = new AgentSessionWrapper(engine, null, null, null);
+  wrapper.start();
+
+  const realSessionId = engine.sessionId;
+  invalidateSessionListCache();
+  wrapper.onDestroy(() => getRegistry().delete(realSessionId));
+  getRegistry().set(realSessionId, wrapper);
+
+  return { session: wrapper, realSessionId };
 }

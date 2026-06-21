@@ -18,6 +18,12 @@ const eslintConfig = [
       "react-hooks/immutability": "off",
       "react-hooks/refs": "off",
       "react-hooks/set-state-in-effect": "off",
+      // TypeScript 项目约定：以 `_` 开头的参数/变量表示“故意未使用”（如 Port 接口
+      // 要求的 throw not-implemented 占位参数）。与 next 默认的报错规则配合使用。
+      "@typescript-eslint/no-unused-vars": [
+        "warn",
+        { argsIgnorePattern: "^_", varsIgnorePattern: "^_", caughtErrorsIgnorePattern: "^_" },
+      ],
     },
   },
   {
