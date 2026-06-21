@@ -1655,6 +1655,13 @@ async function startDeerLoopSession(
     systemPrompt = "";
   }
 
+  // ★ M6 SessionManager（jsonl 持久化）。必须在创建 engine 前注入，
+  // 否则 wrapper/DeerLoopEngine 会只拿到最小 no-op 代理，导致消息结束后 session 文件为空。
+  const { SessionManager } = await import("@earendil-works/pi-coding-agent");
+  const sessionManager = sessionFile
+    ? SessionManager.open(sessionFile, undefined)
+    : SessionManager.create(cwd, undefined);
+
   // ─── 构造 DeerLoopEngine ───
   const engine: AgentEnginePort = createDeerLoop({
     model,
@@ -1666,22 +1673,13 @@ async function startDeerLoopSession(
     // ModelRegistry.getApiKeyForProvider / getApiKeyAndHeaders 处理。直接读 AuthStorage
     // 会漏掉 Opencodego 等 models.json provider，导致 No API key。
     getApiKey: (provider) => modelRegistry.getApiKeyForProvider(provider),
+    sessionManager,
     tools: customTools,
     activeToolNames,
   });
 
   // ★ M4：安装默认重试策略
   engine.installRetryHardening();
-
-  // ★ M6 SessionManager（jsonl 持久化）
-  const { SessionManager } = await import("@earendil-works/pi-coding-agent");
-  const sessionManager = sessionFile
-    ? SessionManager.open(sessionFile, undefined)
-    : SessionManager.create(cwd, undefined);
-  // 注入 SessionStore（用 PiSessionStoreAdapter 包装）
-  // TODO: M6 灰度集成——通过 setSessionStore 注入 adapter，使 compact 等能读写 jsonl。
-  //       当前 DeerLoopEngine 的 sessionManager 是 Proxy（getCwd/isPersisted 返回基础值），
-  //       compact 不写 jsonl。后续 patch 替换为 PiSessionStoreAdapter。
 
   // 用 AgentSessionWrapper 包装
   const wrapper = new AgentSessionWrapper(engine, roleId, mcpRuntimeLease, hasExplicitMode ? effectiveMode : undefined);

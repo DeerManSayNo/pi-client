@@ -33,6 +33,7 @@ import type {
 } from "@earendil-works/pi-ai";
 import type {
   AgentSessionEvent,
+  SessionManager,
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { AgentEnginePort } from "./port.ts";
@@ -87,6 +88,8 @@ export interface DeerLoopOptions {
   streamFn?: StreamFn;
   /** API key 解析器（OAuth 短 token 用）。每次 LLM 调用前调。 */
   getApiKey?: (provider: string) => Promise<string | undefined>;
+  /** 真实 SessionManager。生产路径注入后，DeerLoopEngine 会把消息写入 jsonl。 */
+  sessionManager?: SessionManager;
 
   // ─── M2：工具注册 ───────────────────────────────────────
   /** ★ 初始工具集（defineTool / createCodeGraphTools 等产物，直接喂给 registry）。 */
@@ -273,6 +276,9 @@ export class DeerLoopEngine implements AgentEnginePort {
   /** API key 解析器。 */
   private readonly _getApiKey?: (provider: string) => Promise<string | undefined>;
 
+  /** 真实 SessionManager（生产路径注入）；未注入时回退最小代理，方便单测。 */
+  private readonly _sessionManager?: SessionManager;
+
   /** ★ M2：工具注册表（单一数据源，消灭 pi 三份副本）。 */
   private readonly registry: ToolRegistry;
 
@@ -343,6 +349,7 @@ export class DeerLoopEngine implements AgentEnginePort {
     this._thinkingLevel = options.thinkingLevel;
     this._streamFn = options.streamFn ?? defaultStreamFn;
     this._getApiKey = options.getApiKey;
+    this._sessionManager = options.sessionManager;
     this._agentState = {
       systemPrompt: this._baseSystemPrompt,
       thinkingLevel: this._thinkingLevel ?? "off",
@@ -429,6 +436,7 @@ export class DeerLoopEngine implements AgentEnginePort {
       timestamp: Date.now(),
     };
     this._messages.push(userMessage);
+    this.persistMessage(userMessage);
 
     // 2. 进入 running 态，发射 agent_start。
     this._isRunning = true;
@@ -463,6 +471,7 @@ export class DeerLoopEngine implements AgentEnginePort {
               timestamp: Date.now(),
             };
             this._messages.push(steerMsg);
+            this.persistMessage(steerMsg);
           }
           this.emitQueueUpdate();
         }
@@ -498,6 +507,7 @@ export class DeerLoopEngine implements AgentEnginePort {
           //   error（不可重试/全部重试失败）仍 push（保留错误上下文，下次 prompt LLM 能看到）。
           if (!consumed.aborted) {
             this._messages.push(consumed.endMessage);
+          this.persistMessage(consumed.endMessage);
           }
           if (consumed.errorMessage) agentError = consumed.errorMessage;
           break;
@@ -506,6 +516,7 @@ export class DeerLoopEngine implements AgentEnginePort {
         // 把本轮 assistant 最终消息追加到 transcript。
         const assistantMessage = consumed.endMessage;
         this._messages.push(assistantMessage);
+        this.persistMessage(assistantMessage);
 
         // ★ 提取本轮的 ToolCall（源序）。
         const toolCalls = assistantMessage.content.filter(
@@ -549,6 +560,7 @@ export class DeerLoopEngine implements AgentEnginePort {
                 timestamp: Date.now(),
               };
               this._messages.push(followMsg);
+              this.persistMessage(followMsg);
             }
             toolRounds = 0; // ★ followUp 是新 turn，重置工具轮数预算
             followUpTurnsConsumed++;
@@ -584,6 +596,7 @@ export class DeerLoopEngine implements AgentEnginePort {
         if (this.abortController?.signal.aborted) {
           const toolResults = this.buildToolResultMessages(toolCalls, outputs);
           this._messages.push(...toolResults);
+          for (const msg of toolResults) this.persistMessage(msg);
           agentError = "aborted";
           break;
         }
@@ -591,6 +604,7 @@ export class DeerLoopEngine implements AgentEnginePort {
         // 构造 ToolResultMessage × N 入 transcript（源序，对齐 toolCalls）。
         const toolResults = this.buildToolResultMessages(toolCalls, outputs);
         this._messages.push(...toolResults);
+        for (const msg of toolResults) this.persistMessage(msg);
 
         // 继续下一轮 LLM 调用（while true 顶部重新构造 context，此时 transcript
         // 已含工具结果，LLM 会看到）。
@@ -617,6 +631,23 @@ export class DeerLoopEngine implements AgentEnginePort {
         (agentEndEvent as { error?: string }).error = agentError;
       }
       this.emit(agentEndEvent);
+    }
+  }
+
+  /**
+   * 将 transcript 中的有效消息写入 jsonl。
+   *
+   * SessionManager 的持久化策略是：只有出现第一条 assistant message 后才真正 flush
+   * 文件。因此在 prompt 开始时先 append user 不会让侧边栏立刻出现半截空 session；
+   * assistant 结束后 append assistant 会一次性写出 header + user + assistant。
+   */
+  private persistMessage(message: AgentMessage): void {
+    const manager = this._sessionManager;
+    if (!manager?.isPersisted()) return;
+    try {
+      manager.appendMessage(message as Parameters<SessionManager["appendMessage"]>[0]);
+    } catch (error) {
+      console.warn("DeerLoopEngine: 写入 session jsonl 失败", error);
     }
   }
 
@@ -1103,7 +1134,7 @@ export class DeerLoopEngine implements AgentEnginePort {
    * appendCustomEntry 返回占位 id）。其他方法（getBranch/fork 等）被调时 throw。
    */
   get sessionManager(): import("@earendil-works/pi-coding-agent").SessionManager {
-    return createMinimalSessionManager(this._cwd);
+    return this._sessionManager ?? createMinimalSessionManager(this._cwd);
   }
 
   /**
@@ -1252,9 +1283,20 @@ export class DeerLoopEngine implements AgentEnginePort {
     throw notImplemented("navigateTree", "M6 (SessionStore)");
   }
 
-  /** appendCustomEntry：M1 不持久化，no-op 返回占位 id。 */
-  appendCustomEntry(customType: string, _data?: unknown): string {
-    // M1 不写 jsonl；返回一个稳定格式的占位 id 避免上游炸。
+  /**
+   * appendCustomEntry：wrapper 用它写 display_user_message / turn_context /
+   * agent_mode 等 UI 元数据。注入了真实 sessionManager 时透传写 jsonl；否则 no-op。
+   */
+  appendCustomEntry(customType: string, data?: unknown): string {
+    const manager = this._sessionManager;
+    if (manager?.isPersisted()) {
+      try {
+        return manager.appendCustomEntry(customType, data);
+      } catch (error) {
+        console.warn("DeerLoopEngine: 写入 custom entry 失败", error);
+      }
+    }
+    // 未注入 sessionManager（单测路径）或写入失败：返回稳定占位 id 避免上游炸。
     return `deer-loop-custom-${Date.now()}-${customType}`;
   }
 
