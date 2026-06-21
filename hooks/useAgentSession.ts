@@ -786,6 +786,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     await loadSession(sid);
     if (sessionIdRef.current !== sid) return;
     clearAwaitingAgentStartGuard();
+    // 兜底解锁：recovery 后 SSE 断连导致 agent_start/agent_end 丢失时，
+    // 这两个 ref 会永久阻塞恢复链路，这里强制重置。
+    autoContinueSentRef.current = false;
+    autoContinueInProgressRef.current = false;
+    abortCompletedRef.current = false;
     awaitingAgentStartRef.current = false;
     agentRunningRef.current = false;
     setAgentRunning(false);
@@ -1425,6 +1430,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setStallLevel(null);
       // Gate is closed by agent_start handler when the recovery's fresh turn
       // begins, not here — the abort's agent_end may still be in-flight.
+      // Arm the awaiting-start guard so that if SSE drops the recovery's
+      // agent_start/agent_end, stopStuckAwaitingAgentStart will forcibly
+      // reset the recovery refs instead of leaving them stuck forever.
+      awaitingAgentStartRef.current = true;
+      scheduleAwaitingAgentStartGuard(sid, turnIdRef.current);
     } catch (e) {
       console.error("Recovery failed:", e);
       autoContinueInProgressRef.current = false;
@@ -1435,7 +1445,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setStallLevel(null);
       dispatch({ type: "end" });
     }
-  }, [connectEvents, loadSession]);
+  }, [connectEvents, loadSession, scheduleAwaitingAgentStartGuard]);
 
   // Keep executeRecoveryRef in sync so handleAgentEvent (declared above) can
   // invoke the latest version without listing it as a dependency.

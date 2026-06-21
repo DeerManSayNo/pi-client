@@ -872,6 +872,11 @@ export class AgentSessionWrapper {
     await this.inner.abort();
     await this.waitForCurrentTurnToStop(8_000);
 
+    // 8s 后仍在跑 —— turn 卡死，拒绝继续，避免与新 turn 竞争 SDK 状态
+    if (this._isRunning || this.inner.isStreaming) {
+      throw new Error("abort timeout: current turn did not settle within 8s");
+    }
+
     if (turnPromise && this.activeTurnId === turnId) {
       await Promise.race([
         turnPromise.catch(() => {}),
@@ -1041,19 +1046,29 @@ export class AgentSessionWrapper {
     const prepared = await this.prepareImageFallback(turnContext.message, images, turnContext.displayMessage);
 
     const displayUserContent = prepared.displayContent ?? turnContext.displayMessage;
+    const userEchoEvent = {
+      type: "message_end",
+      message: {
+        role: "user",
+        content: displayUserContent,
+        ...(turnContext.references.length ? { references: turnContext.references } : {}),
+        ...(turnContext.skill ? { skill: turnContext.skill } : {}),
+        ...(clientMessageId ? { clientMessageId } : {}),
+        agentMode: this.agentMode,
+        timestamp: Date.now(),
+      },
+    } as AgentEvent;
+    // Mirror the synthetic user echo into the EventStore so pure-SSE
+    // clients (e.g. WeChat bot) can replay it after reconnect — matches
+    // how agent_file_changed is committed below.
+    getAgentEventStore().append({
+      sessionId: this.inner.sessionId,
+      runId: this.inner.sessionId,
+      ...(turnKey ? { turnId: turnKey } : {}),
+      event: userEchoEvent,
+    });
     for (const l of this.listeners) {
-      l({
-        type: "message_end",
-        message: {
-          role: "user",
-          content: displayUserContent,
-          ...(turnContext.references.length ? { references: turnContext.references } : {}),
-          ...(turnContext.skill ? { skill: turnContext.skill } : {}),
-          ...(clientMessageId ? { clientMessageId } : {}),
-          agentMode: this.agentMode,
-          timestamp: Date.now(),
-        },
-      });
+      l(turnKey ? { ...userEchoEvent, turnId: turnKey } as AgentEvent : userEchoEvent);
     }
 
     this.appendTurnContextMetadata(turnContext.references, turnContext.skill);
@@ -1113,8 +1128,8 @@ export class AgentSessionWrapper {
         // Atomic abort-and-continue: settle the old turn, optionally switch
         // model, then start a fresh prompt turn. Replaces the frontend's
         // manual abort + while-wait + sleep(150) + follow_up choreography.
-        await this.abortAndSettleCurrentTurn();
-
+        //
+        // 先切模型：失败时旧 turn 还活着，session 状态完全不变，前端可安全重试
         const provider = typeof command.provider === "string" ? command.provider.trim() : undefined;
         const modelId = typeof command.modelId === "string" ? command.modelId.trim() : undefined;
         let modelChanged = false;
@@ -1129,6 +1144,9 @@ export class AgentSessionWrapper {
           await this.inner.setModel(model);
           modelChanged = true;
         }
+
+        // 模型就绪后再 abort + settle + 开新 turn
+        await this.abortAndSettleCurrentTurn();
 
         const recoverText = typeof command.message === "string" ? command.message : "";
         const recoverImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
