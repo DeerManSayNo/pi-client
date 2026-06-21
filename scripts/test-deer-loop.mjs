@@ -427,9 +427,18 @@ console.log("\n[用例 6] 只读属性 / M2 工具能力 / M3-M6 方法 throw");
   await expectThrow(() => engine.navigateTree("x"), "navigateTree");
   await expectThrow(() => engine.setThinkingLevel("high"), "setThinkingLevel");
   await expectThrow(() => engine.compact(), "compact");
-  await expectThrow(() => engine.steer("x"), "steer");
-  await expectThrow(() => engine.followUp("x"), "followUp");
-  assert(threwCount === 6, "M3-M6 共 6 个方法 throw（replaceCustomTools 已在 M2 实现）", threwCount);
+  // ★ M5 后 steer/followUp 不再 throw（已实现），验证它们入队 + 发 queue_update
+  await engine.steer("steer-msg");
+  await engine.followUp("followup-msg");
+  assert(engine.steeringQueueLength === 1, "M5 steer 入 steeringQueue", engine.steeringQueueLength);
+  assert(engine.followUpQueueLength === 1, "M5 followUp 入 followUpQueue", engine.followUpQueueLength);
+  assert(engine.hasQueuedMessages() === true, "M5 hasQueuedMessages=true（两队列都有）");
+  // 清空
+  const cleared = engine.clearQueues();
+  assert(cleared.steering.length === 1 && cleared.steering[0] === "steer-msg", "clearQueues 返回 steering 内容", cleared.steering);
+  assert(cleared.followUp.length === 1 && cleared.followUp[0] === "followup-msg", "clearQueues 返回 followUp 内容", cleared.followUp);
+  assert(engine.hasQueuedMessages() === false, "clearQueues 后 hasQueuedMessages=false");
+  assert(threwCount === 4, "M3-M6 共 4 个方法 throw（steer/followUp 已在 M5 实现）", threwCount);
 }
 
 // ---------------------------------------------------------------------------

@@ -36,7 +36,7 @@ import type {
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { AgentEnginePort } from "./port.ts";
-import type { AgentMessage, LoopEvent } from "./loop-event.ts";
+import type { AgentMessage, LoopEvent, QueueMode } from "./loop-event.ts";
 import { ToolRegistry, type AnyToolDefinition } from "./tool-registry.ts";
 import { ToolExecutor, toPiAiTool, type ToolExecOutput } from "./tool-executor.ts";
 import {
@@ -99,6 +99,17 @@ export interface DeerLoopOptions {
   maxToolRounds?: number;
   /** ★ M4：注入自定义重试策略（测试用极小 delay/settle；不传则 installRetryHardening 时建 DefaultRetryPolicy）。 */
   retryPolicy?: RetryPolicy;
+
+  // ─── M5：steering / followUp 队列 ───────────────────────
+  /** ★ M5：steering 队列模式（默认 "all"，turn 结束后一次注入全部插嘴消息）。
+   *
+   *  - "all"：drain 时把队列里全部消息作为 user message 注入 transcript
+   *  - "one-at-a-time"：只注入最老一条，其余留队列等下一轮 drain 点 */
+  steeringMode?: QueueMode;
+  /** ★ M5：followUp 队列模式（默认 "all"）。语义同 steeringMode。 */
+  followUpMode?: QueueMode;
+  /** ★ M5：单个 prompt 内最多触发的 followUp 新 turn 数（防死循环，默认 10）。 */
+  maxFollowUps?: number;
 }
 
 /** 标记当前处于未实现的里程碑路径抛出的错误。 */
@@ -110,6 +121,18 @@ function notImplemented(method: string, milestone: string): Error {
 
 /** ★ M2：工具调用循环最大轮数（防 LLM 无限调工具死循环）。与 pi 默认行为对齐。 */
 const DEFAULT_MAX_TOOL_ROUNDS = 20;
+
+/** ★ M5：单个 prompt 内最多触发的 followUp 新 turn 数（防无限 followUp 死循环）。
+ *
+ *  followUp drain 在 turn 结束点触发新 turn（continue），若用户的 followUp 消息
+ *  持续 push 且 LLM 始终不再调工具，会无限循环。这里设上限兜底。 */
+const DEFAULT_MAX_FOLLOW_UPS = 10;
+
+/** ★ M5：队列条目类型（文本 + 可选图片，对齐 Port steer/followUp 的签名）。 */
+interface QueueEntry {
+  text: string;
+  images?: Array<{ type: "image"; data: string; mimeType: string }>;
+}
 
 /** consumeStream 的返回值（一轮 LLM 调用的状态快照）。 */
 interface ConsumedStream {
@@ -222,6 +245,24 @@ export class DeerLoopEngine implements AgentEnginePort {
   /** ★ M4：是否启用自动重试。installRetryHardening 后默认 true；setAutoRetryEnabled 可运行时关闭。 */
   private _autoRetryEnabled = false;
 
+  // ─── ★ M5：steering / followUp 队列 ─────────────────────
+  /** steering 队列：用户在 turn 进行中「插嘴补充」（steer 命令）。
+   *
+   *  drain 时机：每轮 consumeStream 【之前】（见 prompt 主循环顶部），
+   *  保证同一轮 LLM 就能看到插嘴内容（踩坑预警 #1）。 */
+  private readonly steeringQueue: QueueEntry[] = [];
+  /** followUp 队列：用户在 turn 结束后「继续追问」（follow_up 命令）。
+   *
+   *  drain 时机：agent 本要停止时（无工具调用、stopReason=stop），
+   *  若队列非空，注入触发新 turn（continue，不 break）。 */
+  private readonly followUpQueue: QueueEntry[] = [];
+  /** steering 队列模式（默认 "all"）。setSteeringMode 可运行时切换。 */
+  private _steeringMode: QueueMode = "all";
+  /** followUp 队列模式（默认 "all"）。setFollowUpMode 可运行时切换。 */
+  private _followUpMode: QueueMode = "all";
+  /** 单个 prompt 内最多触发的 followUp 新 turn 数（防死循环）。 */
+  private readonly _maxFollowUps: number;
+
   /**
    * agent.state 的最小代理对象。
    *
@@ -263,6 +304,10 @@ export class DeerLoopEngine implements AgentEnginePort {
       this._retryPolicy = options.retryPolicy;
       this._autoRetryEnabled = true;
     }
+    // M5：队列模式与 followUp 上限（构造期注入，运行时仍可 setSteeringMode/setFollowUpMode 改）。
+    this._steeringMode = options.steeringMode ?? "all";
+    this._followUpMode = options.followUpMode ?? "all";
+    this._maxFollowUps = options.maxFollowUps ?? DEFAULT_MAX_FOLLOW_UPS;
     if (options.tools && options.tools.length > 0) {
       this.registry.registerAll(options.tools);
       // 未传 activeToolNames 时激活全部已注册工具（方便灰度：传工具即启用）。
@@ -340,8 +385,34 @@ export class DeerLoopEngine implements AgentEnginePort {
 
     try {
       let toolRounds = 0;
+      // ★ M5：本 prompt 内已触发的 followUp 新 turn 数（防无限 followUp 死循环）。
+      //   followUp drain 时 ++；达到 _maxFollowUps 后不再触发，正常结束。
+      let followUpTurnsConsumed = 0;
       // ★ 工具调用循环：每轮 consume stream → 判断 toolUse → 执行工具 → 回填 → 继续。
       while (true) {
+        // ★ M5：drain steering 队列（turn 进行中的插嘴）。
+        //   时机：consumeStream 【之前】注入，保证同一轮 LLM 就能看到插嘴内容
+        //   （踩坑预警 #1：若在 consumeStream 之后注入，要多等一轮）。
+        //   行为：
+        //     - "all"：全部插嘴消息每条一条 user message 入 transcript
+        //     - "one-at-a-time"：只注入最老一条，其余留队列等下一轮
+        //   drain 后 emit queue_update（队列变化）。abort 不会清空队列（见 abort 注释）。
+        if (this.steeringQueue.length > 0) {
+          const toInject =
+            this._steeringMode === "one-at-a-time"
+              ? [this.steeringQueue.shift()!]
+              : this.steeringQueue.splice(0);
+          for (const entry of toInject) {
+            const steerMsg: UserMessage = {
+              role: "user",
+              content: this.buildUserContent(entry.text, entry.images),
+              timestamp: Date.now(),
+            };
+            this._messages.push(steerMsg);
+          }
+          this.emitQueueUpdate();
+        }
+
         // ★ M3 持久性关键：Context 在 while 循环【内】每轮重新构造，
         //   systemPrompt 直接读 this._baseSystemPrompt（不缓存到循环外）。
         //   因此 setSystemPromptPersistent 的修改从下一轮 consumeStream 立即生效，
@@ -398,6 +469,38 @@ export class DeerLoopEngine implements AgentEnginePort {
             this.emitMessageStartIfNeeded(consumed);
             this.emit({ type: "message_end", message: assistantMessage });
           }
+
+          // ★ M5：drain followUp 队列（turn 结束后的追问）。
+          //   时机：agent 本要停止时（无工具调用、stopReason=stop）。
+          //   行为：
+          //     - 队列非空且未达 maxFollowUps 上限 → 注入触发新 turn（continue 不 break）
+          //     - "all" 模式：全部 followUp 消息每条一条 user message
+          //     - "one-at-a-time" 模式：只注入最老一条
+          //   followUp 触发的新 turn 重置 toolRounds（新 turn 独立 maxToolRounds 预算），
+          //   避免原 turn 的工具轮数被 followUp 消耗。防死循环靠 _maxFollowUps 上限。
+          //   ★ 不发 agent_end（turn 还没结束）；只在队列真的空了且不调工具时才 break 走 finally。
+          if (
+            this.followUpQueue.length > 0 &&
+            followUpTurnsConsumed < this._maxFollowUps
+          ) {
+            const toInject =
+              this._followUpMode === "one-at-a-time"
+                ? [this.followUpQueue.shift()!]
+                : this.followUpQueue.splice(0);
+            this.emitQueueUpdate();
+            for (const entry of toInject) {
+              const followMsg: UserMessage = {
+                role: "user",
+                content: this.buildUserContent(entry.text, entry.images),
+                timestamp: Date.now(),
+              };
+              this._messages.push(followMsg);
+            }
+            toolRounds = 0; // ★ followUp 是新 turn，重置工具轮数预算
+            followUpTurnsConsumed++;
+            continue; // ★ 不 break，进入下一轮 consumeStream（新 turn）
+          }
+
           break;
         }
 
@@ -788,6 +891,9 @@ export class DeerLoopEngine implements AgentEnginePort {
       },
       isIdle: () => !this._isStreaming && !this._isRunning,
       getSystemPrompt: () => this._baseSystemPrompt,
+      // ★ M5：工具 execute 可通过 ctx.hasPendingMessages 查询队列状态（如 subagent
+      //   工具想根据是否有待处理 steer/followUp 改变行为）。返回两个队列任一非空。
+      hasPendingMessages: () => this.hasQueuedMessages(),
       sessionManager: this.sessionManager,
       modelRegistry: this.modelRegistry,
     });
@@ -833,6 +939,14 @@ export class DeerLoopEngine implements AgentEnginePort {
    * 跑完（agent_end 已 emit、_isRunning 归零）后 resolve。
    *
    * 若当前没有运行中的 prompt，直接 resolve（幂等）。
+   *
+   * ★ M5 队列行为决策：abort 【不清空】 steering / followUp 队列。
+   *   理由：用户 abort 当前后可能仍想追问（followUp）或重新发插嘴（steer）。
+   *   保留到下次交互：
+   *     - 下次 prompt 的首轮 consumeStream 之前会 drain steering（自动重放）
+   *     - followUp 只在 turn 结束点 drain，所以 abort 后保留的 followUp 会在
+   *       下次 prompt 的 turn 结束时触发（如果用户没主动清）
+   *   如需显式清空，调 clearQueues() 或 clearSteeringQueue()/clearFollowUpQueue()。
    */
   async abort(): Promise<void> {
     const controller = this.abortController;
@@ -864,12 +978,16 @@ export class DeerLoopEngine implements AgentEnginePort {
   }
 
   /**
-   * 释放底层资源：中止运行 + 清空监听。之后再调 prompt 行为未定义（M1 不做重启保护）。
-   */
+   * 释放底层资源：中止运行 + 清空监听 + 清空队列。之后再调 prompt 行为未定义
+   * （M1 不做重启保护）。
+   *
+   * ★ M5：dispose 会清空 steering/followUp 队列（与 abort 不同——dispose 是「销毁」，
+   *   保留排队消息无意义）。 */
   dispose(): void {
     if (this.abortController && !this.abortController.signal.aborted) {
       this.abortController.abort();
     }
+    this.clearQueues();
     this.listeners.clear();
   }
 
@@ -1098,17 +1216,103 @@ export class DeerLoopEngine implements AgentEnginePort {
   }
 
   async steer(
-    _text: string,
-    _images?: Array<{ type: "image"; data: string; mimeType: string }>,
+    text: string,
+    images?: Array<{ type: "image"; data: string; mimeType: string }>,
   ): Promise<void> {
-    throw notImplemented("steer", "M5 (steering queue)");
+    // ★ M5 实现：消息入 steeringQueue，emit queue_update。
+    //   drain 时机在 prompt 主循环顶部（consumeStream 之前），见 prompt 注释。
+    this.steeringQueue.push({ text, images });
+    this.emitQueueUpdate();
   }
 
   async followUp(
-    _text: string,
-    _images?: Array<{ type: "image"; data: string; mimeType: string }>,
+    text: string,
+    images?: Array<{ type: "image"; data: string; mimeType: string }>,
   ): Promise<void> {
-    throw notImplemented("followUp", "M5 (followUp queue)");
+    // ★ M5 实现：消息入 followUpQueue，emit queue_update。
+    //   drain 时机在 turn 结束点（无工具调用、stopReason=stop），见 prompt 注释。
+    //   ★ 注意：rpc-manager 的 follow_up 命令在 turn 活跃时调本方法入队；
+    //   turn 已结束时直接调 prompt 开新 turn（不走队列）。两条路径互斥。
+    this.followUpQueue.push({ text, images });
+    this.emitQueueUpdate();
+  }
+
+  /** ★ M5：设置 steering 队列模式（运行时切换）。
+   *
+   *  - "all"：drain 时一次注入全部插嘴消息
+   *  - "one-at-a-time"：只注入最老一条
+   *
+   *  不发 queue_update（mode 不是队列内容变化）。 */
+  setSteeringMode(mode: QueueMode): void {
+    this._steeringMode = mode;
+  }
+
+  /** ★ M5：设置 followUp 队列模式。语义同 setSteeringMode。 */
+  setFollowUpMode(mode: QueueMode): void {
+    this._followUpMode = mode;
+  }
+
+  /** ★ M5：读取当前 steering 队列模式（测试 / get_state 用）。 */
+  get steeringMode(): QueueMode {
+    return this._steeringMode;
+  }
+
+  /** ★ M5：读取当前 followUp 队列模式。 */
+  get followUpMode(): QueueMode {
+    return this._followUpMode;
+  }
+
+  /** ★ M5：steering 队列中的消息条数。 */
+  get steeringQueueLength(): number {
+    return this.steeringQueue.length;
+  }
+
+  /** ★ M5：followUp 队列中的消息条数。 */
+  get followUpQueueLength(): number {
+    return this.followUpQueue.length;
+  }
+
+  /** ★ M5：是否还有排队消息（steering 或 followUp 任一非空）。 */
+  hasQueuedMessages(): boolean {
+    return this.steeringQueue.length > 0 || this.followUpQueue.length > 0;
+  }
+
+  /** ★ M5：清空 steering 队列。返回被清除的消息文本列表。 */
+  clearSteeringQueue(): string[] {
+    const removed = this.steeringQueue.splice(0).map((e) => e.text);
+    if (removed.length > 0) this.emitQueueUpdate();
+    return removed;
+  }
+
+  /** ★ M5：清空 followUp 队列。返回被清除的消息文本列表。 */
+  clearFollowUpQueue(): string[] {
+    const removed = this.followUpQueue.splice(0).map((e) => e.text);
+    if (removed.length > 0) this.emitQueueUpdate();
+    return removed;
+  }
+
+  /** ★ M5：清空 steering + followUp 两个队列。
+   *
+   *  ★ abort 不调本方法（abort 后队列保留，让用户 abort 后继续追问）。
+   *   只在显式 clear / dispose 时调。 */
+  clearQueues(): { steering: string[]; followUp: string[] } {
+    const result = {
+      steering: this.steeringQueue.splice(0).map((e) => e.text),
+      followUp: this.followUpQueue.splice(0).map((e) => e.text),
+    };
+    this.emitQueueUpdate();
+    return result;
+  }
+
+  /** ★ M5：发射 queue_update 事件（每次队列变化时调）。
+   *
+   *  只暴露 text（不暴露 images），与 LoopEvent.queue_update 契约一致。 */
+  private emitQueueUpdate(): void {
+    this.emit({
+      type: "queue_update",
+      steering: this.steeringQueue.map((e) => e.text),
+      followUp: this.followUpQueue.map((e) => e.text),
+    });
   }
 
   /** ★ M2：返回全部已注册工具的 name/description（给 get_state 命令用）。 */

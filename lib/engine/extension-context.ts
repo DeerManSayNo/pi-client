@@ -39,6 +39,8 @@ export interface MinimalExtensionContextDeps {
   isIdle: () => boolean;
   /** 当前系统提示词（ctx.getSystemPrompt）。 */
   getSystemPrompt: () => string;
+  /** ★ M5：是否有待处理的 steering/followUp 消息（ctx.hasPendingMessages）。 */
+  hasPendingMessages: () => boolean;
   /** sessionManager 代理（ctx.sessionManager，复用 loop 的最小代理）。 */
   sessionManager: unknown;
   /** modelRegistry 代理（ctx.modelRegistry）。 */
@@ -68,7 +70,7 @@ export function createMinimalExtensionContext(
     isIdle: deps.isIdle,
     signal: deps.signal,
     abort: deps.abort,
-    hasPendingMessages: () => false,
+    hasPendingMessages: deps.hasPendingMessages,
     shutdown: () => {
       /* M6 SessionStore 落地后再实现真正的 shutdown */
     },
