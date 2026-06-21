@@ -449,16 +449,17 @@ export function buildSessionContext(entries: SessionEntry[], leafId?: string | n
       .trim();
   };
 
-  const getDisplayUserMessage = (entryId: string | undefined): { content: unknown; references?: FileReference[]; agentMode?: AgentMode; skill?: SkillReference } | null => {
+  const getDisplayUserMessage = (entryId: string | undefined): { content: unknown; references?: FileReference[]; agentMode?: AgentMode; skill?: SkillReference; clientMessageId?: string } | null => {
     if (!entryId) return null;
     const entry = byId.get(entryId);
     if (!entry?.parentId) return null;
     const parent = byId.get(entry.parentId);
     if (parent?.type !== "custom" || (parent as { customType?: string }).customType !== "display_user_message") return null;
-    const data = (parent as { data?: { content?: unknown; references?: unknown; agentMode?: unknown; skill?: { name?: unknown } } }).data;
+    const data = (parent as { data?: { content?: unknown; references?: unknown; agentMode?: unknown; skill?: { name?: unknown }; clientMessageId?: unknown } }).data;
     if (!data || !("content" in data)) return null;
     const references = normalizeReferences(data.references);
     const skillName = typeof data.skill?.name === "string" && data.skill.name.trim() ? data.skill.name.trim() : null;
+    const clientMessageId = typeof data.clientMessageId === "string" && data.clientMessageId.trim() ? data.clientMessageId.trim() : undefined;
     // Strip large base64 image payloads from display content to keep
     // session-load responses lean and avoid multi-second HTTP transfers.
     const displayContent = stripImageData(data.content);
@@ -467,6 +468,7 @@ export function buildSessionContext(entries: SessionEntry[], leafId?: string | n
       ...(references.length ? { references } : {}),
       ...(data.agentMode ? { agentMode: normalizeAgentMode(data.agentMode) } : {}),
       ...(skillName ? { skill: { name: skillName } } : {}),
+      ...(clientMessageId ? { clientMessageId } : {}),
     };
   };
 
@@ -491,6 +493,7 @@ export function buildSessionContext(entries: SessionEntry[], leafId?: string | n
         ...(displayMessage.references ?? turnContext?.references ? { references: displayMessage.references ?? turnContext?.references } : {}),
         ...(displayMessage.skill ?? turnContext?.skill ? { skill: displayMessage.skill ?? turnContext?.skill } : {}),
         agentMode: displayMessage.agentMode ?? turnContext?.agentMode ?? messageMode,
+        ...(displayMessage.clientMessageId ? { clientMessageId: displayMessage.clientMessageId } : {}),
       };
       if (typeof normalized.content === "string" && (normalized.content.includes('<deerhux_turn_mode') || normalized.content.includes('<image_context source="mcp-vision-fallback">'))) {
         return {

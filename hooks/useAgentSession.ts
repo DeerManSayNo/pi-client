@@ -1080,11 +1080,29 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             // appended it — always display it.
             if (normalized.role === "user") {
               const incomingClientMessageId = normalized.clientMessageId;
-              if (
-                incomingClientMessageId
-                && prev.some((m): m is UserMessage => m.role === "user" && m.clientMessageId === incomingClientMessageId)
-              ) {
-                return prev; // locally optimistic-appended, dedupe
+              if (incomingClientMessageId) {
+                if (prev.some((m): m is UserMessage => m.role === "user" && m.clientMessageId === incomingClientMessageId)) {
+                  return prev; // locally optimistic-appended, dedupe
+                }
+
+                // loadSession can briefly replace the optimistic user message with
+                // the SDK-persisted version before the SSE echo arrives. Older
+                // session snapshots may not carry clientMessageId, so the exact-id
+                // check above misses. If the echo has an id and the last id-less
+                // user message has the same visible text, patch that existing
+                // message with the id instead of appending a duplicate.
+                const incomingKey = userMessageTextKey(normalized.content);
+                if (incomingKey) {
+                  for (let i = prev.length - 1; i >= 0; i--) {
+                    const candidate = prev[i];
+                    if (candidate.role !== "user") continue;
+                    if (candidate.clientMessageId) continue;
+                    if (userMessageTextKey(candidate.content) !== incomingKey) continue;
+                    const next = [...prev];
+                    next[i] = { ...normalized, ...candidate, clientMessageId: incomingClientMessageId } as AgentMessage;
+                    return next;
+                  }
+                }
               }
               // No clientMessageId (remote-triggered) or id unmatched — append for display
               return [...prev, normalized];
