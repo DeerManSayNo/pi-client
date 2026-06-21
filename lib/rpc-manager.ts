@@ -1661,7 +1661,11 @@ async function startDeerLoopSession(
     cwd,
     sessionId,
     systemPrompt,
-    getApiKey: (provider) => authStorage.getApiKey(provider),
+    // 用 ModelRegistry 解析 key，而不是直接 AuthStorage.getApiKey(provider)。
+    // 原因：custom providers 的 apiKey/headers 可能来自 models.json，pi 路径也是通过
+    // ModelRegistry.getApiKeyForProvider / getApiKeyAndHeaders 处理。直接读 AuthStorage
+    // 会漏掉 Opencodego 等 models.json provider，导致 No API key。
+    getApiKey: (provider) => modelRegistry.getApiKeyForProvider(provider),
     tools: customTools,
     activeToolNames,
   });
