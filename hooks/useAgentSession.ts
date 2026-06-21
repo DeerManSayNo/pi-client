@@ -1103,6 +1103,23 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
                     return next;
                   }
                 }
+              } else {
+                // Some SDK-level user message_end events do not carry DeerHux's
+                // clientMessageId. During a local running turn, if we already
+                // have an optimistic user message with the same visible text and
+                // a clientMessageId, treat this as the SDK echo and suppress it.
+                // Remote-triggered messages (WeChat Bot, etc.) have no local
+                // optimistic counterpart with an id, so they still append below.
+                const incomingKey = userMessageTextKey(normalized.content);
+                if (agentRunningRef.current && incomingKey) {
+                  for (let i = prev.length - 1; i >= 0; i--) {
+                    const candidate = prev[i];
+                    if (candidate.role !== "user") continue;
+                    if (!candidate.clientMessageId) continue;
+                    if (userMessageTextKey(candidate.content) !== incomingKey) continue;
+                    return prev;
+                  }
+                }
               }
               // No clientMessageId (remote-triggered) or id unmatched — append for display
               return [...prev, normalized];
