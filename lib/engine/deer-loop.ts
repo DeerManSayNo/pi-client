@@ -36,7 +36,7 @@ import type {
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { AgentEnginePort } from "./port.ts";
-import type { AgentMessage, LoopEvent, QueueMode } from "./loop-event.ts";
+import type { AgentMessage, CompactionResult, LoopEvent, QueueMode } from "./loop-event.ts";
 import { ToolRegistry, type AnyToolDefinition } from "./tool-registry.ts";
 import { ToolExecutor, toPiAiTool, type ToolExecOutput } from "./tool-executor.ts";
 import {
@@ -121,6 +121,42 @@ function notImplemented(method: string, milestone: string): Error {
 
 /** ★ M2：工具调用循环最大轮数（防 LLM 无限调工具死循环）。与 pi 默认行为对齐。 */
 const DEFAULT_MAX_TOOL_ROUNDS = 20;
+
+/** ★ M6 helper：从 AssistantMessage.content 提取所有 text block 拼接成字符串。 */
+function extractText(message: { content?: unknown }): string {
+  const content = message?.content;
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  let text = "";
+  for (const block of content) {
+    if (block && typeof block === "object" && typeof (block as { text?: unknown }).text === "string") {
+      text += (block as { text: string }).text;
+    }
+  }
+  return text;
+}
+
+/** ★ M6 helper：粗略估算 token 数（chars/4 近似，中文友好的折衷）。
+ *
+ *  非精确计数（真正的 tokenizer 依赖 provider），仅用于 getContextUsage
+ *  的 percent 估算与 compact 的 tokensBefore/After 对比。 */
+function estimateTokens(messages: AgentMessage[]): number {
+  let chars = 0;
+  for (const msg of messages) {
+    if (typeof msg.content === "string") {
+      chars += msg.content.length;
+    } else if (Array.isArray(msg.content)) {
+      for (const block of msg.content) {
+        if (block && typeof block === "object") {
+          const b = block as { text?: string; thinking?: string };
+          if (typeof b.text === "string") chars += b.text.length;
+          if (typeof b.thinking === "string") chars += b.thinking.length;
+        }
+      }
+    }
+  }
+  return Math.ceil(chars / 4);
+}
 
 /** ★ M5：单个 prompt 内最多触发的 followUp 新 turn 数（防无限 followUp 死循环）。
  *
@@ -255,6 +291,13 @@ export class DeerLoopEngine implements AgentEnginePort {
 
   /** ★ M4：是否启用自动重试。installRetryHardening 后默认 true；setAutoRetryEnabled 可运行时关闭。 */
   private _autoRetryEnabled = false;
+
+  /** ★ M6：是否正在进行 compact（互斥标记）。 */
+  private _isCompacting = false;
+  /** ★ M6：compact 的独立 AbortController（与 prompt 的 abortController 分离）。 */
+  private compactionAbortController: AbortController | null = null;
+  /** ★ M6：是否启用自动压缩（setAutoCompactionEnabled 写）。当前只存状态，自动触发留后续。 */
+  private _autoCompactionEnabled = false;
 
   // ─── ★ M5：steering / followUp 队列 ─────────────────────
   /** steering 队列：用户在 turn 进行中「插嘴补充」（steer 命令）。
@@ -1021,11 +1064,11 @@ export class DeerLoopEngine implements AgentEnginePort {
   }
 
   get isCompacting(): boolean {
-    return false;
+    return this._isCompacting;
   }
 
   get autoCompactionEnabled(): boolean {
-    return false;
+    return this._autoCompactionEnabled;
   }
 
   /** ★ M4：返回真实重试状态（installRetryHardening 后为 true）。 */
@@ -1214,12 +1257,147 @@ export class DeerLoopEngine implements AgentEnginePort {
     throw notImplemented("setThinkingLevel", "M2 (runtime thinking switch)");
   }
 
-  async compact(_customInstructions?: string): Promise<unknown> {
-    throw notImplemented("compact", "M6 (SessionStore)");
+  /**
+   * ★ M6 实现：压缩对话历史。
+   *
+   * 用 streamFn 单轮调 LLM（不带工具），把当前 transcript 总结成一段 summary，
+   * 然后用 summary assistant message 替换整个 transcript（splice(0) 清空 + push）。
+   * 发射 compaction_start / compaction_end 事件。
+   *
+   * 互斥保护：prompt 运行中 / 已在 compact 时 throw。abortCompaction 可打断。
+   *
+   * @param customInstructions 额外的压缩指令（追加到 systemPrompt）
+   * @returns CompactionResult（summary / tokensBefore / tokensAfter）
+   */
+  async compact(customInstructions?: string): Promise<CompactionResult> {
+    if (this._isRunning) {
+      throw new Error("DeerLoopEngine.compact: 无法压缩——prompt 正在运行");
+    }
+    if (this._isCompacting) {
+      throw new Error("DeerLoopEngine.compact: 压缩已在进行中");
+    }
+
+    this._isCompacting = true;
+    this.compactionAbortController = new AbortController();
+    this.emit({ type: "compaction_start", reason: "manual" });
+
+    const tokensBefore = estimateTokens([
+      ...this._messages,
+      { role: "system", content: this._baseSystemPrompt } as unknown as AgentMessage,
+    ]);
+
+    try {
+      // 1. 构造压缩 prompt：把 transcript 转文本
+      const transcriptText = this._messages
+        .map((m) => `${m.role}: ${JSON.stringify(m.content)}`)
+        .join("\n");
+      const compactSystemPrompt =
+        `You are a conversation summarizer. Summarize the following conversation concisely, ` +
+        `preserving key context, decisions, and file changes. Output only the summary.` +
+        (customInstructions ? `\n\nAdditional instructions: ${customInstructions}` : "");
+
+      const compactContext: Context = {
+        systemPrompt: compactSystemPrompt,
+        messages: [
+          {
+            role: "user",
+            content: `Summarize this conversation:\n${transcriptText}`,
+            timestamp: Date.now(),
+          } as Message,
+        ],
+      };
+
+      // 2. 用 streamFn 调一次 LLM（单轮，不带工具）
+      const streamOptions: SimpleStreamOptions = {
+        signal: this.compactionAbortController.signal,
+        sessionId: this._sessionId + "-compact",
+      };
+      if (this._getApiKey) {
+        const apiKey = await this._getApiKey(this._model.provider);
+        if (apiKey) streamOptions.apiKey = apiKey;
+      }
+
+      const stream = this._streamFn(this._model, compactContext, streamOptions);
+
+      // 3. 消费 stream，收集 summary
+      let summary = "";
+      let aborted = false;
+      try {
+        for await (const ev of stream) {
+          if (this.compactionAbortController?.signal.aborted) {
+            aborted = true;
+            break;
+          }
+          if (ev.type === "done") {
+            summary = extractText(ev.message);
+            break;
+          }
+          if (ev.type === "error") {
+            const errMsg = ev.error.errorMessage ?? "compaction stream error";
+            throw new Error(`compaction failed: ${errMsg}`);
+          }
+          // 从 partial 提取累积文本
+          if (ev.partial) {
+            summary = extractText(ev.partial);
+          }
+        }
+      } catch (err) {
+        if (this.compactionAbortController?.signal.aborted || this.isAbortError(err)) {
+          aborted = true;
+        } else {
+          throw err;
+        }
+      }
+
+      // 4. 替换 transcript（仅在未 abort 时）
+      if (!aborted && summary.trim()) {
+        this._messages.splice(0);
+        this._messages.push({
+          role: "assistant",
+          content: [
+            { type: "text", text: `[Compacted summary]\n${summary}` },
+          ],
+          api: this._model.api,
+          provider: this._model.provider,
+          model: this._model.id,
+          usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+          stopReason: "stop",
+          timestamp: Date.now(),
+        } as AssistantMessage);
+      }
+
+      const tokensAfter = estimateTokens([
+        ...this._messages,
+        { role: "system", content: this._baseSystemPrompt } as unknown as AgentMessage,
+      ]);
+
+      const result: CompactionResult = { summary, tokensBefore, tokensAfter };
+      this.emit({
+        type: "compaction_end",
+        reason: "manual",
+        result: aborted ? undefined : result,
+        aborted,
+        willRetry: false,
+      });
+      return result;
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      this.emit({
+        type: "compaction_end",
+        reason: "manual",
+        aborted: false,
+        willRetry: false,
+        errorMessage,
+      });
+      throw err;
+    } finally {
+      this._isCompacting = false;
+      this.compactionAbortController = null;
+    }
   }
 
-  setAutoCompactionEnabled(_enabled: boolean): void {
-    // M1 不支持压缩；no-op（避免命令路径抛错，但实际不生效）。
+  setAutoCompactionEnabled(enabled: boolean): void {
+    this._autoCompactionEnabled = enabled;
   }
 
   /** ★ M4：运行时开关自动重试（set_auto_retry 命令用）。 */
@@ -1365,11 +1543,14 @@ export class DeerLoopEngine implements AgentEnginePort {
     this.registry.setActive(names);
   }
 
+  /** ★ M6：打断压缩（abortCompaction 命令用）。幂等。 */
   abortCompaction(): void {
-    // M1 不支持压缩；no-op。
+    if (this.compactionAbortController && !this.compactionAbortController.signal.aborted) {
+      this.compactionAbortController.abort();
+    }
   }
 
-  /** M1 不维护上下文用量：返回 undefined。 */
+  /** ★ M6：返回真实的上下文用量估算（用于触发自动压缩 / get_state）。 */
   getContextUsage():
     | {
         percent: number | null;
@@ -1377,7 +1558,13 @@ export class DeerLoopEngine implements AgentEnginePort {
         tokens: number | null;
       }
     | undefined {
-    return undefined;
+    const contextWindow = this._model.contextWindow ?? 8192;
+    const tokens = estimateTokens([
+      ...this._messages,
+      { role: "system", content: this._baseSystemPrompt } as unknown as AgentMessage,
+    ]);
+    const percent = tokens > 0 ? tokens / contextWindow : null;
+    return { percent, contextWindow, tokens };
   }
 
   // -------------------------------------------------------------------------
