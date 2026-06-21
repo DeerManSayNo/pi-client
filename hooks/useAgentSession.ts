@@ -345,6 +345,53 @@ function normalizeVisibleUserMessage(msg: AgentMessage): AgentMessage {
   };
 }
 
+/**
+ * 提取 user message 的纯文本签名（剥离图片/references/skill），
+ * 用于跨数据源（前端乐观 push vs SDK 存盘）匹配同一条消息。
+ */
+function userMessageTextKey(content: AgentMessage["content"]): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    let text = "";
+    for (const block of content) {
+      if (block && typeof block === "object" && block.type === "text" && typeof block.text === "string") {
+        text += block.text;
+      }
+    }
+    return text;
+  }
+  return "";
+}
+
+/**
+ * loadSession 读出的消息来自 SDK 存盘文件，不含 clientMessageId。直接用它
+ * 覆盖本地会丢失 handleSend/handleFollowUp 乐观 push 的 id，导致后续
+ * message_end/user echo 的 clientMessageId dedupe 失效而出现重复用户消息。
+ * 这里按文本签名把本地待确认的 id 迁移到 loaded 对应消息上。
+ */
+function mergeOptimisticClientMessageIds(prev: AgentMessage[], loaded: AgentMessage[]): AgentMessage[] {
+  if (!prev.length) return loaded;
+  const pendingIds = new Map<string, string>();
+  for (const m of prev) {
+    if (m.role === "user" && m.clientMessageId) {
+      pendingIds.set(userMessageTextKey(m.content), m.clientMessageId);
+    }
+  }
+  if (!pendingIds.size) return loaded;
+  let touched = false;
+  const merged = loaded.map((m) => {
+    if (m.role === "user" && !m.clientMessageId) {
+      const id = pendingIds.get(userMessageTextKey(m.content));
+      if (id) {
+        touched = true;
+        return { ...m, clientMessageId: id } as AgentMessage;
+      }
+    }
+    return m;
+  });
+  return touched ? merged : loaded;
+}
+
 function getStreamingContentLength(msg: Partial<AgentMessage> | null | undefined): number {
   const content = msg?.content;
   if (!Array.isArray(content)) return typeof content === "string" ? content.length : 0;
@@ -568,7 +615,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const prevKey = entryIdsRef.current.join("\0");
     const nextKey = loadedEntryIds.join("\0");
     const changed = Boolean(nextKey && nextKey !== prevKey);
-    setMessages(loadedMessages);
+    setMessages((prev) => mergeOptimisticClientMessageIds(prev, loadedMessages));
     setEntryIds(loadedEntryIds);
     setCurrentModelOverride(null);
     setAgentMode(normalizeAgentMode(d.context.agentMode));
