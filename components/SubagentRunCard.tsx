@@ -61,6 +61,13 @@ function injectToolPulseStyle() {
       0%, 100% { opacity: 1; }
       50% { opacity: 0.3; }
     }
+    .subagent-cards-scroll {
+      scrollbar-width: none;
+      -ms-overflow-style: none;
+    }
+    .subagent-cards-scroll::-webkit-scrollbar {
+      display: none;
+    }
   `;
   document.head.appendChild(style);
 }
@@ -131,14 +138,44 @@ export function SubagentRunCard({ run, onOpenSession }: Props) {
     () => workers.filter((w) => w.status === "complete" || w.status === "error" || w.status === "aborted").length,
     [workers],
   );
+  const cardsScrollRef = useRef<HTMLDivElement | null>(null);
+  const [cardFade, setCardFade] = useState({ left: false, right: false });
+
+  useEffect(() => {
+    const el = cardsScrollRef.current;
+    if (!el) return;
+    const update = () => {
+      const maxScrollLeft = Math.max(0, el.scrollWidth - el.clientWidth);
+      setCardFade({
+        left: el.scrollLeft > 1,
+        right: maxScrollLeft > 1 && el.scrollLeft < maxScrollLeft - 1,
+      });
+    };
+    update();
+    el.addEventListener("scroll", update, { passive: true });
+    window.addEventListener("resize", update);
+    return () => {
+      el.removeEventListener("scroll", update);
+      window.removeEventListener("resize", update);
+    };
+  }, [workers.length]);
+
+  const cardsMaskImage = cardFade.left && cardFade.right
+    ? "linear-gradient(to right, transparent 0, #000 28px, #000 calc(100% - 28px), transparent 100%)"
+    : cardFade.left
+      ? "linear-gradient(to right, transparent 0, #000 28px, #000 100%)"
+      : cardFade.right
+        ? "linear-gradient(to right, #000 0, #000 calc(100% - 28px), transparent 100%)"
+        : "none";
 
   if (workers.length === 0) return null;
 
   return (
     <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 8, minWidth: 0 }}>
       <RunSummaryTag title={latest.title ?? "Subagents"} status={latest.status} text={`Subagents ${doneCount}/${workers.length}`} />
-      {/* 横向单行排列，不换行；宽度不足时横向滚动；左右边缘渐隐 */}
+      {/* 横向单行排列，不换行；宽度不足时横向滚动；只在可滚动方向做边缘渐隐 */}
       <div
+        ref={cardsScrollRef}
         className="subagent-cards-scroll"
         style={{
           display: "flex",
@@ -147,8 +184,8 @@ export function SubagentRunCard({ run, onOpenSession }: Props) {
           overflowY: "hidden",
           flexWrap: "nowrap",
           paddingBottom: 2,
-          WebkitMaskImage: "linear-gradient(to right, transparent 0, #000 28px, #000 calc(100% - 28px), transparent 100%)",
-          maskImage: "linear-gradient(to right, transparent 0, #000 28px, #000 calc(100% - 28px), transparent 100%)",
+          WebkitMaskImage: cardsMaskImage,
+          maskImage: cardsMaskImage,
         }}
       >
         {workers.map((worker) => (
