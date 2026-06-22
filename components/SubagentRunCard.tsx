@@ -241,7 +241,8 @@ function WorkerCard({ worker, onOpenSession }: { worker: CollaborationWorkerStat
   const label = worker.title ?? worker.name;
   const isRunning = worker.status === "running";
   const isTerminal = worker.status === "complete" || worker.status === "error" || worker.status === "aborted";
-  const canClick = Boolean(worker.sessionId && onOpenSession);
+  // 运行中始终可点击（即使 sessionId 尚未同步到快照），终结态需要有 sessionId
+  const canClick = Boolean(onOpenSession && (worker.sessionId || isRunning));
   const modeLabel = worker.agentType ? MODE_LABELS[worker.agentType] : undefined;
   const [hovered, setHovered] = useState(false);
 
@@ -258,7 +259,7 @@ function WorkerCard({ worker, onOpenSession }: { worker: CollaborationWorkerStat
 
   return (
     <div
-      onClick={canClick ? () => onOpenSession!(worker.sessionId!) : undefined}
+      onClick={canClick ? () => { if (worker.sessionId) onOpenSession!(worker.sessionId); } : undefined}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
       style={{
@@ -364,7 +365,7 @@ function WorkerCard({ worker, onOpenSession }: { worker: CollaborationWorkerStat
       </div>
 
       {/* footer：跳转提示 */}
-      {canClick && (
+      {Boolean(worker.sessionId && onOpenSession) && (
         <span style={{ fontSize: 10.5, color: "var(--text-dim)", display: "flex", alignItems: "center", gap: 3, borderTop: "1px solid var(--border)", paddingTop: 6 }}>
           ↗ 点击查看完整会话
         </span>
