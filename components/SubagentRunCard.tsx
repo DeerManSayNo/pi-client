@@ -135,9 +135,22 @@ export function SubagentRunCard({ run, onOpenSession }: Props) {
   if (workers.length === 0) return null;
 
   return (
-    <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 8 }}>
+    <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 8, minWidth: 0 }}>
       <RunSummaryTag title={latest.title ?? "Subagents"} status={latest.status} text={`Subagents ${doneCount}/${workers.length}`} />
-      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+      {/* 横向单行排列，不换行；宽度不足时横向滚动；左右边缘渐隐 */}
+      <div
+        className="subagent-cards-scroll"
+        style={{
+          display: "flex",
+          gap: 10,
+          overflowX: "auto",
+          overflowY: "hidden",
+          flexWrap: "nowrap",
+          paddingBottom: 2,
+          WebkitMaskImage: "linear-gradient(to right, transparent 0, #000 28px, #000 calc(100% - 28px), transparent 100%)",
+          maskImage: "linear-gradient(to right, transparent 0, #000 28px, #000 calc(100% - 28px), transparent 100%)",
+        }}
+      >
         {workers.map((worker) => (
           <WorkerCard
             key={worker.workerId ?? worker.name}
@@ -214,6 +227,7 @@ function WorkerCard({ worker, onOpenSession }: { worker: CollaborationWorkerStat
       style={{
         width: 288,
         minHeight: 208,
+        flexShrink: 0,
         borderRadius: 12,
         border: `1px solid ${hovered && canClick ? "color-mix(in srgb, var(--accent) 55%, var(--border))" : "var(--border)"}`,
         background: "var(--bg-hover)",
