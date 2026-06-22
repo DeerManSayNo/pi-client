@@ -21,7 +21,6 @@ import type {
   CollaborationWorkerSpec,
   SubagentRunPlacement,
   SubagentTaskMode,
-  WorkerToolActivity,
 } from "./collaboration-types";
 import type { AgentEvent } from "@/lib/rpc-manager";
 import {
@@ -47,13 +46,25 @@ export {
 /** 从工具执行事件里提取人类可读摘要（命令/文件路径/查询词） */
 function summarizeToolEvent(event: AgentEvent): { toolName: string; summary: string } {
   const toolName = typeof event.toolName === "string" ? event.toolName : typeof event.name === "string" ? event.name : "";
-  const input = (event.input && typeof event.input === "object") ? event.input as Record<string, unknown> : {};
+  const asRecord = (value: unknown): Record<string, unknown> | null => (
+    value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null
+  );
+  const input = asRecord(event.input);
+  const args = asRecord(event.args);
+  const sources = [input, args, asRecord(event), asRecord(input?.args), asRecord(input?.input)].filter(Boolean) as Record<string, unknown>[];
+  const readPath = (source: Record<string, unknown>, keyPath: string): unknown => (
+    keyPath.split(".").reduce<unknown>((acc, key) => (
+      acc && typeof acc === "object" ? (acc as Record<string, unknown>)[key] : undefined
+    ), source)
+  );
   const pick = (...keys: string[]): string => {
-    for (const k of keys) {
-      const v = k.includes(".")
-        ? k.split(".").reduce<unknown>((acc, key) => (acc && typeof acc === "object" ? (acc as Record<string, unknown>)[key] : undefined), input)
-        : input[k];
-      if (typeof v === "string" && v.trim()) return v.trim();
+    for (const source of sources) {
+      for (const key of keys) {
+        const value = readPath(source, key);
+        if (typeof value === "string" && value.trim()) return value.trim();
+        if (typeof value === "number" || typeof value === "boolean") return String(value);
+        if (Array.isArray(value) && value.length > 0) return value.map((item) => String(item)).join(", ");
+      }
     }
     return "";
   };
@@ -66,26 +77,28 @@ function summarizeToolEvent(event: AgentEvent): { toolName: string; summary: str
     case "edit":
     case "write":
     case "read":
-      summary = pick("filePath", "path", "file_path");
+      summary = pick("filePath", "file_path", "path", "target_file");
       break;
     case "grep":
+      summary = pick("pattern", "query", "path", "glob");
+      break;
     case "find":
-      summary = pick("pattern", "path", "glob");
+      summary = pick("path", "pattern", "glob", "name");
       break;
     case "code_search":
     case "codegraph_search":
-      summary = pick("query");
+      summary = pick("query", "text", "q");
       break;
     case "codegraph_callers":
     case "codegraph_callees":
     case "codegraph_impact":
-      summary = pick("symbol");
+      summary = pick("symbol", "query");
       break;
     case "spawn_subagent":
-      summary = pick("message");
+      summary = pick("message", "task", "prompt");
       break;
     default:
-      summary = "";
+      summary = pick("filePath", "file_path", "path", "command", "cmd", "query", "symbol", "message", "pattern");
   }
   return { toolName, summary };
 }

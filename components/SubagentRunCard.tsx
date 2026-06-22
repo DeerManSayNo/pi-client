@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import type { CollaborationRunSnapshot, CollaborationWorkerState, CollaborationRunStatus, CollaborationWorkerStatus, WorkerToolActivity } from "@/lib/parallel-agent/collaboration-types";
 
 interface Props {
@@ -137,9 +137,16 @@ export function SubagentRunCard({ run, onOpenSession }: Props) {
   return (
     <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
       <RunTag title={latest.title ?? "Subagents"} status={latest.status} text={`Subagents ${doneCount}/${workers.length}`} />
-      {workers.map((worker) => (
-        <WorkerTag key={worker.workerId ?? worker.name} worker={worker} onOpenSession={onOpenSession} />
-      ))}
+      {workers.map((worker) => {
+        const latestTool = worker.status === "running" ? worker.activeTool ?? worker.recentTools?.[0] : undefined;
+        const key = worker.workerId ?? worker.name;
+        return (
+          <Fragment key={key}>
+            <WorkerTag worker={worker} onOpenSession={onOpenSession} />
+            {latestTool && <ToolActivityPill tool={latestTool} workerLabel={worker.title ?? worker.name} />}
+          </Fragment>
+        );
+      })}
     </div>
   );
 }
@@ -176,11 +183,6 @@ function WorkerTag({ worker, onOpenSession }: { worker: CollaborationWorkerState
   const [hovered, setHovered] = useState(false);
   const canClick = Boolean(worker.sessionId && onOpenSession);
 
-  // 工具活动展示：仅 running 态展示
-  const isRunning = worker.status === "running";
-  const activeTool = worker.activeTool;
-  const recentTools = worker.recentTools;
-
   return (
     <span
       title={canClick ? `点击查看 ${label} 的会话` : detail}
@@ -189,8 +191,8 @@ function WorkerTag({ worker, onOpenSession }: { worker: CollaborationWorkerState
       onMouseLeave={() => canClick && setHovered(false)}
       style={{
         display: "inline-flex",
-        flexDirection: "column",
-        alignItems: "stretch",
+        alignItems: "center",
+        gap: 5,
         maxWidth: 220,
         border: `1px solid ${hovered ? "color-mix(in srgb, var(--accent) 42%, var(--border))" : "var(--border)"}`,
         background: hovered ? "var(--bg-hover)" : "var(--bg-subtle)",
@@ -203,64 +205,60 @@ function WorkerTag({ worker, onOpenSession }: { worker: CollaborationWorkerState
         transition: "border-color 0.12s, background 0.12s",
       }}
     >
-      <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
-        <span style={{ width: 6, height: 6, borderRadius: "50%", background: color, flexShrink: 0 }} />
-        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{label}</span>
-        <span style={{ color, fontWeight: 700, flexShrink: 0 }}>{statusLabel(worker.status)}</span>
-      </span>
-      {isRunning && (activeTool || (recentTools && recentTools.length > 0)) && (
-        <span style={{ marginTop: 1, display: "flex", flexDirection: "column", gap: 1 }}>
-          {activeTool && <ToolActivityRow tool={activeTool} />}
-          {!activeTool && recentTools && recentTools.slice(0, 2).map((tool) => (
-            <ToolActivityRow key={tool.ts} tool={tool} />
-          ))}
-        </span>
-      )}
+      <span style={{ width: 6, height: 6, borderRadius: "50%", background: color, flexShrink: 0 }} />
+      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{label}</span>
+      <span style={{ color, fontWeight: 700, flexShrink: 0 }}>{statusLabel(worker.status)}</span>
     </span>
   );
 }
 
-/** 紧凑的单行工具活动展示 */
-function ToolActivityRow({ tool }: { tool: WorkerToolActivity }) {
+/** 独立胶囊：只展示最新一个工具调用，重点展示对应文件/命令/查询 */
+function ToolActivityPill({ tool, workerLabel }: { tool: WorkerToolActivity; workerLabel: string }) {
   const dotColor = tool.status === "running" ? "#3b82f6" : tool.status === "error" ? "#f87171" : "var(--text-dim)";
   const textColor = tool.status === "running" ? "color-mix(in srgb, #3b82f6 82%, var(--text-muted))" : "var(--text-muted)";
   const isRunning = tool.status === "running";
+  const summary = tool.summary.trim() || "无文件/命令摘要";
   return (
     <span
+      title={`${workerLabel} · ${tool.toolName} · ${summary}`}
       style={{
         display: "inline-flex",
         alignItems: "center",
-        gap: 4,
-        fontSize: 10,
+        gap: 5,
+        maxWidth: 460,
+        minWidth: 0,
+        border: `1px solid ${tool.status === "error" ? "#f8717144" : "var(--border)"}`,
+        background: tool.status === "running" ? "rgba(59, 130, 246, 0.08)" : "var(--bg-subtle)",
         color: textColor,
-        maxWidth: "100%",
-        overflow: "hidden",
+        borderRadius: 999,
+        padding: "3px 8px",
+        fontSize: 11,
+        lineHeight: 1.2,
       }}
     >
       {/* 状态圆点 */}
       <span
         style={{
-          width: 5,
-          height: 5,
+          width: 6,
+          height: 6,
           borderRadius: "50%",
           background: dotColor,
           flexShrink: 0,
           animation: isRunning ? "tool-pulse 1.4s ease-in-out infinite" : "none",
         }}
       />
-      <span style={{ fontWeight: 600, flexShrink: 0 }}>{tool.toolName}</span>
-      {tool.summary && (
-        <span
-          style={{
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-            opacity: 0.7,
-          }}
-        >
-          {tool.summary}
-        </span>
-      )}
+      <span style={{ fontWeight: 700, color: tool.status === "running" ? "#2563eb" : "var(--text-muted)", flexShrink: 0 }}>{tool.toolName}</span>
+      <span
+        style={{
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+          color: "var(--text-muted)",
+          minWidth: 0,
+        }}
+      >
+        {summary}
+      </span>
     </span>
   );
 }
