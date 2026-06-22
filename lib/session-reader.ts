@@ -2,8 +2,10 @@ import { SessionManager, buildSessionContext as piBuildSessionContext, getAgentD
 import { statSync } from "fs";
 import type { SessionEntry, SessionInfo, SessionContext, SessionHeader, AssistantMessage, FileReference, SkillReference } from "./types";
 import type { SessionEntry as PiSessionEntry, SessionInfo as PiSessionInfo } from "@earendil-works/pi-coding-agent";
+import type { CollaborationRunSnapshot } from "./parallel-agent/collaboration-types";
 import { normalizeToolCalls } from "./normalize";
 import { extractTurnMode, normalizeAgentMode, stripTurnModeContext, type AgentMode } from "./agent-modes";
+import { getWorkerOrigins, pruneWorkerOrigins } from "./parallel-agent/subagent-registry";
 
 const SESSION_LIST_TTL_MS = 30_000;
 /** Min interval between background refreshes to avoid thundering herd under load. */
@@ -25,15 +27,32 @@ declare global {
   } | undefined;
 }
 
+function isLikelySubagentSession(s: PiSessionInfo): boolean {
+  const firstMessage = String(s.firstMessage ?? "").trim();
+  const isWorkerPrompt = firstMessage.includes("## 用户总体问题") && (
+    firstMessage.startsWith("你是一个专业代码分析专家") ||
+    firstMessage.startsWith("你是一个专业的编程专家")
+  );
+  const cwd = String(s.cwd ?? "");
+  const isWorkerWorkspace = cwd.includes("/deerhux-runs/") || cwd.includes("/.deerhux/worktrees/");
+  return isWorkerPrompt || isWorkerWorkspace;
+}
+
 async function listAllSessionsUncached(): Promise<SessionInfo[]> {
   const piSessions: PiSessionInfo[] = await SessionManager.listAll();
   const pathToId = new Map<string, string>();
   for (const s of piSessions) pathToId.set(s.path, s.id);
 
+  const workerOrigins = await getWorkerOrigins();
+  // Housekeeping: drop registry entries whose sessions no longer exist on disk.
+  void pruneWorkerOrigins(new Set(piSessions.map((s) => s.id)));
+
   const cache = getPathCache();
   return piSessions.map((s) => {
     // Populate path cache so resolveSessionPath works without a full scan
     cache.set(s.id, s.path);
+    const origin = workerOrigins.get(s.id);
+    const isSubagent = Boolean(origin) || isLikelySubagentSession(s);
     return {
       path: s.path,
       id: s.id,
@@ -43,7 +62,8 @@ async function listAllSessionsUncached(): Promise<SessionInfo[]> {
       modified: s.modified instanceof Date ? s.modified.toISOString() : String(s.modified),
       messageCount: s.messageCount,
       firstMessage: s.firstMessage || "(no messages)",
-      parentSessionId: s.parentSessionPath ? pathToId.get(s.parentSessionPath) : undefined,
+      isSubagent: isSubagent ? true : undefined,
+      parentSessionId: origin?.parentSessionId ?? (s.parentSessionPath ? pathToId.get(s.parentSessionPath) : undefined),
     };
   });
 }
@@ -347,12 +367,12 @@ export function buildSessionContext(entries: SessionEntry[], leafId?: string | n
   // Needed for fork and navigate_tree calls from the UI.
   let targetLeaf: SessionEntry | undefined;
   if (leafId === null) {
-    return { messages: [], entryIds: [], thinkingLevel: piCtx.thinkingLevel, model: piCtx.model, roleId: null, agentMode: "agent" };
+    return { messages: [], entryIds: [], thinkingLevel: piCtx.thinkingLevel, model: piCtx.model, roleId: null, agentMode: "agent", collaborationRuns: [] };
   }
   if (leafId) targetLeaf = byId.get(leafId);
   if (!targetLeaf) targetLeaf = entries[entries.length - 1];
   if (!targetLeaf) {
-    return { messages: [], entryIds: [], thinkingLevel: piCtx.thinkingLevel, model: piCtx.model, roleId: null, agentMode: "agent" };
+    return { messages: [], entryIds: [], thinkingLevel: piCtx.thinkingLevel, model: piCtx.model, roleId: null, agentMode: "agent", collaborationRuns: [] };
   }
 
   const normalizeReferences = (value: unknown): FileReference[] => {
@@ -380,6 +400,9 @@ export function buildSessionContext(entries: SessionEntry[], leafId?: string | n
 
   let roleId: string | null = null;
   let agentMode: AgentMode = "agent";
+  // 协作 run 快照：同一个 runId 可能因状态更新被 upsert 多次，这里按出现顺序
+  // 覆盖，最终保留每个 runId 在 path 上的最后一条（即最新快照）。
+  const collabRunsByRunId = new Map<string, CollaborationRunSnapshot>();
   const turnContextByMessageId = new Map<string, { agentMode?: AgentMode; references?: FileReference[]; skill?: SkillReference }>();
   let pendingTurnContext: { agentMode?: AgentMode; references?: FileReference[]; skill?: SkillReference } | null = null;
   for (const e of path) {
@@ -390,6 +413,12 @@ export function buildSessionContext(entries: SessionEntry[], leafId?: string | n
     if (e.type === "custom" && (e as { customType?: string }).customType === "agent_mode") {
       const data = (e as { data?: { mode?: unknown } }).data;
       agentMode = normalizeAgentMode(data?.mode);
+    }
+    if (e.type === "custom" && (e as { customType?: string }).customType === "agent_collaboration_run") {
+      const data = (e as { data?: CollaborationRunSnapshot }).data;
+      if (data && typeof data.runId === "string") {
+        collabRunsByRunId.set(data.runId, data);
+      }
     }
     if (e.type === "custom" && (e as { customType?: string }).customType === "turn_context") {
       const data = (e as { data?: { mode?: unknown; references?: unknown; skill?: { name?: unknown } } }).data;
@@ -527,6 +556,7 @@ export function buildSessionContext(entries: SessionEntry[], leafId?: string | n
     model: piCtx.model,
     roleId,
     agentMode,
+    collaborationRuns: [...collabRunsByRunId.values()],
   };
 }
 

@@ -3,6 +3,7 @@
 import { useState, useCallback, useRef, useEffect, useReducer, useMemo } from "react";
 import { getLocalStorageItem } from "@/lib/client-storage";
 import type { AgentMessage, FileReference, ImageContent, SessionInfo, SkillReference, TextContent, UserMessage } from "@/lib/types";
+import type { CollaborationRunSnapshot } from "@/lib/parallel-agent/collaboration-types";
 import { normalizeCompletedMessage, normalizeCompletedMessages, normalizeToolCalls } from "@/lib/normalize";
 import { agentEventBus } from "@/lib/agent-event-bus";
 import { sendAgentCommand } from "@/lib/agent-client";
@@ -131,6 +132,8 @@ export interface SessionData {
     model: { provider: string; modelId: string } | null;
     roleId?: string | null;
     agentMode?: AgentMode;
+    /** spawn_subagent 协作 run 快照（按 jsonl 出现顺序） */
+    collaborationRuns?: CollaborationRunSnapshot[];
   };
 }
 
@@ -538,6 +541,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const optimisticSessionIdRef = useRef<string | null>(null);
   const adoptingCreatedSessionRef = useRef<string | null>(null);
   const turnIdRef = useRef(0);
+  const activeSubagentToolIdsRef = useRef<Set<string>>(new Set());
+  const subagentLiveRefreshTimersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
 
   const clearAwaitingAgentStartGuard = useCallback((resetChecks = true) => {
     if (resetChecks) awaitingAgentStartChecksRef.current = 0;
@@ -734,6 +739,28 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       console.error("Failed to load tools:", e);
     }
   }, [setToolPresetState]);
+
+  const stopSubagentLiveRefresh = useCallback(() => {
+    for (const timer of subagentLiveRefreshTimersRef.current) clearTimeout(timer);
+    subagentLiveRefreshTimersRef.current = [];
+  }, []);
+
+  const startSubagentLiveRefresh = useCallback((sid: string) => {
+    // 只做短促刷新，把父 session jsonl 里的 agent_collaboration_run 快照拉进当前页面，
+    // 让 tag 尽快挂载。tag 挂载后会走 /api/agent-runs/:runId/events 自己实时更新，
+    // 不能在 subagent 整个运行期间每秒全量 loadSession，否则会拖垮 session 读取和左侧列表。
+    stopSubagentLiveRefresh();
+    const delays = [0, 600, 1500, 3000, 6000];
+    subagentLiveRefreshTimersRef.current = delays.map((delay) => setTimeout(() => {
+      if (sessionIdRef.current !== sid || activeSubagentToolIdsRef.current.size === 0) return;
+      void loadSession(sid, false, false);
+    }, delay));
+  }, [loadSession, stopSubagentLiveRefresh]);
+
+  const finishSubagentLiveRefresh = useCallback((sid: string) => {
+    stopSubagentLiveRefresh();
+    void loadSession(sid, false, false);
+  }, [loadSession, stopSubagentLiveRefresh]);
 
   const connectEvents = useCallback((sid: string) => {
     // Clear any pending reconnect timer from a previous attempt
@@ -1026,6 +1053,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         }
         setAgentRunning(false);
         setAgentPhase(null);
+        activeSubagentToolIdsRef.current.clear();
+        stopSubagentLiveRefresh();
         if (!endedWithError) setRetryInfo(null);
         dispatch({ type: "end" });
         setPlanReady(!endedWithError && agentModeRef.current === "plan");
@@ -1134,6 +1163,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       case "tool_execution_start": {
         const id = event.toolCallId as string;
         const name = event.toolName as string;
+        if (name === "spawn_subagent") {
+          activeSubagentToolIdsRef.current.add(id);
+          const sid = sessionIdRef.current;
+          if (sid) startSubagentLiveRefresh(sid);
+        }
         setAgentPhase((prev) => {
           const tools = prev?.kind === "running_tools" ? [...prev.tools] : [];
           if (!tools.some((t) => t.id === id)) tools.push({ id, name });
@@ -1143,6 +1177,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       case "tool_execution_end": {
         const id = event.toolCallId as string;
+        if (activeSubagentToolIdsRef.current.delete(id)) {
+          const sid = sessionIdRef.current;
+          if (sid) finishSubagentLiveRefresh(sid);
+        }
         setAgentPhase((prev) => {
           if (prev?.kind !== "running_tools") return prev;
           const tools = prev.tools.filter((t) => t.id !== id);
@@ -1193,7 +1231,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         }
         break;
     }
-  }, [loadSession, onAgentEnd, autoRecoveryMode]);
+  }, [loadSession, onAgentEnd, autoRecoveryMode, startSubagentLiveRefresh, finishSubagentLiveRefresh, stopSubagentLiveRefresh]);
   handleAgentEventRef.current = handleAgentEvent;
 
   const handleSend = useCallback(async (message: string, images?: AttachedImage[], roleId?: string, references?: FileReference[], skill?: SkillReference) => {
@@ -1963,6 +2001,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     sessionAbortRef.current?.abort();
     sessionAbortRef.current = new AbortController();
     loadSessionInflightRef.current = null;
+    activeSubagentToolIdsRef.current.clear();
+    stopSubagentLiveRefresh();
     agentRunningRef.current = false;
     awaitingAgentStartRef.current = false;
     optimisticSessionIdRef.current = null;
@@ -2048,12 +2088,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
     });
 
+    const activeSubagentToolIds = activeSubagentToolIdsRef.current;
     return () => {
       cancelled = true;
       eventSourceRef.current?.close();
       eventSourceRef.current = null;
+      activeSubagentToolIds.clear();
+      stopSubagentLiveRefresh();
     };
-  }, [connectEvents, loadSession, loadTools, activeTabId, newSessionCwd, activeSessionId]);
+  }, [connectEvents, loadSession, loadTools, activeTabId, newSessionCwd, activeSessionId, stopSubagentLiveRefresh]);
 
   useEffect(() => {
     entryIdsRef.current = entryIds;

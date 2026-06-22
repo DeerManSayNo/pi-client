@@ -1344,7 +1344,9 @@ export async function startRpcSession(
   cwd: string,
   toolNames?: string[],
   roleId?: string | null,
-  agentMode?: AgentMode | null
+  agentMode?: AgentMode | null,
+  model?: { provider: string; modelId: string },
+  options?: { allowSubagentTool?: boolean }
 ): Promise<{ session: AgentSessionWrapper; realSessionId: string }> {
   const registry = getRegistry();
   const locks = getLocks();
@@ -1359,7 +1361,7 @@ export async function startRpcSession(
   if (isDeerLoopEnabled()) {
     const deerStarting = (async () => {
       const { session, realSessionId } = await startDeerLoopSession(
-        sessionId, sessionFile, cwd, toolNames, roleId, agentMode,
+        sessionId, sessionFile, cwd, toolNames, roleId, agentMode, model, options,
       );
       return { session, realSessionId };
     })().finally(() => locks.delete(sessionId));
@@ -1412,10 +1414,11 @@ export async function startRpcSession(
       },
     }) : null;
     const codeGraphTools = await createCodeGraphTools(cwd);
+    const allowSubagentTool = options?.allowSubagentTool !== false;
     // Holder is mutated once the real session id is known so the subagent tool
     // can attach its runs to this session at execution time.
     const sessionIdHolder: { id: string | undefined } = { id: undefined };
-    const subagentTool = createSubagentTool(cwd, { getParentSessionId: () => sessionIdHolder.id });
+    const subagentTool = allowSubagentTool ? createSubagentTool(cwd, { getParentSessionId: () => sessionIdHolder.id }) : null;
     const hasExplicitMode = agentMode !== undefined && agentMode !== null;
     const effectiveMode = normalizeAgentMode(agentMode);
     const requestedToolNames = toolNames ?? (hasExplicitMode ? getToolNamesForAgentMode(effectiveMode) : []);
@@ -1424,7 +1427,7 @@ export async function startRpcSession(
       ? await import("./mcp-runtime").then(({ acquireMcpRuntime }) => acquireMcpRuntime(cwd))
       : null;
     const mcpRuntime = mcpRuntimeLease?.runtime ?? null;
-    const customTools = [...(codeSearchTool ? [codeSearchTool] : []), ...codeGraphTools, subagentTool, ...(mcpRuntime?.tools ?? [])];
+    const customTools = [...(codeSearchTool ? [codeSearchTool] : []), ...codeGraphTools, ...(subagentTool ? [subagentTool] : []), ...(mcpRuntime?.tools ?? [])];
     const availableToolNames = [
       ...allCodingToolNames,
       ...(codeSearchTool ? ["code_search"] : []),
@@ -1451,7 +1454,7 @@ export async function startRpcSession(
     // early-returns). Add it to the whitelist whenever any tools are enabled;
     // whether it is *active* is still driven by `_subagentEnabled` via
     // setActiveToolsByName after creation.
-    if (toolsOption && toolsOption.length > 0 && !toolsOption.includes(SUBAGENT_TOOL_NAME)) {
+    if (allowSubagentTool && toolsOption && toolsOption.length > 0 && !toolsOption.includes(SUBAGENT_TOOL_NAME)) {
       toolsOption.push(SUBAGENT_TOOL_NAME);
     }
 
@@ -1543,14 +1546,21 @@ async function startDeerLoopSession(
   toolNames?: string[],
   roleId?: string | null,
   agentMode?: AgentMode | null,
+  modelOverride?: { provider: string; modelId: string },
+  options?: { allowSubagentTool?: boolean },
 ): Promise<{ session: AgentSessionWrapper; realSessionId: string }> {
   const { AuthStorage, ModelRegistry } = await import("@earendil-works/pi-coding-agent");
   const authStorage = AuthStorage.create();
   const modelRegistry = ModelRegistry.create(authStorage);
 
-  // 选取默认 model：优先环境变量，其次第一个可用 model。
+  // 选取默认 model。优先级：modelOverride（worker 继承父 session 的 model）
+  // > DEERHUX_LOOP_MODEL 环境变量 > 第一个可用 model。worker 若退回默认
+  // getAvailable()[0]，会与父 session 的 model 不一致（实测 deepseek-v4-pro
+  // 不稳定会超时），导致 spawn_subagent 全军覆没。
   let model = modelRegistry.getAvailable()[0];
-  const override = process.env.DEERHUX_LOOP_MODEL;
+  const override = modelOverride
+    ? `${modelOverride.provider}/${modelOverride.modelId}`
+    : process.env.DEERHUX_LOOP_MODEL;
   if (override) {
     const [provider, modelId] = override.split("/");
     if (provider && modelId) {
@@ -1592,8 +1602,12 @@ async function startDeerLoopSession(
     },
   }) : null;
   const codeGraphTools = await createCodeGraphTools(cwd);
-  const sessionIdHolder: { id: string | undefined } = { id: undefined };
-  const subagentTool = createSubagentTool(cwd, { getParentSessionId: () => sessionIdHolder.id });
+  const allowSubagentTool = options?.allowSubagentTool !== false;
+  const sessionContextHolder: { id: string | undefined; model: { provider: string; modelId: string } | undefined } = { id: undefined, model: undefined };
+  const subagentTool = allowSubagentTool ? createSubagentTool(cwd, {
+    getParentSessionId: () => sessionContextHolder.id,
+    getParentModel: () => sessionContextHolder.model,
+  }) : null;
 
   const hasExplicitMode = agentMode !== undefined && agentMode !== null;
   const effectiveMode = normalizeAgentMode(agentMode);
@@ -1607,7 +1621,7 @@ async function startDeerLoopSession(
   const customTools: AnyToolDefinition[] = [
     ...(codeSearchTool ? [codeSearchTool] : []),
     ...codeGraphTools,
-    subagentTool,
+    ...(subagentTool ? [subagentTool] : []),
     ...(mcpRuntime?.tools ?? []),
   ];
   const availableToolNames = [
@@ -1627,7 +1641,7 @@ async function startDeerLoopSession(
       const available = new Set(availableToolNames);
       activeToolNames = requestedToolNames.filter(name => available.has(name));
     }
-    if (activeToolNames.length > 0 && !activeToolNames.includes(SUBAGENT_TOOL_NAME)) {
+    if (allowSubagentTool && activeToolNames.length > 0 && !activeToolNames.includes(SUBAGENT_TOOL_NAME)) {
       activeToolNames.push(SUBAGENT_TOOL_NAME);
     }
   } else {
@@ -1661,12 +1675,18 @@ async function startDeerLoopSession(
   const sessionManager = sessionFile
     ? SessionManager.open(sessionFile, undefined)
     : SessionManager.create(cwd, undefined);
+  // ★ 用 SessionManager 的真实 sessionId（uuid）作为 engine 的 sessionId，而不是
+  //   前端/worker 传入的临时 key（如 `__collab__...`）。否则 registry 与
+  //   subagent-registry 用临时 key 注册，而 SessionManager.listAll() 返回真实 uuid，
+  //   两者对不上 → worker session 的 isSubagent 标记失效 → worker session 泄露到
+  //   侧边栏项目列表（表现为「多出一模一样的 session」）。
+  const realSessionId = sessionManager.getSessionId();
 
   // ─── 构造 DeerLoopEngine ───
   const engine: AgentEnginePort = createDeerLoop({
     model,
     cwd,
-    sessionId,
+    sessionId: realSessionId,
     systemPrompt,
     // 用 ModelRegistry 解析 key，而不是直接 AuthStorage.getApiKey(provider)。
     // 原因：custom providers 的 apiKey/headers 可能来自 models.json，pi 路径也是通过
@@ -1685,8 +1705,11 @@ async function startDeerLoopSession(
   const wrapper = new AgentSessionWrapper(engine, roleId, mcpRuntimeLease, hasExplicitMode ? effectiveMode : undefined);
   wrapper.start();
 
-  const realSessionId = engine.sessionId;
-  sessionIdHolder.id = realSessionId;
+  sessionContextHolder.id = realSessionId;
+  const engineModel = engine.model;
+  sessionContextHolder.model = engineModel
+    ? { provider: String(engineModel.provider), modelId: String((engineModel as { id?: unknown }).id ?? "") }
+    : undefined;
   const realSessionFile = sessionManager.getSessionFile?.() ?? undefined;
   if (realSessionFile) cacheSessionPath(realSessionId, realSessionFile);
   if (!sessionFile) invalidateSessionListCache();

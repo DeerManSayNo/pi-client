@@ -10,6 +10,10 @@ export interface CreateSubagentToolOptions {
   getParentSessionId?: () => string | undefined;
   /** Optional parent entry id (e.g. the current tool-call turn). */
   getParentEntryId?: () => string | undefined;
+  /** Resolved at execution time so worker sessions inherit the parent's model.
+   *  Without this, workers fall back to modelRegistry's first available model,
+   *  which is often a different (and possibly broken) model than the parent. */
+  getParentModel?: () => { provider: string; modelId: string } | undefined;
 }
 
 /**
@@ -84,6 +88,7 @@ export function createSubagentTool(cwd: string, options: CreateSubagentToolOptio
           workers,
           parentSessionId: options.getParentSessionId?.(),
           parentEntryId: options.getParentEntryId?.(),
+          parentModel: options.getParentModel?.(),
           // Tool invocations happen mid-turn while the main agent may have
           // uncommitted edits; worktrees branch from HEAD regardless.
           allowDirtyWorktree: true,

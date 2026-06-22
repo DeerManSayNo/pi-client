@@ -19,6 +19,8 @@ import type {
   ToolCallContent,
   ThinkingContent,
 } from "@/lib/types";
+import type { CollaborationRunSnapshot } from "@/lib/parallel-agent/collaboration-types";
+import { SubagentRunCard } from "./SubagentRunCard";
 
 interface WatchdogInfo {
   eventIdleMs: number;
@@ -38,8 +40,11 @@ interface Props {
   forking?: boolean;
   showTimestamp?: boolean;
   prevTimestamp?: number;
+  nextUserTimestamp?: number;
   onResend?: (message: string, entryId?: string, references?: FileReference[], skill?: UserMessage["skill"]) => void;
   systemPrompt?: string | null;
+  /** spawn_subagent 协作 run 快照（来自父 session 的 custom entry）。 */
+  collaborationRuns?: CollaborationRunSnapshot[];
 }
 
 function formatTime(ts?: number): string | null {
@@ -74,9 +79,37 @@ function copyText(text: string): Promise<void> {
   }
 }
 
-function MessageViewImpl({ message, isStreaming, toolResults, modelNames, watchdogInfo, entryId, onFork, forking, showTimestamp, prevTimestamp, onResend, systemPrompt }: Props) {
+function MessageViewImpl({ message, isStreaming, toolResults, modelNames, watchdogInfo, entryId, onFork, forking, showTimestamp, prevTimestamp, nextUserTimestamp, onResend, systemPrompt, collaborationRuns }: Props) {
+  // 把协作 run 关联到触发它的 user 消息：run.createdAt 是 ISO string，
+  // UserMessage.timestamp 是 ms。一个 user turn 可能发起多次 spawn_subagent，
+  // 全部归到该条 user（下一条 user 消息的 run 自然 createdAt 更晚，不会重复归属）。
+  const rawTs = message.role === "user" ? (message as UserMessage).timestamp : undefined;
+  const userTs = typeof rawTs === "number" ? rawTs : (rawTs ? Date.parse(rawTs) : NaN);
+  const linkedRuns = useMemo(() => {
+    if (message.role !== "user") return [];
+    if (!collaborationRuns || collaborationRuns.length === 0) return [];
+    if (!userTs || Number.isNaN(userTs)) return [];
+    return collaborationRuns
+      .filter((r) => {
+        const created = Date.parse(r.createdAt);
+        if (Number.isNaN(created)) return false;
+        return created >= userTs && (!nextUserTimestamp || created < nextUserTimestamp);
+      })
+      .sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
+  }, [message.role, collaborationRuns, userTs, nextUserTimestamp]);
   if (message.role === "user") {
-    return <UserMessageView message={message as UserMessage} entryId={entryId} onFork={onFork} forking={forking} onResend={onResend} systemPrompt={systemPrompt} />;
+    return (
+      <>
+        <UserMessageView message={message as UserMessage} entryId={entryId} onFork={onFork} forking={forking} onResend={onResend} systemPrompt={systemPrompt} />
+        {linkedRuns.length > 0 && (
+          <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 8 }}>
+            {linkedRuns.map((run) => (
+              <SubagentRunCard key={run.runId} run={run} />
+            ))}
+          </div>
+        )}
+      </>
+    );
   }
   if (message.role === "assistant") {
     return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} modelNames={modelNames} watchdogInfo={watchdogInfo} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} />;
@@ -99,8 +132,10 @@ export const MessageView = memo(MessageViewImpl, (prev, next) => (
   prev.forking === next.forking &&
   prev.showTimestamp === next.showTimestamp &&
   prev.prevTimestamp === next.prevTimestamp &&
+  prev.nextUserTimestamp === next.nextUserTimestamp &&
   prev.onResend === next.onResend &&
-  prev.systemPrompt === next.systemPrompt
+  prev.systemPrompt === next.systemPrompt &&
+  prev.collaborationRuns === next.collaborationRuns
 ));
 
 /** Parse /skill:name prefix from message text. Returns { skillName, rest } or null. */
@@ -906,7 +941,14 @@ function AssistantMessageView({
 
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
         {blocks.map((block, i) => (
-          <BlockView key={i} block={block} toolResults={toolResults} streamingDuration={streamingDurations.get(i) ?? (block.type === "thinking" ? thinkingDurationFromFile : undefined)} toolCallDurations={toolCallDurations} isStreaming={isStreaming} />
+          <BlockView
+            key={i}
+            block={block}
+            toolResults={toolResults}
+            streamingDuration={streamingDurations.get(i) ?? (block.type === "thinking" ? thinkingDurationFromFile : undefined)}
+            toolCallDurations={toolCallDurations}
+            isStreaming={isStreaming}
+          />
         ))}
       </div>
 

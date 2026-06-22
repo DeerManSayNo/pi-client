@@ -114,6 +114,7 @@ export async function startCollaborationRun(params: {
   title?: string;
   parentSessionId?: string;
   parentEntryId?: string;
+  parentModel?: { provider: string; modelId: string };
   allowDirtyWorktree?: boolean;
 }): Promise<CollaborationRunState> {
   const runId = `collab_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -137,6 +138,7 @@ export async function startCollaborationRun(params: {
     runId,
     parentSessionId: params.parentSessionId,
     parentEntryId: params.parentEntryId,
+    model: params.parentModel,
     cwd,
     title: params.title ?? planned.title,
     message: planned.message,
@@ -272,7 +274,11 @@ async function executeCollaborationRun(runId: string): Promise<void> {
 
     let unsubscribeWorkerEvents: (() => void) | null = null;
     try {
-      const workerSession = await createSubagentWorkerSession(workerCwd, current.mode);
+      const workerSession = await createSubagentWorkerSession(workerCwd, current.mode, undefined, {
+        parentSessionId: current.parentSessionId,
+        runId: current.runId,
+        workerName: worker.name,
+      }, current.model);
       workerSessions.push(workerSession);
       updateCollaborationRun(runId, (run) => {
         const target = run.workers[index];
@@ -398,7 +404,11 @@ export async function continueCollaborationWorker(runId: string, workerId: strin
   emitCollaborationRunEvent({ type: "worker_resumed", runId, workerId: worker.name, summary: message });
 
   try {
-    workerSession = await createSubagentWorkerSession(workerCwd, state.mode, worker.sessionId);
+    workerSession = await createSubagentWorkerSession(workerCwd, state.mode, worker.sessionId, {
+      parentSessionId: state.parentSessionId,
+      runId: state.runId,
+      workerName: worker.name,
+    }, state.model);
     unsubscribeWorkerEvents = workerSession.listen((event) => {
       emitCollaborationRunEvent({ type: "worker_event", runId, workerId: worker.name, event });
     });

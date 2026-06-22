@@ -1,5 +1,17 @@
 import { NextResponse } from "next/server";
 import { continueCollaborationWorker, getCollaborationRun } from "@/lib/parallel-agent/collaboration-orchestrator";
+import type { CollaborationRunSnapshot } from "@/lib/parallel-agent/collaboration-types";
+
+/** 脱敏：不对外暴露 worker sessionId / worktreePath。 */
+function sanitizeWorkers<T extends CollaborationRunSnapshot>(state: T): T {
+  return {
+    ...state,
+    workers: state.workers.map((worker) => {
+      const { sessionId: _sessionId, worktreePath: _worktreePath, ...rest } = worker;
+      return rest;
+    }),
+  };
+}
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -13,12 +25,12 @@ export async function POST(
   if (!state) return NextResponse.json({ error: "Run not found" }, { status: 404 });
   const worker = state.workers.find((item) => item.workerId === workerId || item.name === workerId);
   if (!worker?.sessionId) return NextResponse.json({ error: "Worker session is not available yet" }, { status: 404 });
-  const body = await request.json().catch(() => ({})) as { prompt?: unknown; openOnly?: unknown };
-  if (body.openOnly === true) return NextResponse.json({ sessionId: worker.sessionId });
+  const body = await request.json().catch(() => ({})) as { prompt?: unknown };
   try {
     const updated = await continueCollaborationWorker(runId, workerId, typeof body.prompt === "string" ? body.prompt : undefined);
-    return NextResponse.json({ sessionId: worker.sessionId, run: updated });
+    // 脱敏后再返回，避免泄露 worker sessionId / worktreePath。
+    return NextResponse.json({ run: sanitizeWorkers(updated) });
   } catch (error) {
-    return NextResponse.json({ error: String(error), sessionId: worker.sessionId }, { status: 500 });
+    return NextResponse.json({ error: String(error) }, { status: 500 });
   }
 }

@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from "fs";
 import { startRpcSession, type AgentEvent } from "@/lib/rpc-manager";
 import { getAgentDir, resolveSessionPath } from "@/lib/session-reader";
 import type { CollaborationRunMode } from "./collaboration-types";
+import { registerWorkerSession } from "./subagent-registry";
 
 const WORKER_INACTIVITY_TIMEOUT_MS = 30 * 60 * 1000;
 
@@ -35,7 +36,13 @@ export function getAutoRecoveryModels(): RecoveryModel[] {
   }
 }
 
-export async function createSubagentWorkerSession(cwd: string, mode: CollaborationRunMode, existingSessionId?: string): Promise<WorkerSession> {
+export async function createSubagentWorkerSession(
+  cwd: string,
+  mode: CollaborationRunMode,
+  existingSessionId?: string,
+  origin?: { parentSessionId?: string; runId?: string; workerName?: string },
+  parentModel?: { provider: string; modelId: string },
+): Promise<WorkerSession> {
   const sessionFile = existingSessionId ? await resolveSessionPath(existingSessionId) : "";
   if (existingSessionId && !sessionFile) throw new Error("Worker session file was not found");
   const tempKey = existingSessionId ?? `__collab__${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -47,9 +54,28 @@ export async function createSubagentWorkerSession(cwd: string, mode: Collaborati
     sessionFile || "",
     cwd,
     tools,
+    undefined,
+    undefined,
+    parentModel,
+    { allowSubagentTool: false },
   );
 
-  return {
+  // Record this worker session's origin so the sidebar can hide it from the
+  // top-level project list and the UI can surface it under its parent message
+  // instead. pi's SessionManager.create has no parent notion, so we keep our
+  // own index (see subagent-registry).
+  if (origin) {
+    registerWorkerSession({
+      workerSessionId: realSessionId,
+      parentSessionId: origin.parentSessionId,
+      runId: origin.runId,
+      workerName: origin.workerName,
+      mode,
+      createdAt: new Date().toISOString(),
+    });
+  }
+
+  const workerSession: WorkerSession = {
     sessionId: realSessionId,
     sendPrompt: (message: string) => new Promise((resolve, reject) => {
       let settled = false;
@@ -82,7 +108,14 @@ export async function createSubagentWorkerSession(cwd: string, mode: Collaborati
             const messages = event.messages as Array<{ role: string; content?: unknown; stopReason?: string; errorMessage?: string }>;
             const assistantError = getAssistantError(messages);
             if (assistantError) reject(new Error(assistantError));
-            else resolve(textFromMessages(messages));
+            else {
+              const text = textFromMessages(messages);
+              // 空正文意味着模型出错（如 Request timed out / upstream rejected）
+              // 但 pi 未填 event.error，且 agent_end.messages 可能不含那条 error assistant。
+              // 当作可恢复错误，让上层 runWorkerPromptWithRecovery 切换备用模型重试。
+              if (!text.trim()) reject(new Error("Worker produced no output (likely a model timeout or upstream error)"));
+              else resolve(text);
+            }
           });
         }
       });
@@ -99,6 +132,11 @@ export async function createSubagentWorkerSession(cwd: string, mode: Collaborati
     abort: async () => { await session.send({ type: "abort" }); },
     destroy: () => session.destroy(),
   };
+  // ★ 父 model 通过 startRpcSession 的 model 参数在创建 engine 时直接注入
+  //   （见 startDeerLoopSession 的 modelOverride），而非创建后再 setModel——
+  //   后者在 prompt 期间会被 _isRunning 拒绝，且 worker 默认 model 与父 session
+  //   不一致会导致超时。
+  return workerSession;
 }
 
 export async function runWorkerPromptWithRecovery(
@@ -111,7 +149,14 @@ export async function runWorkerPromptWithRecovery(
   for (let attempt = 0; attempt <= recoveryModels.length; attempt += 1) {
     const fallbackModel = attempt > 0 ? recoveryModels[attempt - 1] : null;
     try {
-      if (fallbackModel) await workerSession.setModel(fallbackModel);
+      if (fallbackModel) {
+        // 切换 recovery model 前先 abort：上一轮 sendPrompt 超时 reject 来自
+        // workerSession 的 30min watchdog，engine 的 prompt loop 可能仍在 running
+        //（_isRunning=true），此时 setModel 会抛 "prompt 正在运行"。先 abort 让
+        // loop 进入 idle 态，setModel 才能成功。
+        await workerSession.abort().catch(() => {});
+        await workerSession.setModel(fallbackModel);
+      }
       const retryPrefix = fallbackModel
         ? `上一轮子 Agent 请求失败，已切换到自动恢复模型 ${fallbackModel.provider}/${fallbackModel.modelId}。请重新完成同一个子任务，不要依赖上一轮失败输出。\n\n`
         : "";

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getCollaborationRun } from "@/lib/parallel-agent/collaboration-orchestrator";
+import { sanitizeCollaborationRun } from "@/lib/parallel-agent/collaboration-sanitize";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -13,5 +14,5 @@ export async function GET(
   if (!state) {
     return NextResponse.json({ error: "Run not found" }, { status: 404 });
   }
-  return NextResponse.json(state);
+  return NextResponse.json(sanitizeCollaborationRun(state));
 }

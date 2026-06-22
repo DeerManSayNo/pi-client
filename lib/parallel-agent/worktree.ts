@@ -33,12 +33,37 @@ function ensureRunsDir(): string {
   return runDir;
 }
 
+/*
+ * Sanitize a worker name into a filesystem-safe path segment.
+ * Parallel mode uses Chinese names like "方案 A/B/C" which all sanitize to
+ * the same string, so callers must dedupe via allocateSafeName below.
+ */
+function sanitizeWorkerName(workerName: string): string {
+  return workerName.replace(/[^a-zA-Z0-9_-]/g, "_").replace(/^_+|_+$/g, "") || "worker";
+}
+
+/*
+ * Allocate a unique safe name within a run directory. Repeated collisions
+ * (e.g. parallel mode's "方案 A/B/C" all sanitizing to "_") get a numeric
+ * suffix so each worker gets its own worktree path.
+ */
+function allocateSafeName(workerName: string, runDir: string): string {
+  const base = sanitizeWorkerName(workerName);
+  let candidate = base;
+  let suffix = 1;
+  while (fs.existsSync(path.join(runDir, candidate))) {
+    suffix += 1;
+    candidate = `${base}_${suffix}`;
+  }
+  return candidate;
+}
+
 /**
  * Create a git worktree for a worker.
  * Returns the worktree path.
  */
 export function createWorktree(cwd: string, workerName: string, runDir: string): string {
-  const safeName = workerName.replace(/[^a-zA-Z0-9_-]/g, "_");
+  const safeName = allocateSafeName(workerName, runDir);
   const worktreePath = path.join(runDir, safeName);
   const gitRoot = getGitRoot(cwd);
   const headRef = "HEAD";
@@ -53,7 +78,7 @@ export function createWorktree(cwd: string, workerName: string, runDir: string):
  * Returns the temp directory path.
  */
 export function createTempCopy(cwd: string, workerName: string, runDir: string): string {
-  const safeName = workerName.replace(/[^a-zA-Z0-9_-]/g, "_");
+  const safeName = allocateSafeName(workerName, runDir);
   const destPath = path.join(runDir, safeName);
   fs.cpSync(cwd, destPath, { recursive: true });
   return destPath;

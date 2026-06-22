@@ -1,7 +1,7 @@
 import { existsSync } from "fs";
 import { NextResponse } from "next/server";
 import { listCollaborationRuns, startCollaborationRun } from "@/lib/parallel-agent/collaboration-orchestrator";
-import type { CollaborationRunMode, CollaborationWorkerSpec } from "@/lib/parallel-agent/collaboration-types";
+import type { CollaborationRunMode, CollaborationRunSnapshot, CollaborationWorkerSpec } from "@/lib/parallel-agent/collaboration-types";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -67,6 +67,21 @@ export async function POST(request: Request) {
   }
 }
 
-export async function GET() {
-  return NextResponse.json(listCollaborationRuns());
+function sanitize(state: CollaborationRunSnapshot): CollaborationRunSnapshot {
+  return {
+    ...state,
+    workers: state.workers.map((worker) => {
+      const { sessionId: _sessionId, worktreePath: _worktreePath, ...rest } = worker;
+      return rest;
+    }),
+  };
+}
+
+export async function GET(request: Request) {
+  const url = new URL(request.url);
+  const parentSessionId = url.searchParams.get("parentSessionId")?.trim();
+  const runs = listCollaborationRuns()
+    .filter((run) => !parentSessionId || run.parentSessionId === parentSessionId)
+    .map((run) => sanitize(run));
+  return NextResponse.json(runs);
 }

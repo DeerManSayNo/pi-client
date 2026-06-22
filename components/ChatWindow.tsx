@@ -2,7 +2,9 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AgentMessage, FileReference, SessionInfo, SkillReference } from "@/lib/types";
+import type { CollaborationRunSnapshot } from "@/lib/parallel-agent/collaboration-types";
 import { MessageView } from "./MessageView";
+import { SubagentRunCard } from "./SubagentRunCard";
 import { ChatInput, type ChatInputHandle, type ChatInputState, type AttachedImage } from "./ChatInput";
 import { useMessageRefs } from "./ChatMinimap";
 import { ChangedFilesList } from "./ChangedFilesList";
@@ -366,6 +368,7 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
   // Track changed files from agent_end event per session so switching chats
   // does not show another session's bottom "x files modified" banner.
   const [changedFilesBySession, setChangedFilesBySession] = useState<Record<string, string[]>>({});
+  const [liveCollaborationRuns, setLiveCollaborationRuns] = useState<CollaborationRunSnapshot[]>([]);
   const activeSessionKey = session?.id ?? null;
   const changedFiles = activeSessionKey ? (changedFilesBySession[activeSessionKey] ?? []) : [];
   const [currentRoleId, setCurrentRoleId] = useState("default");
@@ -406,6 +409,49 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
 
   // 实时轮询服务端 agent 状态（用于状态 ticker）
   const { server: serverStatus } = useAgentStatus(session?.id, agentRunning, watchdogInfo);
+
+  // subagent 运行中不要反复全量读取父 session；改走轻量内存态 runs 接口。
+  const hasRunningSubagentTool = agentPhase?.kind === "running_tools" && agentPhase.tools.some((tool) => tool.name === "spawn_subagent");
+  useEffect(() => {
+    if (!session?.id) {
+      setLiveCollaborationRuns([]);
+      return;
+    }
+    if (!agentRunning || !hasRunningSubagentTool) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setInterval> | null = null;
+    const fetchRuns = async () => {
+      try {
+        const res = await fetch(`/api/agent-runs?parentSessionId=${encodeURIComponent(session.id)}`, { cache: "no-store" });
+        if (!res.ok) return;
+        const runs = (await res.json()) as CollaborationRunSnapshot[];
+        if (!cancelled) setLiveCollaborationRuns(runs);
+      } catch {
+        // best effort：实时 tag 失败不影响主 agent 运行。
+      }
+    };
+    void fetchRuns();
+    timer = setInterval(fetchRuns, 1200);
+    return () => {
+      cancelled = true;
+      if (timer) clearInterval(timer);
+    };
+  }, [session?.id, agentRunning, hasRunningSubagentTool]);
+
+  useEffect(() => {
+    setLiveCollaborationRuns([]);
+  }, [session?.id]);
+
+  const collaborationRuns = useMemo(() => {
+    const byId = new Map<string, CollaborationRunSnapshot>();
+    for (const run of data?.context?.collaborationRuns ?? []) byId.set(run.runId, run);
+    for (const run of liveCollaborationRuns) byId.set(run.runId, run);
+    return [...byId.values()].sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
+  }, [data?.context?.collaborationRuns, liveCollaborationRuns]);
+  const activeSubagentRuns = useMemo(
+    () => collaborationRuns.filter((run) => !["complete", "aborted", "error", "applied"].includes(run.status)),
+    [collaborationRuns],
+  );
 
   const currentCwd = session?.cwd ?? newSessionCwd ?? undefined;
   const selectableProjectOptions = useMemo(() => {
@@ -621,7 +667,7 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
         setPinnedUserMsgIdx(-1);
       }
     }
-  }, [userMsgIndices.length]);
+  }, [userMsgIndices.length, userMsgIndices]);
 
   // 钉住的 user 消息文本
   const pinnedUserMsgText = useMemo(() => {
@@ -765,7 +811,7 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
     setAutoScroll(true);
     prevScrollTopRef.current = scrollContainerRef.current?.scrollTop ?? 0;
     scrollDirectionRef.current = null;
-  }, [session?.id, isNew, setAutoScroll]);
+  }, [session?.id, isNew, setAutoScroll, scrollContainerRef]);
 
   useEffect(() => {
     if (!agentRunning) return;
@@ -777,7 +823,7 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
       }
     });
     return () => cancelAnimationFrame(frame);
-  }, [agentRunning, streamState.streamingMessage, agentPhase, scrollToLiveBottom]);
+  }, [agentRunning, streamState.streamingMessage, agentPhase, collaborationRuns, scrollToLiveBottom, scrollContainerRef]);
 
   const isEmptyNew = isNew && messages.length === 0 && !streamState.isStreaming && !agentRunning;
   const contentMaxWidth = compact ? 640 : 820;
@@ -1247,6 +1293,16 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
                     showTimestamp = false;
                   }
                 }
+                const nextUser = (() => {
+                  for (let j = idx + 1; j < messages.length; j++) {
+                    const candidate = messages[j] as import("@/lib/types").AgentMessage & { timestamp?: number | string };
+                    if (candidate.role !== "user") continue;
+                    const ts = candidate.timestamp;
+                    const parsed = typeof ts === "number" ? ts : (ts ? Date.parse(ts) : NaN);
+                    return Number.isNaN(parsed) ? undefined : parsed;
+                  }
+                  return undefined;
+                })();
                 const view = (
                   <MessageView
                     key={idx}
@@ -1258,8 +1314,10 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
                     forking={forkingEntryId === entryIds[idx]}
                     showTimestamp={showTimestamp}
                     prevTimestamp={idx > 0 ? (messages[idx - 1] as import("@/lib/types").AgentMessage & { timestamp?: number }).timestamp : undefined}
+                    nextUserTimestamp={nextUser}
                     onResend={session && entryIds[idx] ? handleResend : undefined}
                     systemPrompt={systemPrompt}
+                    collaborationRuns={collaborationRuns}
                   />
                 );
                 if (!isVisible) return view;
@@ -1275,7 +1333,16 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
             })()}
 
             {streamState.isStreaming && streamState.streamingMessage && (
-              <MessageView message={streamState.streamingMessage as AgentMessage} isStreaming modelNames={modelNames} watchdogInfo={watchdogInfo} />
+              <>
+                <MessageView message={streamState.streamingMessage as AgentMessage} isStreaming modelNames={modelNames} watchdogInfo={watchdogInfo} />
+                {hasRunningSubagentTool && activeSubagentRuns.length > 0 && (
+                  <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 8 }}>
+                    {activeSubagentRuns.map((run) => (
+                      <SubagentRunCard key={run.runId} run={run} />
+                    ))}
+                  </div>
+                )}
+              </>
             )}
 
             {agentRunning && !streamState.streamingMessage && (

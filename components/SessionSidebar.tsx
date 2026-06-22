@@ -443,10 +443,13 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   }, []);
 
   const displayedSessions = useMemo(() => {
-    if (!optimisticSession) return allSessions;
-    const existing = allSessions.find((s) => s.id === optimisticSession.id);
-    if (existing) return allSessions;
-    return [optimisticSession, ...allSessions];
+    const base = optimisticSession && !allSessions.find((s) => s.id === optimisticSession.id)
+      ? [optimisticSession, ...allSessions]
+      : allSessions;
+    // Hide subagent worker sessions from the top-level project list: they are
+    // subordinate to a parent session's message and are surfaced via the
+    // collaboration run card under that message instead.
+    return base.filter((s) => !s.isSubagent);
   }, [allSessions, optimisticSession]);
 
   // Auto-select cwd and restore session from URL on first load

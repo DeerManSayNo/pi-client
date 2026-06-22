@@ -48,6 +48,10 @@ export interface CollaborationRunState {
   updatedAt: string;
   summary?: string;
   error?: string;
+  /** 继承自父 session 的 model。worker 创建后立即切到它，避免 worker 用
+   *  modelRegistry 的默认 model（实测会拿到超时的 openai/gpt-4）导致整个
+   *  spawn_subagent 任务卡在 waitForCollaborationRun 直到全部 worker 超时。 */
+  model?: { provider: string; modelId: string };
 }
 
 export interface CollaborationRunEvent {
