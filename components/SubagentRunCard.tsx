@@ -185,54 +185,66 @@ const MODE_LABELS: Partial<Record<string, string>> = {
   custom: "自定义",
 };
 
-/** 单个 subagent 小卡片：实时展示状态 + 工具调用 + 输出摘要 */
+/** 单个 subagent 卡牌：竖向卡牌布局，实时展示状态 + 任务 + 工具调用 + 输出 */
 function WorkerCard({ worker, onOpenSession }: { worker: CollaborationWorkerState; onOpenSession?: (sessionId: string) => void }) {
   const color = statusColor(worker.status);
   const label = worker.title ?? worker.name;
   const isRunning = worker.status === "running";
   const isTerminal = worker.status === "complete" || worker.status === "error" || worker.status === "aborted";
-  const latestTool = isRunning ? (worker.activeTool ?? worker.recentTools?.[0]) : undefined;
   const canClick = Boolean(worker.sessionId && onOpenSession);
   const modeLabel = worker.agentType ? MODE_LABELS[worker.agentType] : undefined;
   const [hovered, setHovered] = useState(false);
 
+  // 任务描述（instructions 优先，回退 task）
+  const taskText = (worker.instructions?.trim() || worker.task?.trim() || "").slice(0, 280);
+
+  // 运行中的工具列表：当前活动工具 + 最近完成（最多 4 条）
+  const toolList = isRunning
+    ? [worker.activeTool, ...(worker.recentTools ?? []).slice(0, 3)].filter(Boolean) as WorkerToolActivity[]
+    : [];
+
+  // 完成态展示的工具简史（最近 3 条）
+  const history = isTerminal ? (worker.recentTools ?? []).slice(0, 3) : [];
+
   return (
     <div
-      title={canClick ? `点击查看 ${label} 的会话` : worker.error ? `${label} · ${worker.error}` : undefined}
       onClick={canClick ? () => onOpenSession!(worker.sessionId!) : undefined}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
       style={{
-        width: 252,
-        borderRadius: 10,
-        border: `1px solid ${hovered && canClick ? "color-mix(in srgb, var(--accent) 50%, var(--border))" : "var(--border)"}`,
+        width: 288,
+        minHeight: 208,
+        borderRadius: 12,
+        border: `1px solid ${hovered && canClick ? "color-mix(in srgb, var(--accent) 55%, var(--border))" : "var(--border)"}`,
         background: "var(--bg-hover)",
-        padding: "10px 12px",
+        padding: "12px 14px",
         display: "flex",
         flexDirection: "column",
-        gap: 6,
+        gap: 8,
         cursor: canClick ? "pointer" : "default",
-        transition: "border-color 0.12s, box-shadow 0.12s",
-        boxShadow: hovered && canClick ? "0 2px 8px rgba(0,0,0,0.08)" : "none",
+        transition: "border-color 0.14s, box-shadow 0.14s, transform 0.14s",
+        boxShadow: hovered && canClick ? "0 6px 18px rgba(0,0,0,0.14)" : "0 1px 3px rgba(0,0,0,0.05)",
+        transform: hovered && canClick ? "translateY(-2px)" : "none",
       }}
     >
-      {/* header：状态点 + 名称 + 模式标签 + 状态文字 */}
+      {/* header：状态点 + 名称 + 模式 + 状态 */}
       <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
         <span
           style={{
-            width: 8,
-            height: 8,
+            width: 9,
+            height: 9,
             borderRadius: "50%",
             background: color,
             flexShrink: 0,
             animation: isRunning ? "tool-pulse 1.4s ease-in-out infinite" : "none",
+            boxShadow: isRunning ? `0 0 0 3px ${color}22` : "none",
           }}
         />
-        <span style={{ fontWeight: 700, fontSize: 12.5, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>
+        <span style={{ fontWeight: 700, fontSize: 13, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>
           {label}
         </span>
         {modeLabel && (
-          <span style={{ fontSize: 9.5, color: "var(--text-dim)", border: "1px solid var(--border)", borderRadius: 4, padding: "0 4px", flexShrink: 0, lineHeight: 1.5 }}>
+          <span style={{ fontSize: 10, color: "var(--text-dim)", border: "1px solid var(--border)", borderRadius: 4, padding: "0 5px", flexShrink: 0, lineHeight: 1.6 }}>
             {modeLabel}
           </span>
         )}
@@ -240,39 +252,81 @@ function WorkerCard({ worker, onOpenSession }: { worker: CollaborationWorkerStat
         <span style={{ color, fontWeight: 700, fontSize: 11, flexShrink: 0 }}>{statusLabel(worker.status)}</span>
       </div>
 
-      {/* body：按状态展示不同内容 */}
-      {isRunning && latestTool && <ToolLine tool={latestTool} />}
-      {isRunning && !latestTool && (
-        <span style={{ fontSize: 11, color: "var(--text-dim)", fontStyle: "italic" }}>思考中…</span>
-      )}
-      {worker.status === "error" && worker.error && (
-        <span style={{ fontSize: 11, color: "#f87171", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
-          {worker.error}
+      {/* 任务描述 */}
+      {taskText && (
+        <span
+          style={{
+            fontSize: 11,
+            color: "var(--text-dim)",
+            lineHeight: 1.5,
+            display: "-webkit-box",
+            WebkitLineClamp: 2,
+            WebkitBoxOrient: "vertical",
+            overflow: "hidden",
+            fontStyle: "italic",
+          }}
+        >
+          {taskText}
         </span>
       )}
-      {isTerminal && worker.result && (
-        <span style={{ fontSize: 11, color: "var(--text-muted)", display: "-webkit-box", WebkitLineClamp: 3, WebkitBoxOrient: "vertical", overflow: "hidden", lineHeight: 1.5 }}>
-          {worker.result}
-        </span>
-      )}
-      {worker.diffStats && (
-        <span style={{ fontSize: 10.5, color: "#16a34a", fontWeight: 600 }}>{worker.diffStats}</span>
-      )}
+
+      {/* body 区：撑满剩余高度，让卡牌呈竖向比例 */}
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 5, minWidth: 0 }}>
+        {/* 运行中：工具调用列表 */}
+        {isRunning && toolList.length > 0 && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+            {toolList.map((tool, i) => (
+              <ToolItem key={`${tool.ts}-${i}`} tool={tool} dim={i > 0} />
+            ))}
+          </div>
+        )}
+        {isRunning && toolList.length === 0 && (
+          <span style={{ fontSize: 11.5, color: "var(--text-dim)", fontStyle: "italic", padding: "2px 0" }}>思考中…</span>
+        )}
+
+        {/* 失败：错误信息 */}
+        {worker.status === "error" && worker.error && (
+          <span style={{ fontSize: 11.5, color: "#f87171", lineHeight: 1.5, display: "-webkit-box", WebkitLineClamp: 4, WebkitBoxOrient: "vertical", overflow: "hidden", wordBreak: "break-word" }}>
+            {worker.error}
+          </span>
+        )}
+
+        {/* 完成：结果摘要 + 工具简史 + 变更统计 */}
+        {isTerminal && worker.result && (
+          <span style={{ fontSize: 11.5, color: "var(--text-muted)", lineHeight: 1.55, display: "-webkit-box", WebkitLineClamp: 4, WebkitBoxOrient: "vertical", overflow: "hidden", wordBreak: "break-word" }}>
+            {worker.result}
+          </span>
+        )}
+        {isTerminal && history.length > 0 && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 2, marginTop: 2 }}>
+            {history.map((tool, i) => (
+              <ToolItem key={`h-${tool.ts}-${i}`} tool={tool} dim />
+            ))}
+          </div>
+        )}
+        {worker.diffStats && (
+          <span style={{ fontSize: 10.5, color: "#16a34a", fontWeight: 600, marginTop: 2 }}>📊 {worker.diffStats}</span>
+        )}
+        {worker.appliedFiles && worker.appliedFiles.length > 0 && (
+          <span style={{ fontSize: 10.5, color: "#16a34a", fontWeight: 600 }}>✓ 已应用 {worker.appliedFiles.length} 个文件</span>
+        )}
+      </div>
 
       {/* footer：跳转提示 */}
       {canClick && (
-        <span style={{ fontSize: 10, color: "var(--text-dim)", display: "flex", alignItems: "center", gap: 3, marginTop: 1 }}>
-          ↗ 点击查看会话
+        <span style={{ fontSize: 10.5, color: "var(--text-dim)", display: "flex", alignItems: "center", gap: 3, borderTop: "1px solid var(--border)", paddingTop: 6 }}>
+          ↗ 点击查看完整会话
         </span>
       )}
     </div>
   );
 }
 
-/** 卡片内的工具调用行：圆点 + 工具名 + 文件/命令摘要 */
-function ToolLine({ tool }: { tool: WorkerToolActivity }) {
+/** 工具调用列表项：状态图标 + 工具名 + 文件/命令摘要 */
+function ToolItem({ tool, dim }: { tool: WorkerToolActivity; dim?: boolean }) {
   const isRunning = tool.status === "running";
-  const dotColor = tool.status === "running" ? "#3b82f6" : tool.status === "error" ? "#f87171" : "var(--text-dim)";
+  const icon = tool.status === "running" ? "●" : tool.status === "error" ? "✕" : "✓";
+  const iconColor = tool.status === "running" ? "#3b82f6" : tool.status === "error" ? "#f87171" : "#16a34a";
   const summary = tool.summary.trim() || "无文件/命令摘要";
   return (
     <div
@@ -280,25 +334,27 @@ function ToolLine({ tool }: { tool: WorkerToolActivity }) {
         display: "flex",
         alignItems: "center",
         gap: 6,
-        padding: "5px 8px",
+        padding: "4px 8px",
         borderRadius: 6,
-        background: isRunning ? "rgba(59, 130, 246, 0.09)" : "var(--bg-hover, var(--bg-subtle))",
-        border: `1px solid ${tool.status === "error" ? "#f8717133" : "transparent"}`,
+        background: isRunning ? "rgba(59, 130, 246, 0.1)" : "transparent",
+        border: isRunning ? "1px solid rgba(59, 130, 246, 0.2)" : "1px solid transparent",
         fontSize: 11,
         minWidth: 0,
+        opacity: dim ? 0.72 : 1,
       }}
     >
       <span
         style={{
-          width: 6,
-          height: 6,
-          borderRadius: "50%",
-          background: dotColor,
+          fontSize: 9,
+          color: iconColor,
           flexShrink: 0,
+          fontWeight: 700,
           animation: isRunning ? "tool-pulse 1.4s ease-in-out infinite" : "none",
         }}
-      />
-      <span style={{ fontWeight: 700, color: isRunning ? "#2563eb" : "var(--text-muted)", flexShrink: 0 }}>{tool.toolName}</span>
+      >
+        {icon}
+      </span>
+      <span style={{ fontWeight: 600, color: isRunning ? "#2563eb" : "var(--text-muted)", flexShrink: 0 }}>{tool.toolName}</span>
       <span
         title={summary}
         style={{
