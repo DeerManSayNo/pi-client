@@ -40,6 +40,7 @@ interface ChatWorkspaceProps {
   onOpenRoleConfig?: () => void;
   projectOptions?: { cwd: string; displayName: string }[];
   onNewSessionCwdChange?: (cwd: string, slotIndex: number) => void;
+  onOpenSession?: (sessionId: string) => void;
 }
 
 function sessionTitle(session: SessionInfo | null, index: number): string {
@@ -94,6 +95,7 @@ export function ChatWorkspace(props: ChatWorkspaceProps) {
     onOpenRoleConfig,
     projectOptions,
     onNewSessionCwdChange,
+    onOpenSession,
   } = props;
 
   const visibleCount = CHAT_LAYOUT_COUNTS[layoutMode];
@@ -298,6 +300,7 @@ export function ChatWorkspace(props: ChatWorkspaceProps) {
                       onOpenRoleConfig={onOpenRoleConfig}
                       projectOptions={projectOptions}
                       onNewSessionCwdChange={(cwd) => onNewSessionCwdChange?.(cwd, index)}
+                      onOpenSession={onOpenSession}
                       compact={compact}
                     />
                   </div>

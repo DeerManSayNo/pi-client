@@ -21,7 +21,9 @@ import type {
   CollaborationWorkerSpec,
   SubagentRunPlacement,
   SubagentTaskMode,
+  WorkerToolActivity,
 } from "./collaboration-types";
+import type { AgentEvent } from "@/lib/rpc-manager";
 import {
   cleanupWorkspace,
   generateDiff,
@@ -41,6 +43,74 @@ export {
   listCollaborationRuns,
   subscribeCollaborationRun,
 } from "./collaboration-store";
+
+/** 从工具执行事件里提取人类可读摘要（命令/文件路径/查询词） */
+function summarizeToolEvent(event: AgentEvent): { toolName: string; summary: string } {
+  const toolName = typeof event.toolName === "string" ? event.toolName : typeof event.name === "string" ? event.name : "";
+  const input = (event.input && typeof event.input === "object") ? event.input as Record<string, unknown> : {};
+  const pick = (...keys: string[]): string => {
+    for (const k of keys) {
+      const v = k.includes(".")
+        ? k.split(".").reduce<unknown>((acc, key) => (acc && typeof acc === "object" ? (acc as Record<string, unknown>)[key] : undefined), input)
+        : input[k];
+      if (typeof v === "string" && v.trim()) return v.trim();
+    }
+    return "";
+  };
+  let summary = "";
+  switch (toolName) {
+    case "bash":
+    case "sh":
+      summary = pick("command", "cmd");
+      break;
+    case "edit":
+    case "write":
+    case "read":
+      summary = pick("filePath", "path", "file_path");
+      break;
+    case "grep":
+    case "find":
+      summary = pick("pattern", "path", "glob");
+      break;
+    case "code_search":
+    case "codegraph_search":
+      summary = pick("query");
+      break;
+    case "codegraph_callers":
+    case "codegraph_callees":
+    case "codegraph_impact":
+      summary = pick("symbol");
+      break;
+    case "spawn_subagent":
+      summary = pick("message");
+      break;
+    default:
+      summary = "";
+  }
+  return { toolName, summary };
+}
+
+/** 捕获 worker 的 tool_execution_start/end 事件，更新其活动工具状态。
+ *  这些字段随 collaboration run 快照推送给前端，供 SubagentRunCard 流式展示。 */
+function updateWorkerToolActivity(runId: string, workerIndex: number, event: AgentEvent): void {
+  if (event.type !== "tool_execution_start" && event.type !== "tool_execution_end") return;
+  updateCollaborationRun(runId, (run) => {
+    const target = run.workers[workerIndex];
+    if (!target) return;
+    const { toolName, summary } = summarizeToolEvent(event);
+    const ts = new Date().toISOString();
+    if (event.type === "tool_execution_start") {
+      target.activeTool = { toolName, summary, status: "running", ts };
+      return;
+    }
+    // tool_execution_end：把 activeTool 收进 recentTools，清空 activeTool
+    const finished = target.activeTool
+      ? { ...target.activeTool, status: (event.isError ? "error" : "done") as "done" | "error", ts }
+      : { toolName, summary, status: (event.isError ? "error" : "done") as "done" | "error", ts };
+    target.activeTool = undefined;
+    target.recentTools = [finished, ...(target.recentTools ?? [])].slice(0, 8);
+  });
+}
 
 const TERMINAL_RUN_STATUSES = new Set<CollaborationRunState["status"]>(["complete", "aborted", "error", "applied"]);
 const TERMINAL_RUN_EVENTS = new Set(["run_complete", "run_error", "run_aborted"]);
@@ -316,6 +386,7 @@ async function executeCollaborationRun(runId: string): Promise<void> {
 
       unsubscribeWorkerEvents = workerSession.listen((event) => {
         emitCollaborationRunEvent({ type: "worker_event", runId, workerId: worker.name, event });
+        updateWorkerToolActivity(runId, index, event);
       });
       const prompt = current.mode === "analysis"
         ? buildWorkerPrompt(current.message, worker.task)
@@ -447,6 +518,7 @@ export async function continueCollaborationWorker(runId: string, workerId: strin
     }, state.model);
     unsubscribeWorkerEvents = workerSession.listen((event) => {
       emitCollaborationRunEvent({ type: "worker_event", runId, workerId: worker.name, event });
+      updateWorkerToolActivity(runId, workerIndex, event);
     });
     const result = await runWorkerPromptWithRecovery(
       workerSession,

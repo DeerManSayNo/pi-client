@@ -1,10 +1,11 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { CollaborationRunSnapshot, CollaborationWorkerState, CollaborationRunStatus, CollaborationWorkerStatus } from "@/lib/parallel-agent/collaboration-types";
+import type { CollaborationRunSnapshot, CollaborationWorkerState, CollaborationRunStatus, CollaborationWorkerStatus, WorkerToolActivity } from "@/lib/parallel-agent/collaboration-types";
 
 interface Props {
   run: CollaborationRunSnapshot;
+  onOpenSession?: (sessionId: string) => void;
 }
 
 const TERMINAL_STATUSES: ReadonlySet<CollaborationRunStatus> = new Set(["complete", "aborted", "error", "applied"]);
@@ -45,12 +46,31 @@ function statusLabel(status?: AnyRunStatus): string {
 /**
  * 在触发 spawn_subagent 的消息下方展示轻量 subagent 标签。
  *
- * 设计约束：worker session 是内部执行上下文，不再在左侧 session 列表展示，
- * 这里也不提供打开 worker session 的入口；只显示调用过哪些 subagent 及其状态。
+ * 设计约束：worker session 是内部执行上下文，不在左侧 session 列表展示；
+ * 但 worker tag 本身可点击跳转打开对应 session（在新 tab 查看 worker 的完整对话）。
+ * 运行中的 worker 还会流式展示当前正在执行的工具调用（工具名 + 文件/命令）。
  */
-export function SubagentRunCard({ run }: Props) {
+// 注入工具活动脉动动画（仅一次）
+let toolPulseStyleInjected = false;
+function injectToolPulseStyle() {
+  if (typeof document === "undefined" || toolPulseStyleInjected) return;
+  toolPulseStyleInjected = true;
+  const style = document.createElement("style");
+  style.textContent = `
+    @keyframes tool-pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.3; }
+    }
+  `;
+  document.head.appendChild(style);
+}
+
+export function SubagentRunCard({ run, onOpenSession }: Props) {
   const [latest, setLatest] = useState<CollaborationRunSnapshot>(run);
   const closedRef = useRef(false);
+
+  // 注入 CSS 动画
+  useEffect(() => { injectToolPulseStyle(); }, []);
 
   useEffect(() => {
     setLatest((prev) => {
@@ -118,7 +138,7 @@ export function SubagentRunCard({ run }: Props) {
     <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
       <RunTag title={latest.title ?? "Subagents"} status={latest.status} text={`Subagents ${doneCount}/${workers.length}`} />
       {workers.map((worker) => (
-        <WorkerTag key={worker.workerId ?? worker.name} worker={worker} />
+        <WorkerTag key={worker.workerId ?? worker.name} worker={worker} onOpenSession={onOpenSession} />
       ))}
     </div>
   );
@@ -149,30 +169,98 @@ function RunTag({ title, status, text }: { title: string; status: CollaborationR
   );
 }
 
-function WorkerTag({ worker }: { worker: CollaborationWorkerState }) {
+function WorkerTag({ worker, onOpenSession }: { worker: CollaborationWorkerState; onOpenSession?: (sessionId: string) => void }) {
   const color = statusColor(worker.status);
   const label = worker.title ?? worker.name;
   const detail = worker.error ? `${label} · ${worker.error}` : `${label} · ${statusLabel(worker.status)}`;
+  const [hovered, setHovered] = useState(false);
+  const canClick = Boolean(worker.sessionId && onOpenSession);
+
+  // 工具活动展示：仅 running 态展示
+  const isRunning = worker.status === "running";
+  const activeTool = worker.activeTool;
+  const recentTools = worker.recentTools;
+
   return (
     <span
-      title={detail}
+      title={canClick ? `点击查看 ${label} 的会话` : detail}
+      onClick={canClick ? () => onOpenSession!(worker.sessionId!) : undefined}
+      onMouseEnter={() => canClick && setHovered(true)}
+      onMouseLeave={() => canClick && setHovered(false)}
       style={{
         display: "inline-flex",
-        alignItems: "center",
-        gap: 5,
+        flexDirection: "column",
+        alignItems: "stretch",
         maxWidth: 220,
-        border: "1px solid var(--border)",
-        background: "var(--bg-subtle)",
+        border: `1px solid ${hovered ? "color-mix(in srgb, var(--accent) 42%, var(--border))" : "var(--border)"}`,
+        background: hovered ? "var(--bg-hover)" : "var(--bg-subtle)",
         color: "var(--text-muted)",
         borderRadius: 999,
         padding: "3px 8px",
         fontSize: 11,
         lineHeight: 1.2,
+        cursor: canClick ? "pointer" : "default",
+        transition: "border-color 0.12s, background 0.12s",
       }}
     >
-      <span style={{ width: 6, height: 6, borderRadius: "50%", background: color, flexShrink: 0 }} />
-      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{label}</span>
-      <span style={{ color, fontWeight: 700, flexShrink: 0 }}>{statusLabel(worker.status)}</span>
+      <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+        <span style={{ width: 6, height: 6, borderRadius: "50%", background: color, flexShrink: 0 }} />
+        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{label}</span>
+        <span style={{ color, fontWeight: 700, flexShrink: 0 }}>{statusLabel(worker.status)}</span>
+      </span>
+      {isRunning && (activeTool || (recentTools && recentTools.length > 0)) && (
+        <span style={{ marginTop: 1, display: "flex", flexDirection: "column", gap: 1 }}>
+          {activeTool && <ToolActivityRow tool={activeTool} />}
+          {!activeTool && recentTools && recentTools.slice(0, 2).map((tool) => (
+            <ToolActivityRow key={tool.ts} tool={tool} />
+          ))}
+        </span>
+      )}
+    </span>
+  );
+}
+
+/** 紧凑的单行工具活动展示 */
+function ToolActivityRow({ tool }: { tool: WorkerToolActivity }) {
+  const dotColor = tool.status === "running" ? "#3b82f6" : tool.status === "error" ? "#f87171" : "var(--text-dim)";
+  const textColor = tool.status === "running" ? "color-mix(in srgb, #3b82f6 82%, var(--text-muted))" : "var(--text-muted)";
+  const isRunning = tool.status === "running";
+  return (
+    <span
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 4,
+        fontSize: 10,
+        color: textColor,
+        maxWidth: "100%",
+        overflow: "hidden",
+      }}
+    >
+      {/* 状态圆点 */}
+      <span
+        style={{
+          width: 5,
+          height: 5,
+          borderRadius: "50%",
+          background: dotColor,
+          flexShrink: 0,
+          animation: isRunning ? "tool-pulse 1.4s ease-in-out infinite" : "none",
+        }}
+      />
+      <span style={{ fontWeight: 600, flexShrink: 0 }}>{tool.toolName}</span>
+      {tool.summary && (
+        <span
+          style={{
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+            opacity: 0.7,
+          }}
+        >
+          {tool.summary}
+        </span>
+      )}
     </span>
   );
 }

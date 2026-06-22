@@ -7,6 +7,15 @@ export type SubagentTaskMode = "ask" | "code" | "parallel" | "review" | "custom"
 export type SubagentRunPlacement = "foreground" | "background";
 export type SubagentCapability = "readonly" | "isolated_coding" | "review";
 
+export interface WorkerToolActivity {
+  toolName: string;
+  /** 从工具 input 里提取的关键信息：bash→命令、edit/write/read→文件路径、grep/find→pattern、code_search/codegraph_*→query、spawn_subagent→message。其他工具可为空串。 */
+  summary: string;
+  status: "running" | "done" | "error";
+  /** ISO 时间戳 */
+  ts: string;
+}
+
 export interface CollaborationWorkerSpec {
   name: string;
   task: string;
@@ -28,6 +37,10 @@ export interface CollaborationWorkerState extends CollaborationWorkerSpec {
   diffStats?: string;
   appliedFiles?: string[];
   conflictFiles?: string[];
+  /** 当前正在执行的工具（worker 运行期间实时更新）；无工具执行时为 undefined */
+  activeTool?: WorkerToolActivity;
+  /** 最近的工具调用历史（含执行结果），最多保留 8 条，新的在前 */
+  recentTools?: WorkerToolActivity[];
 }
 
 export interface CollaborationRunState {

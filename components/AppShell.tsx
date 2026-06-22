@@ -570,6 +570,32 @@ export function AppShell() {
     }
   }, [hasOpenChatWindowCapacity, placeSessionInLeftmostSlot, replaceUrl, showChatWindowLimitMessage]);
 
+  // worker tag 点击跳转到对应 worker session
+  const handleOpenSessionById = useCallback(async (sessionId: string) => {
+    try {
+      const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, { cache: "no-store" });
+      if (res.ok) {
+        const session = (await res.json()) as SessionInfo;
+        handleSelectSession(session);
+        return;
+      }
+    } catch (err) {
+      console.warn("获取 worker session 失败，尝试最小构造", err);
+    }
+    // 兜底：构造最小 SessionInfo
+    const fallback: SessionInfo = {
+      id: sessionId,
+      cwd: activeCwd ?? defaultCwd ?? "",
+      path: "",
+      name: `Worker ${sessionId.slice(0, 8)}`,
+      created: new Date().toISOString(),
+      modified: new Date().toISOString(),
+      messageCount: 0,
+      firstMessage: "",
+    };
+    handleSelectSession(fallback);
+  }, [handleSelectSession, activeCwd, defaultCwd]);
+
   const handleNewSession = useCallback((_sessionId: string, cwd: string) => {
     if (!hasOpenChatWindowCapacity()) {
       showChatWindowLimitMessage();
@@ -1837,6 +1863,7 @@ export function AppShell() {
                 onOpenRoleConfig={() => setQuickConfigOpen("role")}
                 projectOptions={headerProjectOptions}
                 onNewSessionCwdChange={handleNewSessionProjectChange}
+                onOpenSession={handleOpenSessionById}
               />
             </>
           ) : showPlaceholder ? (

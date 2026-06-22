@@ -47,6 +47,7 @@ interface Props {
   onOpenRoleConfig?: () => void;
   projectOptions?: ProjectOption[];
   onNewSessionCwdChange?: (cwd: string) => void;
+  onOpenSession?: (sessionId: string) => void;
 }
 
 function getProjectName(cwd: string): string {
@@ -364,7 +365,7 @@ function Typewriter({ phrases }: { phrases: string[] }) {
   );
 }
 
-export function ChatWindow({ activeTabId, session, newSessionCwd, compact = false, onAgentEnd, onSessionCreated, onSessionStarted, onAgentRunningChange, onSessionForked, modelsRefreshKey, chatInputRef, onSessionStatsChange, onContextUsageChange, onOpenFile, onOpenRoleConfig, projectOptions = [], onNewSessionCwdChange }: Props) {
+export function ChatWindow({ activeTabId, session, newSessionCwd, compact = false, onAgentEnd, onSessionCreated, onSessionStarted, onAgentRunningChange, onSessionForked, modelsRefreshKey, chatInputRef, onSessionStatsChange, onContextUsageChange, onOpenFile, onOpenRoleConfig, projectOptions = [], onNewSessionCwdChange, onOpenSession }: Props) {
   // Track changed files from agent_end event per session so switching chats
   // does not show another session's bottom "x files modified" banner.
   const [changedFilesBySession, setChangedFilesBySession] = useState<Record<string, string[]>>({});
@@ -1318,6 +1319,7 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
                     onResend={session && entryIds[idx] ? handleResend : undefined}
                     systemPrompt={systemPrompt}
                     collaborationRuns={collaborationRuns}
+                    onOpenSession={onOpenSession}
                   />
                 );
                 if (!isVisible) return view;
@@ -1333,7 +1335,7 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
             })()}
 
             {streamState.isStreaming && streamState.streamingMessage && (
-              <MessageView message={streamState.streamingMessage as AgentMessage} isStreaming modelNames={modelNames} watchdogInfo={watchdogInfo} />
+              <MessageView message={streamState.streamingMessage as AgentMessage} isStreaming modelNames={modelNames} watchdogInfo={watchdogInfo} onOpenSession={onOpenSession} />
             )}
 
             {/* 活跃 subagent run 钉在聊天流最底部（所有消息/流式 bubble 之后），
@@ -1344,7 +1346,7 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
             {activeSubagentRuns.length > 0 && (
               <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 8 }}>
                 {activeSubagentRuns.map((run) => (
-                  <SubagentRunCard key={run.runId} run={run} />
+                  <SubagentRunCard key={run.runId} run={run} onOpenSession={onOpenSession} />
                 ))}
               </div>
             )}

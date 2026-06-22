@@ -49,6 +49,7 @@ interface Props {
   systemPrompt?: string | null;
   /** spawn_subagent 协作 run 快照（来自父 session 的 custom entry）。 */
   collaborationRuns?: CollaborationRunSnapshot[];
+  onOpenSession?: (sessionId: string) => void;
 }
 
 function formatTime(ts?: number): string | null {
@@ -83,7 +84,7 @@ function copyText(text: string): Promise<void> {
   }
 }
 
-function MessageViewImpl({ message, isStreaming, toolResults, modelNames, watchdogInfo, entryId, onFork, forking, showTimestamp, prevTimestamp, nextUserTimestamp, onResend, systemPrompt, collaborationRuns }: Props) {
+function MessageViewImpl({ message, isStreaming, toolResults, modelNames, watchdogInfo, entryId, onFork, forking, showTimestamp, prevTimestamp, nextUserTimestamp, onResend, systemPrompt, collaborationRuns, onOpenSession }: Props) {
   // 把协作 run 关联到触发它的 user 消息：run.createdAt 是 ISO string，
   // UserMessage.timestamp 是 ms。一个 user turn 可能发起多次 spawn_subagent，
   // 全部归到该条 user（下一条 user 消息的 run 自然 createdAt 更晚，不会重复归属）。
@@ -111,7 +112,7 @@ function MessageViewImpl({ message, isStreaming, toolResults, modelNames, watchd
         {linkedRuns.length > 0 && (
           <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 8 }}>
             {linkedRuns.map((run) => (
-              <SubagentRunCard key={run.runId} run={run} />
+              <SubagentRunCard key={run.runId} run={run} onOpenSession={onOpenSession} />
             ))}
           </div>
         )}
@@ -142,7 +143,8 @@ export const MessageView = memo(MessageViewImpl, (prev, next) => (
   prev.nextUserTimestamp === next.nextUserTimestamp &&
   prev.onResend === next.onResend &&
   prev.systemPrompt === next.systemPrompt &&
-  prev.collaborationRuns === next.collaborationRuns
+  prev.collaborationRuns === next.collaborationRuns &&
+  prev.onOpenSession === next.onOpenSession
 ));
 
 /** Parse /skill:name prefix from message text. Returns { skillName, rest } or null. */
