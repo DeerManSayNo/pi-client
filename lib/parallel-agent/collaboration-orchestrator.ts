@@ -3,10 +3,11 @@ import fs from "fs";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { invalidateSessionListCache, resolveSessionPath } from "@/lib/session-reader";
 import {
-  cleanupCollaborationRun,
+  abortCollaborationRun,
   createCollaborationRun,
   emitCollaborationRunEvent,
   getCollaborationRun,
+  removeCollaborationRun,
   setCollaborationAbort,
   setCollaborationCleanup,
   subscribeCollaborationRun,
@@ -178,6 +179,9 @@ export async function startCollaborationRun(params: {
   return state;
 }
 
+/** isolated_coding run 终态后保留 worktree 的时长：apply 通常很快，2h 足够且不占太久。 */
+const ISOLATED_WORKTREE_RETENTION_MS = 2 * 60 * 60 * 1000;
+
 export function waitForCollaborationRun(runId: string, timeoutMs = 12 * 60 * 1000): Promise<CollaborationRunState> {
   const existing = getCollaborationRun(runId);
   if (!existing) return Promise.reject(new Error("Run not found"));
@@ -187,6 +191,9 @@ export function waitForCollaborationRun(runId: string, timeoutMs = 12 * 60 * 100
     let unsubscribe: (() => void) | null = null;
     const timeout = setTimeout(() => {
       unsubscribe?.();
+      // P1-3 修复：超时后联动 abort，让后台 workers 真正停下并触发终态回收，
+      // 而不是让它们继续占用 session/worktree 直到 30min watchdog 自行 settle。
+      void abortCollaborationRun(runId).catch(() => {});
       const latest = getCollaborationRun(runId);
       reject(new Error(latest?.status === "running" || latest?.status === "setting_up"
         ? "Subagent task is still running"
@@ -202,6 +209,21 @@ export function waitForCollaborationRun(runId: string, timeoutMs = 12 * 60 * 100
       else reject(new Error("Run not found after completion"));
     });
   });
+}
+
+/**
+ * 按 run 模式调度终态回收。analysis（只读）无 worktree 可留，立即 remove；
+ * isolated_coding 保留 worktree 2h 供 apply，到期兒底 remove。重复调用安全：
+ * removeCollaborationRun 幂等，apply 成功提前 remove 后 TTL 再触发是 no-op。
+ */
+function scheduleRunReclaim(runId: string, mode: CollaborationRunMode): void {
+  if (mode === "isolated_coding") {
+    setTimeout(() => {
+      try { removeCollaborationRun(runId); } catch { /* best effort */ }
+    }, ISOLATED_WORKTREE_RETENTION_MS).unref?.();
+    return;
+  }
+  removeCollaborationRun(runId);
 }
 
 async function executeCollaborationRun(runId: string): Promise<void> {
@@ -236,6 +258,9 @@ async function executeCollaborationRun(runId: string): Promise<void> {
     });
     emitCollaborationRunEvent({ type: "run_aborted", runId });
     if (updated) await appendRunSnapshot(updated.parentSessionId, updated);
+    // aborted 不保留 worktree（用户主动中止，不会 apply）：全量回收 Map + jsonl +
+    // listeners。cleanupAll 已清 worktree/session，这里主要释放内存与磁盘泄漏（P0-2）。
+    removeCollaborationRun(runId);
   });
   setCollaborationCleanup(runId, cleanupAll);
 
@@ -379,6 +404,17 @@ async function executeCollaborationRun(runId: string): Promise<void> {
     error: completed.error,
   });
   await appendRunSnapshot(completed.parentSessionId, completed);
+
+  // 终态回收（P0-1/P0-2）：worker session 在 run 终态后不再需要，立即 destroy。
+  // worktree + Map + jsonl 按模式分流：
+  //   - analysis（只读）：无 worktree 可留，立即全量 remove。
+  //   - isolated_coding：apply 需要从 worktree 重新生成 diff（applyWorkerPatch 在
+  //     worktree 里跑 git diff HEAD），所以 worktree 必须保留到 apply；用户不点
+  //     apply 也不能永久泄漏，用 2h TTL 兒底 remove。
+  for (const session of workerSessions) {
+    try { session.destroy(); } catch { /* best effort */ }
+  }
+  scheduleRunReclaim(completed.runId, completed.mode);
 }
 
 export async function continueCollaborationWorker(runId: string, workerId: string, prompt?: string): Promise<CollaborationRunState> {
@@ -456,6 +492,10 @@ export async function continueCollaborationWorker(runId: string, workerId: strin
       }
       emitCollaborationRunEvent({ type: "task_summary_ready", runId, summary: updated.summary });
       await appendRunSnapshot(updated.parentSessionId, updated);
+      // continue 走独立路径，不经过 executeCollaborationRun 的终态回收块，需自己调度。
+      // 注意：这里不能用 cleanupAll（其 workerSessions 闭包不含本次 continue 的 session），
+      // 本次 continue session 已在 finally destroy；scheduleRunReclaim 负责清 worktree/Map/jsonl。
+      scheduleRunReclaim(updated.runId, updated.mode);
       return updated;
     }
     const latest = getCollaborationRun(runId);
@@ -475,7 +515,10 @@ export async function continueCollaborationWorker(runId: string, workerId: strin
       run.summary = buildSubagentSummary(run);
     });
     emitCollaborationRunEvent({ type: "worker_error", runId, workerId: worker.name, error: err });
-    if (updated) await appendRunSnapshot(updated.parentSessionId, updated);
+    if (updated) {
+      await appendRunSnapshot(updated.parentSessionId, updated);
+      scheduleRunReclaim(updated.runId, updated.mode);
+    }
     throw error;
   } finally {
     workerSession?.destroy();
@@ -532,7 +575,7 @@ export async function applyCollaborationPatches(runId: string, workerNames: stri
     }
   });
   if (updated) await appendRunSnapshot(updated.parentSessionId, updated);
-  if (result.success) cleanupCollaborationRun(runId);
+  if (result.success) removeCollaborationRun(runId);
   return result;
 }
 

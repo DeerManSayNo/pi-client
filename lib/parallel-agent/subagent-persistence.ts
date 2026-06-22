@@ -1,6 +1,9 @@
 import fs from "fs";
 import path from "path";
 import { getAgentDir } from "@/lib/session-reader";
+
+// 在 import 阶段就需要 TASKS_DIR（listPersistedTasks / ensureTasksDir 依赖），
+// 而 getAgentDir 内部会读 env/磁盘，放在模块顶层即可，与原行为保持一致。
 import type { CollaborationRunEvent, CollaborationRunState } from "./collaboration-types";
 
 const TASKS_DIR = path.join(getAgentDir(), "tasks");
@@ -86,6 +89,21 @@ export function persistTaskEvent(event: CollaborationRunEvent): void {
     fs.appendFileSync(taskPath(event.runId), `${JSON.stringify({ type: "event", event } satisfies TaskLogEntry)}\n`);
   } catch {
     // Best effort.
+  }
+}
+
+/**
+ * 删除一个 task 的持久化日志文件。用于 run 终态回收时清理磁盘侧泄漏：
+ * 每个 run 的 .jsonl 若不删，会在 ~/.deerhux/agent/tasks/ 下无限堆积，
+ * 且 listPersistedTasks 的 readdirSync + 逐文件 tail 解析会越来越慢。
+ * Best-effort：文件不存在或删除失败都静默。
+ */
+export function deletePersistedTask(runId: string): void {
+  try {
+    const filePath = taskPath(runId);
+    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+  } catch {
+    /* Best effort — 内存态清理不依赖磁盘清理成功 */
   }
 }
 

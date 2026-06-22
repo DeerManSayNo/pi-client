@@ -57,5 +57,17 @@ export async function register() {
 
     const { startScheduler } = await import("./lib/scheduler/engine");
     startScheduler();
+
+    // 启动期孤儿清理：清掉上一次进程遗留的 /tmp/deerhux-runs 目录 + git worktree 注册。
+    // 放在 register() 末尾、且只跑一次：此时内存 Map 为空、无并发 run，清掉的全部是孤儿。
+    try {
+      const { cleanupOrphanedRuns } = await import("./lib/parallel-agent/worktree");
+      const result = cleanupOrphanedRuns();
+      if (result.removedDirs > 0 || result.pruned) {
+        console.log(`[init] Cleaned orphaned subagent runs: ${result.removedDirs} dir(s), worktree prune ${result.pruned ? "done" : "skipped"}`);
+      }
+    } catch {
+      /* best effort — 不影响启动 */
+    }
   }
 }

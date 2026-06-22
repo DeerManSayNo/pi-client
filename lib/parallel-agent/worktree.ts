@@ -218,3 +218,47 @@ export function getRepoStatus(cwd: string): { clean: boolean; files: string[] } 
   const files = status.split("\n").map(l => l.slice(3).trim()).filter(Boolean);
   return { clean: false, files };
 }
+
+/**
+ * 启动期孤儿清理：扫描 /tmp/deerhux-runs/ 下所有 run 目录并删除，同时跑
+ * `git worktree prune` 清理 .git/worktrees 里指向已删除目录的注册。
+ *
+ * 背景上一次进程崩溃 / 被杀时，正常终态回收未执行的 run 会残留 worktree 目录
+ * 和 git worktree 注册（实测积攒 38 个）。本函数在进程启动时（内存 Map 为空、
+ * 无并发 run）调用一次，把这些孤儿全部清掉。
+ *
+ * Best-effort：任何子步骤失败都静默，不影响启动。
+ */
+export function cleanupOrphanedRuns(): { removedDirs: number; pruned: boolean } {
+  let removedDirs = 0;
+  try {
+    if (fs.existsSync(RUNS_BASE_DIR)) {
+      const entries = fs.readdirSync(RUNS_BASE_DIR, { withFileTypes: true });
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        try {
+          fs.rmSync(path.join(RUNS_BASE_DIR, entry.name), { recursive: true, force: true });
+          removedDirs += 1;
+        } catch {
+          /* best effort */
+        }
+      }
+    }
+  } catch {
+    /* best effort */
+  }
+
+  // git worktree prune 清理 .git/worktrees 里指向不存在目录的注册。它自带安全机制：
+  // 只删无法解析的，不会误删正在用的。对每个已知仓库跑一次太重，这里只在当前
+  // 进程 cwd 若是 git 仓库时跑（instrumentation 场景下 cwd 通常是项目根）。
+  let pruned = false;
+  try {
+    if (isGitRepo(process.cwd())) {
+      execSync("git worktree prune", { stdio: "pipe" });
+      pruned = true;
+    }
+  } catch {
+    /* best effort */
+  }
+  return { removedDirs, pruned };
+}
