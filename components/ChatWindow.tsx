@@ -1333,16 +1333,20 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
             })()}
 
             {streamState.isStreaming && streamState.streamingMessage && (
-              <>
-                <MessageView message={streamState.streamingMessage as AgentMessage} isStreaming modelNames={modelNames} watchdogInfo={watchdogInfo} />
-                {hasRunningSubagentTool && activeSubagentRuns.length > 0 && (
-                  <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 8 }}>
-                    {activeSubagentRuns.map((run) => (
-                      <SubagentRunCard key={run.runId} run={run} />
-                    ))}
-                  </div>
-                )}
-              </>
+              <MessageView message={streamState.streamingMessage as AgentMessage} isStreaming modelNames={modelNames} watchdogInfo={watchdogInfo} />
+            )}
+
+            {/* 活跃 subagent run 钉在聊天流最底部（所有消息/流式 bubble 之后），
+                不依赖 streaming：spawn_subagent 执行期间主 agent 阻塞在工具调用、
+                不流式文本，此时 streamState.isStreaming=false 但 subagent 仍在跑，
+                必须独立渲染才能持续显示在最底部。终结后的 run 不会出现在这里
+                （activeSubagentRuns 已过滤终态），它们沉淀到触发它的 user 消息下方。 */}
+            {activeSubagentRuns.length > 0 && (
+              <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 8 }}>
+                {activeSubagentRuns.map((run) => (
+                  <SubagentRunCard key={run.runId} run={run} />
+                ))}
+              </div>
             )}
 
             {agentRunning && !streamState.streamingMessage && (

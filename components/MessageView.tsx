@@ -22,6 +22,10 @@ import type {
 import type { CollaborationRunSnapshot } from "@/lib/parallel-agent/collaboration-types";
 import { SubagentRunCard } from "./SubagentRunCard";
 
+/** 终态集合：只有这些状态的 run 才沉淀到触发它的 user 消息下方作为历史记录；
+ * 活跃中的 run 由 ChatWindow 钉在聊天流最底部。 */
+const TERMINAL_RUN_STATUSES = new Set(["complete", "aborted", "error", "applied"]);
+
 interface WatchdogInfo {
   eventIdleMs: number;
   contentIdleMs: number;
@@ -89,11 +93,14 @@ function MessageViewImpl({ message, isStreaming, toolResults, modelNames, watchd
     if (message.role !== "user") return [];
     if (!collaborationRuns || collaborationRuns.length === 0) return [];
     if (!userTs || Number.isNaN(userTs)) return [];
+    // 只归属已终结的 run。活跃中的 run 统一由 ChatWindow 钉在聊天流最底部跟随
+    // 最新消息，避免同一 run 同时出现在历史 user 消息下方和底部造成重复。
     return collaborationRuns
       .filter((r) => {
         const created = Date.parse(r.createdAt);
         if (Number.isNaN(created)) return false;
-        return created >= userTs && (!nextUserTimestamp || created < nextUserTimestamp);
+        if (created < userTs || (nextUserTimestamp && created >= nextUserTimestamp)) return false;
+        return TERMINAL_RUN_STATUSES.has(r.status);
       })
       .sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
   }, [message.role, collaborationRuns, userTs, nextUserTimestamp]);
