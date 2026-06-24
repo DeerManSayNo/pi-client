@@ -7,7 +7,7 @@ import path from "path";
 import { getAgentDir as getCodingAgentDir } from "@earendil-works/pi-coding-agent";
 import type { ScheduledTask, PromptTaskConfig, TaskLog } from "./types";
 import { updateTask, appendTaskLog, getTask } from "./store";
-import { cacheSessionPath, invalidateSessionListCache } from "../session-reader";
+import { cacheSessionPath, forceRefreshSessionList } from "../session-reader";
 
 const TASK_RUN_LOCK_TTL_MS = 2 * 60 * 60 * 1000;
 
@@ -122,7 +122,7 @@ async function runPromptTask(task: ScheduledTask, config: PromptTaskConfig): Pro
     scheduledSessionId = session.sessionId;
     scheduledSessionFile = session.sessionFile;
     if (scheduledSessionId && scheduledSessionFile) cacheSessionPath(scheduledSessionId, scheduledSessionFile);
-    invalidateSessionListCache();
+    forceRefreshSessionList();
 
     if (config.model) {
       try {

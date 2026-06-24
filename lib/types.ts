@@ -192,7 +192,7 @@ export interface SessionInfo {
   messageCount: number;
   firstMessage: string;
   parentSessionId?: string; // set if this session was forked from another
-  isSubagent?: boolean; // true when this session belongs to a spawn_subagent worker
+  isSubagent?: boolean; // true when this session belongs to a subagent worker
 }
 
 export interface SessionContext {
@@ -202,7 +202,7 @@ export interface SessionContext {
   model: { provider: string; modelId: string } | null;
   roleId?: string | null;
   agentMode?: AgentMode;
-  /** spawn_subagent 协作 run 快照（按 jsonl 出现顺序，每个 runId 取最新一条） */
+  /** subagent 协作 run 快照（按 jsonl 出现顺序，每个 runId 取最新一条） */
   collaborationRuns?: import("./parallel-agent/collaboration-types").CollaborationRunSnapshot[];
 }
 

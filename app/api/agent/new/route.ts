@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { existsSync } from "fs";
 import { addAllowedRoot } from "@/lib/file-access";
 import { startRpcSession } from "@/lib/rpc-manager";
-import { invalidateSessionListCache } from "@/lib/session-reader";
+import { forceRefreshSessionList } from "@/lib/session-reader";
 import { normalizeAgentMode, type AgentMode } from "@/lib/agent-modes";
 
 // POST /api/agent/new  body: { cwd: string; message?: string; ... }
@@ -49,7 +49,7 @@ export async function POST(req: Request) {
     }
 
     const result = await session.send(promptCommand);
-    invalidateSessionListCache();
+    forceRefreshSessionList();
 
     return NextResponse.json({ success: true, sessionId: realSessionId, data: result });
   } catch (error) {

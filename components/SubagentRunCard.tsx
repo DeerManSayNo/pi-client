@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { CollaborationRunSnapshot, CollaborationWorkerState, CollaborationRunStatus, CollaborationWorkerStatus, WorkerToolActivity } from "@/lib/parallel-agent/collaboration-types";
+import type { CollaborationRunSnapshot, CollaborationWorkerState, CollaborationRunStatus, CollaborationWorkerStatus, SubagentWorkflow, WorkerToolActivity } from "@/lib/parallel-agent/collaboration-types";
 
 interface Props {
   run: CollaborationRunSnapshot;
@@ -44,7 +44,7 @@ function statusLabel(status?: AnyRunStatus): string {
 }
 
 /**
- * 在触发 spawn_subagent 的消息下方展示 subagent 小卡片。
+ * 在触发 subagent 的消息下方展示 subagent 小卡片。
  *
  * 每个 subagent 一张卡片：实时展示状态 + 当前工具调用 + 输出摘要，
  * 可点击跳转打开对应 worker session（在新 tab 查看完整对话）。
@@ -172,7 +172,7 @@ export function SubagentRunCard({ run, onOpenSession }: Props) {
 
   return (
     <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 8, minWidth: 0 }}>
-      <RunSummaryTag title={latest.title ?? "Subagents"} status={latest.status} text={`Subagents ${doneCount}/${workers.length}`} />
+      <RunSummaryTag title={latest.title ?? "Subagents"} status={latest.status} text={`Subagents ${doneCount}/${workers.length}`} workflow={latest.workflow} />
       {/* 横向单行排列，不换行；宽度不足时横向滚动；只在可滚动方向做边缘渐隐 */}
       <div
         ref={cardsScrollRef}
@@ -201,11 +201,12 @@ export function SubagentRunCard({ run, onOpenSession }: Props) {
 }
 
 /** 顶部总状态徽标 */
-function RunSummaryTag({ title, status, text }: { title: string; status: CollaborationRunStatus; text: string }) {
+function RunSummaryTag({ title, status, text, workflow }: { title: string; status: CollaborationRunStatus; text: string; workflow?: SubagentWorkflow }) {
   const color = statusColor(status);
+  const workflowLabel = workflow ? WORKFLOW_LABELS[workflow] : undefined;
   return (
     <span
-      title={`${title} · ${statusLabel(status)}`}
+      title={`${title} · ${statusLabel(status)}${workflowLabel ? ` · ${workflowLabel}` : ""}`}
       style={{
         display: "inline-flex",
         alignItems: "center",
@@ -223,6 +224,11 @@ function RunSummaryTag({ title, status, text }: { title: string; status: Collabo
     >
       <span style={{ width: 6, height: 6, borderRadius: "50%", background: color }} />
       {text}
+      {workflowLabel && (
+        <span style={{ color: "var(--text-dim)", fontWeight: 600, marginLeft: 1 }}>
+          · {workflowLabel}
+        </span>
+      )}
     </span>
   );
 }
@@ -233,6 +239,14 @@ const MODE_LABELS: Partial<Record<string, string>> = {
   parallel: "并行",
   review: "审查",
   custom: "自定义",
+};
+
+/** run 级编排模式标签（worker 之间怎么调度，与 taskMode 正交）。 */
+const WORKFLOW_LABELS: Record<SubagentWorkflow, string> = {
+  parallel: "并行",
+  sequential: "串行",
+  pipeline: "流水线",
+  dag: "依赖图",
 };
 
 /** 单个 subagent 卡牌：竖向卡牌布局，实时展示状态 + 任务 + 工具调用 + 输出 */

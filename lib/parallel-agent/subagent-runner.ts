@@ -6,6 +6,7 @@ import type { CollaborationRunMode } from "./collaboration-types";
 import { registerWorkerSession } from "./subagent-registry";
 
 const WORKER_INACTIVITY_TIMEOUT_MS = 30 * 60 * 1000;
+const SUBAGENT_MAX_TOOL_ROUNDS = 100;
 
 export type WorkerSession = {
   sessionId: string;
@@ -57,7 +58,7 @@ export async function createSubagentWorkerSession(
     undefined,
     undefined,
     parentModel,
-    { allowSubagentTool: false },
+    { allowSubagentTool: false, maxToolRounds: SUBAGENT_MAX_TOOL_ROUNDS },
   );
 
   // Record this worker session's origin so the sidebar can hide it from the

@@ -132,7 +132,7 @@ export interface SessionData {
     model: { provider: string; modelId: string } | null;
     roleId?: string | null;
     agentMode?: AgentMode;
-    /** spawn_subagent 协作 run 快照（按 jsonl 出现顺序） */
+    /** subagent 协作 run 快照（按 jsonl 出现顺序） */
     collaborationRuns?: CollaborationRunSnapshot[];
   };
 }
@@ -395,6 +395,34 @@ function mergeOptimisticClientMessageIds(prev: AgentMessage[], loaded: AgentMess
   return touched ? merged : loaded;
 }
 
+function mergePendingUserMessages(loaded: AgentMessage[], pending: AgentMessage[]): AgentMessage[] {
+  if (!pending.length) return loaded;
+
+  const loadedClientIds = new Set<string>();
+  const loadedTextCounts = new Map<string, number>();
+  for (const msg of loaded) {
+    if (msg.role !== "user") continue;
+    if (msg.clientMessageId) loadedClientIds.add(msg.clientMessageId);
+    const key = userMessageTextKey(msg.content);
+    if (key) loadedTextCounts.set(key, (loadedTextCounts.get(key) ?? 0) + 1);
+  }
+
+  const unresolved: AgentMessage[] = [];
+  for (const msg of pending) {
+    if (msg.role !== "user") continue;
+    if (msg.clientMessageId && loadedClientIds.has(msg.clientMessageId)) continue;
+    const key = userMessageTextKey(msg.content);
+    const seenCount = key ? loadedTextCounts.get(key) ?? 0 : 0;
+    if (seenCount > 0) {
+      loadedTextCounts.set(key, seenCount - 1);
+      continue;
+    }
+    unresolved.push(msg);
+  }
+
+  return unresolved.length ? [...loaded, ...unresolved] : loaded;
+}
+
 function getStreamingContentLength(msg: Partial<AgentMessage> | null | undefined): number {
   const content = msg?.content;
   if (!Array.isArray(content)) return typeof content === "string" ? content.length : 0;
@@ -482,6 +510,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [pendingModel, setPendingModel] = useState<{ provider: string; modelId: string } | null>(null);
   const [isCompacting, setIsCompacting] = useState(false);
   const [compactError, setCompactError] = useState<string | null>(null);
+  // TODO 3 — first-paint pagination. When the recent-messages endpoint
+  // reported older messages were truncated, this lets the UI offer a
+  // "load full history" affordance.
+  const [hasOlderMessages, setHasOlderMessages] = useState(false);
+  const [loadingFullHistory, setLoadingFullHistory] = useState(false);
   const [agentPhase, setAgentPhase] = useState<AgentPhase>(null);
   const [watchdogInfo, setWatchdogInfo] = useState<WatchdogInfo | null>(null);
   const [lastModelError, setLastModelError] = useState<string | null>(null);
@@ -498,7 +531,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const stallDismissedRef = useRef(false);
 
   // Subagent tool capability toggle persisted in localStorage. When enabled,
-  // the `spawn_subagent` tool is added to the active agent tool set.
+  // the `subagent` tool is added to the active agent tool set.
   const [subagentEnabled, setSubagentEnabledState] = useState<boolean>(() => {
     if (typeof window === "undefined") return false;
     return getLocalStorageItem("deerhux.subagent-enabled") === "true";
@@ -728,6 +761,96 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     return promise;
   }, [applySessionSnapshot]);
 
+  /**
+   * Load only the most recent N messages via the dedicated messages endpoint
+   * (remediation plan §5.4 / TODO 3). Used as the first-paint data source so
+   * large sessions don't ship their entire history on open. When the endpoint
+   * reports older messages were truncated, {@link hasOlderMessages} is set so
+   * the UI can offer "load full history" via {@link loadFullHistory}.
+   */
+  const loadRecentMessages = useCallback(async (sid: string, showLoading = false) => {
+    const controller = new AbortController();
+    const sessionSignal = sessionAbortRef.current?.signal;
+    const timeout = setTimeout(() => controller.abort(), showLoading ? 30_000 : 12_000);
+    const onSessionAbort = () => controller.abort();
+    if (sessionSignal) {
+      if (sessionSignal.aborted) controller.abort();
+      else sessionSignal.addEventListener("abort", onSessionAbort, { once: true });
+    }
+    try {
+      if (showLoading) setLoading(true);
+      const res = await fetch(
+        `/api/sessions/${encodeURIComponent(sid)}/messages?limit=100`,
+        { signal: controller.signal, cache: "no-store" },
+      );
+      if (res.status === 404) {
+        if (showLoading) {
+          setData(null);
+          setMessages([]);
+          setError(null);
+        }
+        return;
+      }
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const d = await res.json() as {
+        sessionId: string;
+        messages: AgentMessage[];
+        entryIds: string[];
+        totalCount: number;
+        thinkingLevel: string;
+        model: { provider: string; modelId: string } | null;
+        roleId?: string | null;
+        agentMode?: AgentMode;
+        page: { limit: number; returned: number; hasMoreBefore: boolean };
+      };
+      if (sid !== sessionIdRef.current) return;
+      // Shape into SessionData so applySessionSnapshot handles normalization
+      // (clientMessageId merge, optimistics, agent-mode restore) identically.
+      applySessionSnapshot({
+        sessionId: d.sessionId,
+        // leafId is not used by applySessionSnapshot's message path; reuse null.
+        filePath: "",
+        leafId: null,
+        context: {
+          messages: d.messages,
+          entryIds: d.entryIds,
+          thinkingLevel: d.thinkingLevel,
+          model: d.model,
+          roleId: d.roleId ?? null,
+          agentMode: d.agentMode,
+        },
+      });
+      setHasOlderMessages(Boolean(d.page?.hasMoreBefore));
+      setError(null);
+    } catch (e) {
+      if (sid === sessionIdRef.current) {
+        const isAbort = e instanceof DOMException && e.name === "AbortError";
+        if (showLoading) setError(isAbort ? "加载会话超时" : String(e));
+        else if (!isAbort) console.warn("[loadRecentMessages] failed:", e);
+      }
+    } finally {
+      clearTimeout(timeout);
+      if (sessionSignal) sessionSignal.removeEventListener("abort", onSessionAbort);
+      if (showLoading && sid === sessionIdRef.current) setLoading(false);
+    }
+  }, [applySessionSnapshot]);
+
+  /**
+   * Load the FULL session history (fallback for when the recent-messages
+   * first paint truncated older messages). Triggered by the user via the
+   * "load full history" affordance. Clears {@link hasOlderMessages} on
+   * success.
+   */
+  const loadFullHistory = useCallback(async (sid: string) => {
+    setLoadingFullHistory(true);
+    try {
+      await loadSession(sid, false, false);
+      setHasOlderMessages(false);
+    } finally {
+      setLoadingFullHistory(false);
+    }
+  }, [loadSession]);
+
   const loadTools = useCallback(async (sid: string) => {
     try {
       const tools = await sendAgentCommand<ToolEntry[]>(sid, { type: "get_tools" });
@@ -739,6 +862,71 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       console.error("Failed to load tools:", e);
     }
   }, [setToolPresetState]);
+
+  /**
+   * Apply a runtime AgentStatePayload (from /api/sessions/:id/state) to the
+   * local UI state. Extracted so both the "open session" flow and the
+   * "agent_end → refresh state" flow share one implementation.
+   *
+   * Pure application — does NOT load messages. Failures are tolerated by the
+   * caller (this never throws for missing fields).
+   */
+  const applyAgentStatePayload = useCallback((agentState: AgentStatePayload | null, sid: string) => {
+    if (sid !== sessionIdRef.current) return;
+    if (agentState?.running) {
+      loadTools(sid);
+      // isRunning stays true across gaps (waiting-for-model, between tool
+      // batches, auto-retry backoff). Falls back to true for older servers.
+      if (agentState.state?.isRunning !== false) {
+        agentRunningRef.current = true;
+        setAgentRunning(true);
+        setAgentPhase({ kind: "waiting_model", reason: "restored" });
+      }
+    }
+    if (agentState?.state) {
+      if (agentState.state.isCompacting !== undefined) setIsCompacting(agentState.state.isCompacting);
+      if (agentState.state.contextUsage !== undefined) setContextUsage(agentState.state.contextUsage ?? null);
+      if (agentState.state.systemPrompt !== undefined) setSystemPrompt(agentState.state.systemPrompt ?? null);
+      if (agentState.state.thinkingLevel !== undefined) {
+        setThinkingLevel((agentState.state.thinkingLevel as ThinkingLevelOption) ?? "auto");
+      }
+      if (agentState.state.agentMode !== undefined) setAgentMode(normalizeAgentMode(agentState.state.agentMode));
+    }
+  }, [loadTools]);
+
+  /**
+   * Fetch ONLY the live runtime state for a session via the dedicated state
+   * endpoint (remediation plan §5.3). This is decoupled from message loading:
+   * it runs AFTER the history is shown so a busy/locked runtime can never
+   * block the first paint. Failures are swallowed — a missing runtime state
+   * must never mark the session as failed.
+   */
+  const loadSessionState = useCallback(async (sid: string): Promise<AgentStatePayload | null> => {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 8_000);
+      try {
+        const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}/state`, {
+          signal: controller.signal,
+          cache: "no-store",
+        });
+        if (!res.ok) return null;
+        const payload = (await res.json()) as AgentStatePayload;
+        applyAgentStatePayload(payload, sid);
+        return payload;
+      } finally {
+        clearTimeout(timeout);
+      }
+    } catch (e) {
+      // Swallow: state loading is best-effort. Avoid scary AbortError logs
+      // unless we're actually still on this session.
+      if (sid === sessionIdRef.current) {
+        const isAbort = e instanceof DOMException && e.name === "AbortError";
+        if (!isAbort) console.warn("[loadSessionState] failed:", e);
+      }
+      return null;
+    }
+  }, [applyAgentStatePayload]);
 
   const stopSubagentLiveRefresh = useCallback(() => {
     for (const timer of subagentLiveRefreshTimersRef.current) clearTimeout(timer);
@@ -775,7 +963,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     sseReconnectAttemptRef.current = 0;
 
     // Sync the subagent capability toggle to this (possibly freshly
-    // cold-started) session so spawn_subagent is in/out of the active tool set.
+    // cold-started) session so subagent is in/out of the active tool set.
     void sendAgentCommand(sid, { type: "set_subagent_enabled", enabled: subagentEnabledRef.current }).catch(() => { /* best effort */ });
 
     const es = new EventSource(`/api/agent/${encodeURIComponent(sid)}/events`);
@@ -799,7 +987,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         .then((r) => r.json())
         .then((d: { running?: boolean; status?: AgentStatus }) => {
           if (awaitingAgentStartRef.current) {
-            loadSession(sid, false, true).catch(() => {});
+            // On reconnect during awaiting-start: refresh messages + state
+            // independently (TODO 2).
+            loadSession(sid, false, false).catch(() => {});
+            void loadSessionState(sid);
             return;
           }
           if (agentRunningRef.current && (!d.running || d.status?.isRunning === false)) {
@@ -841,7 +1032,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }, delay);
     };
     return es;
-  }, [loadSession]);
+  }, [loadSession, loadSessionState]);
 
   const ensureEventsConnected = useCallback((sid: string) => {
     const existing = eventSourceRef.current;
@@ -1059,14 +1250,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         dispatch({ type: "end" });
         setPlanReady(!endedWithError && agentModeRef.current === "plan");
         if (sessionIdRef.current && !endedWithError) {
-          // Single request fetches both the updated messages AND the live
-          // agent state (contextUsage, systemPrompt). Previously this was
-          // two concurrent fetches that piled up on a slow backend.
-          loadSession(sessionIdRef.current, false, true).then((agentState) => {
-            const state = agentState?.state as { contextUsage?: { percent: number | null; contextWindow: number; tokens: number | null } | null; systemPrompt?: string } | undefined;
-            if (state?.contextUsage !== undefined) setContextUsage(state.contextUsage ?? null);
-            if (state?.systemPrompt !== undefined) setSystemPrompt(state.systemPrompt ?? null);
-          });
+          // Refresh messages (history) and live agent state independently.
+          // History via the lightweight path; runtime state via the dedicated
+          // /state endpoint so neither blocks the other (TODO 2).
+          loadSession(sessionIdRef.current, false, false).catch(() => {});
+          void loadSessionState(sessionIdRef.current);
         }
         // Reload session even on error to capture any partial output
         if (sessionIdRef.current && endedWithError) {
@@ -1163,7 +1351,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       case "tool_execution_start": {
         const id = event.toolCallId as string;
         const name = event.toolName as string;
-        if (name === "spawn_subagent") {
+        if (name === "subagent") {
           activeSubagentToolIdsRef.current.add(id);
           const sid = sessionIdRef.current;
           if (sid) startSubagentLiveRefresh(sid);
@@ -1231,7 +1419,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         }
         break;
     }
-  }, [loadSession, onAgentEnd, autoRecoveryMode, startSubagentLiveRefresh, finishSubagentLiveRefresh, stopSubagentLiveRefresh]);
+  }, [loadSession, onAgentEnd, autoRecoveryMode, startSubagentLiveRefresh, finishSubagentLiveRefresh, stopSubagentLiveRefresh, loadSessionState]);
   handleAgentEventRef.current = handleAgentEvent;
 
   const handleSend = useCallback(async (message: string, images?: AttachedImage[], roleId?: string, references?: FileReference[], skill?: SkillReference) => {
@@ -2058,34 +2246,20 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setAgentRunning(false);
     setError(null);
 
-    loadSession(sessionId, true, true).then((agentState) => {
+    // Open session: load RECENT messages first (TODO 3 pagination) — this is a
+    // cheaper first paint than the full GET /api/sessions/:id. Runtime state
+    // is then fetched asynchronously (TODO 2) so neither a busy runtime nor a
+    // huge history can block the first paint.
+    loadRecentMessages(sessionId, true).then(() => {
       if (cancelled || sessionIdRef.current !== sessionId) return;
 
       // 远程连接（例如微信 Bot）可能会在当前 session 空闲时从外部发起 prompt。
-      // 之前只有“加载时已在运行”的 session 才连接 SSE，导致手机刚发来的 user 消息
-      // 不能实时出现在已打开的 session 里，只能等手动刷新/回合结束后重新加载。
       // 这里改为：打开已有 session 时始终保持 SSE 连接，以便接收未来的外部消息事件。
       connectEvents(sessionId);
 
-      if (agentState?.running) {
-        loadTools(sessionId);
-        // Reconnect SSE whenever a turn is active — isRunning stays true
-        // across gaps (waiting-for-model, between tool batches, auto-retry
-        // backoff) where isStreaming is temporarily false.
-        // Falls back to true for pre-isRunning servers (undefined !== false).
-        if (agentState.state?.isRunning !== false) {
-          agentRunningRef.current = true;
-          setAgentRunning(true);
-          setAgentPhase({ kind: "waiting_model", reason: "restored" });
-        }
-      }
-      if (agentState?.state) {
-        if (agentState.state.isCompacting !== undefined) setIsCompacting(agentState.state.isCompacting);
-        if (agentState.state.contextUsage !== undefined) setContextUsage(agentState.state.contextUsage ?? null);
-        if (agentState.state.systemPrompt !== undefined) setSystemPrompt(agentState.state.systemPrompt ?? null);
-        if (agentState.state.thinkingLevel !== undefined) setThinkingLevel((agentState.state.thinkingLevel as ThinkingLevelOption) ?? "auto");
-        if (agentState.state.agentMode !== undefined) setAgentMode(normalizeAgentMode(agentState.state.agentMode));
-      }
+      // Now fetch runtime state asynchronously — failures here never affect
+      // the already-displayed messages.
+      void loadSessionState(sessionId);
     });
 
     const activeSubagentToolIds = activeSubagentToolIdsRef.current;
@@ -2096,7 +2270,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       activeSubagentToolIds.clear();
       stopSubagentLiveRefresh();
     };
-  }, [connectEvents, loadSession, loadTools, activeTabId, newSessionCwd, activeSessionId, stopSubagentLiveRefresh]);
+  }, [connectEvents, loadRecentMessages, loadSession, loadSessionState, loadTools, activeTabId, newSessionCwd, activeSessionId, stopSubagentLiveRefresh]);
 
   useEffect(() => {
     entryIdsRef.current = entryIds;
@@ -2230,6 +2404,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     agentPhase, watchdogInfo, stallLevel, autoRecoveryMode,
     subagentEnabled,
     isNew,
+    // TODO 3 — first-paint pagination affordance
+    hasOlderMessages, loadingFullHistory, loadFullHistory,
     // Refs
     sessionIdRef, eventSourceRef, messagesEndRef, scrollContainerRef,
     lastUserMsgRef, pendingScrollToUserRef, initialScrollDoneRef,

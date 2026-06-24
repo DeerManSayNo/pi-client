@@ -1,7 +1,7 @@
 /**
  * Subagent worker session registry.
  *
- * When the main agent spawns a subagent (spawn_subagent), each worker runs in
+ * When the main agent spawns a subagent (subagent), each worker runs in
  * its own agent session created via `startRpcSession` -> `SessionManager.create`.
  * Those sessions end up in `SessionManager.listAll()` and therefore leak into the
  * sidebar's top-level project list: a worker's cwd is an isolated worktree path

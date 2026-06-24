@@ -7,6 +7,7 @@ import {
   invalidateSessionPathCache,
   invalidateSessionListCache,
   invalidateSessionFileCache,
+  forceRefreshSessionList,
   readSessionFileCached,
 } from "@/lib/session-reader";
 import { getRpcSession } from "@/lib/rpc-manager";
@@ -155,6 +156,7 @@ export async function DELETE(
     unlinkSync(filePath);
     invalidateSessionPathCache(id);
     invalidateSessionFileCache(filePath);
+    forceRefreshSessionList();
     return NextResponse.json({ ok: true });
   } catch (error) {
     return NextResponse.json({ error: String(error) }, { status: 500 });

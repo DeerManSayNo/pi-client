@@ -21,6 +21,7 @@ import type {
   CollaborationWorkerSpec,
   SubagentRunPlacement,
   SubagentTaskMode,
+  SubagentWorkflow,
 } from "./collaboration-types";
 import type { AgentEvent } from "@/lib/rpc-manager";
 import {
@@ -28,12 +29,12 @@ import {
   generateDiff,
   getRepoStatus,
   isGitRepo,
-  prepareIsolatedWorkspace,
-  applyWorkerPatch,
-} from "./isolation-manager";
-import { buildIsolatedWorkerPrompt, buildWorkerPrompt } from "./prompts";
-import { buildSubagentSummary } from "./subagent-aggregator";
-import { planSubagentTask } from "./subagent-planner";
+  setupIsolatedWorkspace,
+  applyPatch,
+} from "./worktree";
+import { buildIsolatedWorkerPrompt, buildWorkerPrompt, type PriorWorkerResult } from "./prompts";
+import { aggregateSubagentResults } from "./llm-aggregator";
+import { planSubagentTaskWithLlm } from "./llm-planner";
 import { createSubagentWorkerSession, getAutoRecoveryModels, runWorkerPromptWithRecovery, type WorkerSession } from "./subagent-runner";
 
 export {
@@ -94,7 +95,7 @@ function summarizeToolEvent(event: AgentEvent): { toolName: string; summary: str
     case "codegraph_impact":
       summary = pick("symbol", "query");
       break;
-    case "spawn_subagent":
+    case "subagent":
       summary = pick("message", "task", "prompt");
       break;
     default:
@@ -137,6 +138,7 @@ function snapshotRun(state: CollaborationRunState): CollaborationRunSnapshot {
     mode: state.mode,
     taskMode: state.taskMode,
     runPlacement: state.runPlacement,
+    workflow: state.workflow,
     status: state.status,
     message: state.message,
     workers: state.workers,
@@ -194,6 +196,7 @@ export async function startCollaborationRun(params: {
   workers?: CollaborationWorkerSpec[];
   mode?: CollaborationRunMode;
   taskMode?: SubagentTaskMode;
+  workflow?: SubagentWorkflow;
   runPlacement?: SubagentRunPlacement;
   title?: string;
   parentSessionId?: string;
@@ -203,13 +206,22 @@ export async function startCollaborationRun(params: {
 }): Promise<CollaborationRunState> {
   const runId = `collab_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   const now = new Date().toISOString();
-  const planned = planSubagentTask({
+  // mode→taskMode 的兜底推断（用户只给了 mode 没给 taskMode 时）。
+  const inferredTaskMode = params.taskMode
+    ?? (params.mode === "isolated_coding" ? "code" : params.mode === "analysis" ? "ask" : undefined);
+  // ★ LLM 智能规划：用 parentModel 推断 taskMode/workflow/workers；用户显式字段
+  //   优先，无 model / 超时 / 失败则透明回退正则（planSubagentTaskWithLlm 内部处理）。
+  //   规划延迟体现为 subagent 工具的 pending，有 30s 超时兜底，不会卡死。
+  const planned = await planSubagentTaskWithLlm({
     message: params.message,
-    taskMode: params.taskMode ?? (params.mode === "isolated_coding" ? "code" : params.mode === "analysis" ? "ask" : undefined),
+    model: params.parentModel,
+    taskMode: inferredTaskMode,
     placement: params.runPlacement,
+    workflow: params.workflow,
     workers: params.workers,
   });
   const mode = params.mode ?? planned.mode;
+  const workflow = planned.workflow;
   const cwd = path.resolve(params.cwd);
   if (mode === "isolated_coding") {
     if (!isGitRepo(cwd)) throw new Error("Code in Isolation requires a git repository so diffs can be reviewed and applied.");
@@ -229,6 +241,7 @@ export async function startCollaborationRun(params: {
     mode,
     taskMode: planned.taskMode,
     runPlacement: planned.runPlacement,
+    workflow,
     status: mode === "isolated_coding" ? "setting_up" : "running",
     isGit: isGitRepo(params.cwd),
     workers: planned.workers.map((worker, index) => ({
@@ -348,7 +361,7 @@ async function executeCollaborationRun(runId: string): Promise<void> {
   setCollaborationCleanup(runId, cleanupAll);
 
   if (state.mode === "isolated_coding") {
-    const workspace = prepareIsolatedWorkspace(state.cwd, state.workers.map((worker) => worker.name));
+    const workspace = setupIsolatedWorkspace(state.cwd, state.workers.map((worker) => worker.name));
     runDir = workspace.runDir;
     gitRoot = workspace.gitRoot;
     isGit = workspace.isGit;
@@ -365,8 +378,25 @@ async function executeCollaborationRun(runId: string): Promise<void> {
   if (!current || aborted) return;
   const recoveryModels = getAutoRecoveryModels();
 
-  await Promise.all(current.workers.map(async (worker, index) => {
-    if (aborted) return;
+  /** 收集 index 这个 worker 应注入的前序 worker 结论（sequential/pipeline/dag 用）。
+   *  优先按 dependsOn 显式声明；未声明时 fallback 到顺序前一个。 */
+  const collectPriorResults = (index: number): PriorWorkerResult[] => {
+    const run = getCollaborationRun(runId);
+    if (!run) return [];
+    const worker = run.workers[index];
+    const depNames = worker?.dependsOn ?? [];
+    const deps = depNames.length > 0
+      ? depNames.map((name) => run.workers.find((w) => w.name === name)).filter((w): w is NonNullable<typeof w> => Boolean(w))
+      : (index > 0 ? [run.workers[index - 1]].filter((w): w is NonNullable<typeof w> => Boolean(w)) : []);
+    return deps
+      .filter((w) => w.status === "complete" && w.result?.trim())
+      .map((w) => ({ name: w.name, task: w.task, result: w.result ?? "" }));
+  };
+
+  /** 执行单个 worker（parallel 与 sequential 复用）。priorResults 为前序结论注入。
+   *  返回 result（失败/中止时为 undefined）。 */
+  const executeOneWorker = async (worker: (typeof current.workers)[number], index: number, priorResults: PriorWorkerResult[]): Promise<string | undefined> => {
+    if (aborted) return undefined;
     const workerCwd = current.mode === "isolated_coding" ? worktrees.get(worker.name) : current.cwd;
     if (!workerCwd) {
       updateCollaborationRun(runId, (run) => {
@@ -377,7 +407,7 @@ async function executeCollaborationRun(runId: string): Promise<void> {
         }
       });
       emitCollaborationRunEvent({ type: "worker_error", runId, workerId: worker.name, error: "Worker workspace was not created" });
-      return;
+      return undefined;
     }
 
     let unsubscribeWorkerEvents: (() => void) | null = null;
@@ -402,8 +432,8 @@ async function executeCollaborationRun(runId: string): Promise<void> {
         updateWorkerToolActivity(runId, index, event);
       });
       const prompt = current.mode === "analysis"
-        ? buildWorkerPrompt(current.message, worker.task)
-        : buildIsolatedWorkerPrompt(current.message, worker.task);
+        ? buildWorkerPrompt(current.message, worker.task, priorResults)
+        : buildIsolatedWorkerPrompt(current.message, worker.task, priorResults);
       const result = await runWorkerPromptWithRecovery(
         workerSession,
         prompt,
@@ -432,7 +462,7 @@ async function executeCollaborationRun(runId: string): Promise<void> {
           const target = run.workers[index];
           if (target) target.status = "aborted";
         });
-        return;
+        return undefined;
       }
 
       updateCollaborationRun(runId, (run) => {
@@ -459,6 +489,7 @@ async function executeCollaborationRun(runId: string): Promise<void> {
           diffStats: latestWorker.diffStats,
         });
       }
+      return result;
     } catch (error) {
       unsubscribeWorkerEvents?.();
       const err = error instanceof Error ? error.message : String(error);
@@ -470,15 +501,40 @@ async function executeCollaborationRun(runId: string): Promise<void> {
         }
       });
       emitCollaborationRunEvent({ type: "worker_error", runId, workerId: worker.name, error: err });
+      return undefined;
     }
-  }));
+  };
+
+  // ── 按 workflow 调度 worker ───────────────────────────────────
+  // parallel：全部同时启动（Promise.all fan-out），互不可见。
+  // sequential/pipeline/dag：逐次执行，每个 worker 执行前收集其依赖（或前一个）
+  //   worker 的结论注入 prompt。dag 当前按声明顺序降级为 sequential。
+  const workflow = current.workflow ?? "parallel";
+  if (workflow === "parallel") {
+    await Promise.all(current.workers.map((worker, index) => executeOneWorker(worker, index, [])));
+  } else {
+    for (let index = 0; index < current.workers.length; index += 1) {
+      if (aborted) break;
+      await executeOneWorker(current.workers[index], index, collectPriorResults(index));
+      if (aborted) break;
+    }
+  }
 
   if (aborted) return;
 
-  const completed = updateCollaborationRun(runId, (run) => {
+  // ── 终态：先定 status，再用 LLM 聚合 summary（多 worker 才综合，否则静态拼接）。
+  updateCollaborationRun(runId, (run) => {
     run.status = run.workers.some((worker) => worker.status === "error") ? "error" : "complete";
-    run.summary = buildSubagentSummary(run);
     if (run.status === "error") run.error = "One or more child agents failed";
+  });
+  const forAggregate = getCollaborationRun(runId);
+  // ★ LLM 聚合：≥2 个 completed worker 且有 model 时综合综述；否则回退静态拼接。
+  //   聚合在 status 已定、worker 结果已落盘后进行，30s 超时兜底。
+  const summary = forAggregate
+    ? await aggregateSubagentResults(forAggregate, { model: current.model })
+    : "";
+  const completed = updateCollaborationRun(runId, (run) => {
+    run.summary = summary;
   });
   if (!completed) return;
   emitCollaborationRunEvent({
@@ -492,7 +548,7 @@ async function executeCollaborationRun(runId: string): Promise<void> {
   // 终态回收（P0-1/P0-2）：worker session 在 run 终态后不再需要，立即 destroy。
   // worktree + Map + jsonl 按模式分流：
   //   - analysis（只读）：无 worktree 可留，立即全量 remove。
-  //   - isolated_coding：apply 需要从 worktree 重新生成 diff（applyWorkerPatch 在
+  //   - isolated_coding：apply 需要从 worktree 重新生成 diff（applyPatch 在
   //     worktree 里跑 git diff HEAD），所以 worktree 必须保留到 apply；用户不点
   //     apply 也不能永久泄漏，用 2h TTL 兒底 remove。
   for (const session of workerSessions) {
@@ -555,7 +611,7 @@ export async function continueCollaborationWorker(runId: string, workerId: strin
     unsubscribeWorkerEvents();
     unsubscribeWorkerEvents = null;
 
-    const updated = updateCollaborationRun(runId, (run) => {
+    updateCollaborationRun(runId, (run) => {
       const target = run.workers[workerIndex];
       if (!target) return;
       target.status = "complete";
@@ -566,9 +622,12 @@ export async function continueCollaborationWorker(runId: string, workerId: strin
         target.diffStats = stats;
       }
       run.status = run.workers.some((item) => item.status === "error") ? "error" : "complete";
-      run.summary = buildSubagentSummary(run);
       if (run.status !== "error") run.error = undefined;
     });
+    // LLM 聚合 summary（≥2 completed 才综合；continue 单 worker 时回退静态拼接）。
+    const forAggregate = getCollaborationRun(runId);
+    const summary = forAggregate ? await aggregateSubagentResults(forAggregate, { model: state.model }) : "";
+    const updated = updateCollaborationRun(runId, (run) => { run.summary = summary; });
     emitCollaborationRunEvent({ type: "worker_complete", runId, workerId: worker.name, result });
     if (updated) {
       const latestWorker = updated.workers[workerIndex];
@@ -589,7 +648,7 @@ export async function continueCollaborationWorker(runId: string, workerId: strin
   } catch (error) {
     unsubscribeWorkerEvents?.();
     const err = error instanceof Error ? error.message : String(error);
-    const updated = updateCollaborationRun(runId, (run) => {
+    updateCollaborationRun(runId, (run) => {
       const target = run.workers[workerIndex];
       if (target) {
         target.status = "error";
@@ -597,8 +656,11 @@ export async function continueCollaborationWorker(runId: string, workerId: strin
       }
       run.status = "error";
       run.error = err;
-      run.summary = buildSubagentSummary(run);
     });
+    // 错误路径：单 worker 时 aggregateSubagentResults 直接静态拼接（不调 LLM），快速返回。
+    const forAggregateErr = getCollaborationRun(runId);
+    const summaryErr = forAggregateErr ? await aggregateSubagentResults(forAggregateErr, { model: state.model }) : "";
+    const updated = updateCollaborationRun(runId, (run) => { run.summary = summaryErr; });
     emitCollaborationRunEvent({ type: "worker_error", runId, workerId: worker.name, error: err });
     if (updated) {
       await appendRunSnapshot(updated.parentSessionId, updated);
@@ -631,7 +693,7 @@ export async function applyCollaborationPatches(runId: string, workerNames: stri
       result.failed.push({ workerName, error: "Worker not found or no diff available" });
       continue;
     }
-    const patchResult = applyWorkerPatch(state.cwd, worker.worktreePath, files);
+    const patchResult = applyPatch(state.cwd, worker.worktreePath, files);
     if (patchResult.success) {
       result.applied.push(workerName);
       if (files?.length) result.appliedFiles?.push(...files);

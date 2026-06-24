@@ -394,6 +394,8 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
     isNew,
     stallLevel, autoRecoveryMode,
     subagentEnabled,
+    // TODO 3 — first-paint pagination affordance
+    hasOlderMessages, loadingFullHistory, loadFullHistory,
     handleAutoRecover, handleDismissStall, handleAutoRecoveryModeChange,
     handleSubagentToggle,
     messagesEndRef, scrollContainerRef,
@@ -412,7 +414,7 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
   const { server: serverStatus } = useAgentStatus(session?.id, agentRunning, watchdogInfo);
 
   // subagent 运行中不要反复全量读取父 session；改走轻量内存态 runs 接口。
-  const hasRunningSubagentTool = agentPhase?.kind === "running_tools" && agentPhase.tools.some((tool) => tool.name === "spawn_subagent");
+  const hasRunningSubagentTool = agentPhase?.kind === "running_tools" && agentPhase.tools.some((tool) => tool.name === "subagent");
   useEffect(() => {
     if (!session?.id) {
       setLiveCollaborationRuns([]);
@@ -1272,6 +1274,29 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
         >
           <div className={`mx-auto ${messagePaddingClass}`} style={{ width: "100%", maxWidth: contentMaxWidth, minWidth: 0, overflowX: "hidden", paddingBottom: compact ? 12 : 18 }}>
 
+            {/* TODO 3 — first-paint pagination: older messages were truncated. */}
+            {hasOlderMessages && session?.id && (
+              <div style={{ display: "flex", justifyContent: "center", padding: "8px 0 4px" }}>
+                <button
+                  type="button"
+                  onClick={() => loadFullHistory(session.id)}
+                  disabled={loadingFullHistory}
+                  style={{
+                    fontSize: 12,
+                    color: "var(--text-muted)",
+                    background: "transparent",
+                    border: "1px solid var(--border-color, rgba(128,128,128,0.2))",
+                    borderRadius: 6,
+                    padding: "4px 10px",
+                    cursor: loadingFullHistory ? "wait" : "pointer",
+                    opacity: loadingFullHistory ? 0.6 : 1,
+                  }}
+                >
+                  {loadingFullHistory ? "加载中…" : "↑ 加载完整历史"}
+                </button>
+              </div>
+            )}
+
             {(() => {
               let lastUserIdx = -1;
               for (let i = messages.length - 1; i >= 0; i--) {
@@ -1339,7 +1364,7 @@ export function ChatWindow({ activeTabId, session, newSessionCwd, compact = fals
             )}
 
             {/* 活跃 subagent run 钉在聊天流最底部（所有消息/流式 bubble 之后），
-                不依赖 streaming：spawn_subagent 执行期间主 agent 阻塞在工具调用、
+                不依赖 streaming：subagent 执行期间主 agent 阻塞在工具调用、
                 不流式文本，此时 streamState.isStreaming=false 但 subagent 仍在跑，
                 必须独立渲染才能持续显示在最底部。终结后的 run 不会出现在这里
                 （activeSubagentRuns 已过滤终态），它们沉淀到触发它的 user 消息下方。 */}

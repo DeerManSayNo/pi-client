@@ -29,6 +29,8 @@ interface Props {
   onInitialRestoreDone?: () => void;
   refreshKey?: number;
   optimisticSession?: SessionInfo | null;
+  optimisticSessions?: SessionInfo[];
+  onOptimisticSessionResolved?: (sessionId: string) => void;
   runningSessionStatuses?: Map<string, RunningSessionStatus>;
   onSessionDeleted?: (sessionId: string) => void;
   selectedCwd?: string | null;
@@ -274,10 +276,14 @@ function buildSessionTree(sessions: SessionInfo[]): SessionTreeNode[] {
   return roots;
 }
 
-export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, onInitialRestoreDone, refreshKey, optimisticSession, runningSessionStatuses = new Map(), onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onAtMention, compact = false, onProjectsChange, onRefreshRunningSessions }: Props) {
+export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, onInitialRestoreDone, refreshKey, optimisticSession, optimisticSessions, onOptimisticSessionResolved, runningSessionStatuses = new Map(), onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onAtMention, compact = false, onProjectsChange, onRefreshRunningSessions }: Props) {
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Index control-plane state. `rebuilding` is non-fatal: a stale/missing
+  // index triggers a background rebuild but the sidebar keeps showing data.
+  const [indexRebuilding, setIndexRebuilding] = useState(false);
+  const [indexWarning, setIndexWarning] = useState<string | null>(null);
   const [selectedCwd, setSelectedCwd] = useState<string | null>(null);
   const [defaultCwd, setDefaultCwd] = useState<string | null>(null);
   const [projectMeta, setProjectMeta] = useState<ProjectMeta>({ ...EMPTY_PROJECT_META });
@@ -339,8 +345,17 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       }
       const res = await fetch("/api/sessions", { signal: controller.signal });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json() as { sessions: SessionInfo[] };
+      const data = await res.json() as {
+        sessions: SessionInfo[];
+        stale?: boolean;
+        rebuilding?: boolean;
+        warning?: string;
+        source?: "index" | "legacy";
+      };
       setAllSessions(data.sessions);
+      // Index control-plane flags are advisory only — never surface as errors.
+      setIndexRebuilding(Boolean(data.rebuilding));
+      setIndexWarning(data.warning ?? null);
       setError(null);
     } catch (e) {
       setError(e instanceof DOMException && e.name === "AbortError" ? "加载会话超时" : String(e));
@@ -443,14 +458,35 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   }, []);
 
   const displayedSessions = useMemo(() => {
-    const base = optimisticSession && !allSessions.find((s) => s.id === optimisticSession.id)
-      ? [optimisticSession, ...allSessions]
-      : allSessions;
+    const optimistic = [
+      ...(optimisticSessions ?? []),
+      ...(optimisticSession ? [optimisticSession] : []),
+    ];
+    const base = [...allSessions];
+    const existingIds = new Set(base.map((s) => s.id));
+    for (const session of optimistic) {
+      if (!existingIds.has(session.id)) {
+        base.unshift(session);
+        existingIds.add(session.id);
+      }
+    }
     // Hide subagent worker sessions from the top-level project list: they are
     // subordinate to a parent session's message and are surfaced via the
     // collaboration run card under that message instead.
     return base.filter((s) => !s.isSubagent);
-  }, [allSessions, optimisticSession]);
+  }, [allSessions, optimisticSession, optimisticSessions]);
+
+  useEffect(() => {
+    if (!onOptimisticSessionResolved) return;
+    const persistedIds = new Set(allSessions.map((s) => s.id));
+    const optimistic = [
+      ...(optimisticSessions ?? []),
+      ...(optimisticSession ? [optimisticSession] : []),
+    ];
+    for (const session of optimistic) {
+      if (persistedIds.has(session.id)) onOptimisticSessionResolved(session.id);
+    }
+  }, [allSessions, optimisticSession, optimisticSessions, onOptimisticSessionResolved]);
 
   // Auto-select cwd and restore session from URL on first load
   useEffect(() => {
@@ -489,6 +525,9 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       setExpandedCwds((prev) => new Set(prev).add(selected));
       updateProjectMeta((prev) => ({
         ...prev,
+        // Re-adding a previously hidden project must clear hiddenCwds — otherwise
+        // allProjects still filters it out and the sidebar looks empty.
+        hiddenCwds: prev.hiddenCwds.filter((cwd) => cwd !== selected),
         customCwds: [selected, ...prev.customCwds.filter((cwd) => cwd !== selected)],
       }));
     }
@@ -1031,6 +1070,16 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
 
       {/* Project/session list */}
       <div style={{ flex: compact ? "1 1 auto" : explorerOpen && activeSelectedCwd ? `${splitPercent} 1 0` : "1 1 auto", overflowY: "auto", padding: compact ? "6px 0" : "0", minHeight: 80 }}>
+        {indexRebuilding && allSessions.length > 0 && !compact && (
+          <div style={{ padding: "6px 14px", background: "rgba(250, 204, 21, 0.08)", color: "#b45309", fontSize: 11, borderBottom: "1px solid rgba(250, 204, 21, 0.2)" }}>
+            正在刷新会话索引…
+          </div>
+        )}
+        {indexWarning && allSessions.length > 0 && !compact && (
+          <div style={{ padding: "6px 14px", color: "var(--text-muted)", fontSize: 11 }}>
+            索引刷新异常：{indexWarning}（展示为旧数据）
+          </div>
+        )}
         {loading && (
           <div style={{ padding: compact ? "8px 0" : "16px 14px", color: "var(--text-muted)", fontSize: 12, textAlign: compact ? "center" : undefined }}>
             {compact ? "…" : "加载中..."}
@@ -1043,7 +1092,13 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         )}
         {!loading && !error && projects.length === 0 && (
           <div style={{ padding: compact ? "8px 4px" : "16px 14px", color: "var(--text-muted)", fontSize: 12, textAlign: compact ? "center" : undefined }}>
-            {compact ? "—" : normalizedSearchQuery ? "没有匹配结果" : "未找到任何会话"}
+            {compact
+              ? "…"
+              : indexRebuilding && allSessions.length === 0
+                ? "正在建立会话索引…"
+                : normalizedSearchQuery
+                  ? "没有匹配结果"
+                  : "未找到任何会话"}
           </div>
         )}
         {!loading && !error && (

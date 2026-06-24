@@ -3,6 +3,7 @@ import type {
   CollaborationWorkerSpec,
   SubagentRunPlacement,
   SubagentTaskMode,
+  SubagentWorkflow,
 } from "./collaboration-types";
 
 export interface SubagentPlan {
@@ -11,6 +12,7 @@ export interface SubagentPlan {
   mode: CollaborationRunMode;
   taskMode: SubagentTaskMode;
   runPlacement: SubagentRunPlacement;
+  workflow: SubagentWorkflow;
   workers: CollaborationWorkerSpec[];
 }
 
@@ -18,18 +20,21 @@ export function planSubagentTask(params: {
   message: string;
   taskMode?: SubagentTaskMode;
   placement?: SubagentRunPlacement;
+  workflow?: SubagentWorkflow;
   workers?: CollaborationWorkerSpec[];
 }): SubagentPlan {
   const message = params.message.trim();
   const taskMode = params.taskMode ?? inferTaskMode(message);
   const mode: CollaborationRunMode = taskMode === "code" || taskMode === "parallel" ? "isolated_coding" : "analysis";
-  const workers = normalizeWorkers(params.workers, taskMode, message);
+  const workflow = params.workflow ?? inferWorkflow(taskMode, message);
+  const workers = normalizeWorkers(params.workers, taskMode, message, workflow);
   return {
     title: buildTitle(message, taskMode),
     message,
     mode,
     taskMode,
     runPlacement: params.placement ?? "foreground",
+    workflow,
     workers,
   };
 }
@@ -41,9 +46,40 @@ function inferTaskMode(message: string): SubagentTaskMode {
   return "ask";
 }
 
-function normalizeWorkers(workers: CollaborationWorkerSpec[] | undefined, taskMode: SubagentTaskMode, message: string): CollaborationWorkerSpec[] {
-  const explicit = workers?.map((worker) => ({ name: worker.name.trim(), task: worker.task.trim() })).filter((worker) => worker.name && worker.task);
-  if (explicit?.length) return explicit.slice(0, 10);
+/**
+ * 根据任务模式推断默认编排模式。LLM planner 可显式覆盖。
+ *
+ * - parallel（多方案对比）：worker 间并行 → "parallel"
+ * - review（审查）：单 worker，并行无意义 → "parallel"（单 worker 并行=顺序）
+ * - ask/code：单 worker → "parallel"（单 worker 等价顺序）
+ *
+ * 多 worker 且有上下游依赖（如「先调研再实现」）的场景由 LLM planner 显式声明
+ * sequential/pipeline；正则 fallback 无法识别，默认 parallel 保证向后兼容。
+ */
+function inferWorkflow(taskMode: SubagentTaskMode, _message: string): SubagentWorkflow {
+  if (taskMode === "parallel") return "parallel";
+  // 单 worker 任务并行=顺序，无实质区别；保持 parallel 以兼容旧 Promise.all 路径。
+  return "parallel";
+}
+
+function normalizeWorkers(workers: CollaborationWorkerSpec[] | undefined, taskMode: SubagentTaskMode, message: string, workflow: SubagentWorkflow): CollaborationWorkerSpec[] {
+  const explicit = workers?.map((worker) => ({
+    name: worker.name.trim(),
+    task: worker.task.trim(),
+    ...(worker.dependsOn?.length ? { dependsOn: worker.dependsOn.map((d) => d.trim()).filter(Boolean) } : {}),
+  })).filter((worker) => worker.name && worker.task);
+  if (explicit?.length) {
+    // pipeline/sequential 且 worker 未声明依赖时，按声明顺序自动连成链，
+    // 让调度层能把前一个 worker 的结论注入后一个的 prompt。
+    if ((workflow === "pipeline" || workflow === "sequential") && explicit.length > 1) {
+      return explicit.map((worker, index) => {
+        if (worker.dependsOn?.length) return worker;
+        const prev = explicit[index - 1];
+        return prev ? { ...worker, dependsOn: [prev.name] } : worker;
+      }).slice(0, 10);
+    }
+    return explicit.slice(0, 10);
+  }
 
   if (taskMode === "parallel") {
     return [

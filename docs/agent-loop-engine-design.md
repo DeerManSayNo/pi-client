@@ -442,7 +442,7 @@ export interface ToolInfo {
 }
 ```
 
-> **迁移策略**：现有 `defineTool({...})` 调用（code_search / codegraph_* / mcp__* / spawn_subagent）的参数对象与 `ToolDefinition` **字段完全兼容**，只需把 `defineTool` 换成直接传对象给 `loop.registerTool()`。execute 签名一致（都是 `(toolCallId, params, signal, onUpdate) => Promise<AgentToolResult>`），**无需改任何工具实现**。
+> **迁移策略**：现有 `defineTool({...})` 调用（code_search / codegraph_* / mcp__* / subagent）的参数对象与 `ToolDefinition` **字段完全兼容**，只需把 `defineTool` 换成直接传对象给 `loop.registerTool()`。execute 签名一致（都是 `(toolCallId, params, signal, onUpdate) => Promise<AgentToolResult>`），**无需改任何工具实现**。
 
 ### 4.4 `RetryPolicy` / `ToolExecutionMode` / `SteeringMode` 类型
 
@@ -694,7 +694,7 @@ export interface SessionStore {
 - 新增 `lib/engine/tool-registry.ts`：`ToolRegistry` 类（单一数据源，消灭 pi 的三份副本）。
 - 新增 `lib/engine/tool-executor.ts`：并行/串行执行器（参考 pi `ToolExecutionMode` 语义：sequential 逐个、parallel 预检后并发）。
 - 复用工具：新增 `lib/engine/builtin-tools.ts`，从 `pi-coding-agent` 的 `createReadTool/createBashTool/...`（`tools/index.d.ts`）拿到 `AgentTool`，转成 `ToolDefinition` 注册。
-- 迁移 DeerHux 自定义工具：`code_search`/`codegraph_*`/`mcp__*`/`spawn_subagent` 的 `defineTool({...})` 对象**原样**传给 `loop.registerTool()`。
+- 迁移 DeerHux 自定义工具：`code_search`/`codegraph_*`/`mcp__*`/`subagent` 的 `defineTool({...})` 对象**原样**传给 `loop.registerTool()`。
 
 **验收标准**：
 - [ ] 单测：`tool-registry.test.ts` —— register 覆盖、unregister、setActiveTools 白名单过滤。
@@ -884,7 +884,7 @@ if (useDeerLoop) {
 | `lib/agent-runtime/types.ts` | 18 | `SequencedAgentEvent` |
 | `lib/types.ts` | 200 | DeerHux 镜像的 session/message 类型 |
 | `lib/parallel-agent/subagent-runner.ts` | 170 | worker session（复用 startRpcSession） |
-| `lib/parallel-agent/subagent-tool.ts` | 160 | spawn_subagent 工具（defineTool） |
+| `lib/parallel-agent/subagent-tool.ts` | 160 | subagent 工具（defineTool） |
 | `lib/parallel-agent/collaboration-orchestrator.ts` | 320 | 子 agent 编排 |
 | `hooks/useAgentSession.ts` | 2200 | 前端消费 loop 事件（上帝 hook） |
 | `lib/session-reader.ts` | 540 | jsonl 读取 + buildSessionContext |

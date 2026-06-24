@@ -1,4 +1,24 @@
-export function buildWorkerPrompt(question: string, task: string): string {
+/** 前序 worker 的结论片段，用于 sequential/pipeline 模式注入后续 worker 的上下文。 */
+export interface PriorWorkerResult {
+  name: string;
+  task: string;
+  result: string;
+}
+
+/** 把前序 worker 结论拼成可注入的参考段（无依赖时返回空串）。 */
+export function formatPriorResults(prior: PriorWorkerResult[]): string {
+  const valid = prior.filter((item) => item.result?.trim());
+  if (valid.length === 0) return "";
+  const lines = ["", "## 前序子任务的结论（供你参考，可基于此修正或推进，但不要简单复述）"];
+  for (const item of valid) {
+    lines.push(`### ${item.name}（任务：${item.task}）`);
+    lines.push((item.result ?? "").trim() || "(无结论)");
+  }
+  return lines.join("\n");
+}
+
+export function buildWorkerPrompt(question: string, task: string, prior: PriorWorkerResult[] = []): string {
+  const priorSection = formatPriorResults(prior);
   return [
     `你是一个专业代码分析专家，只能使用只读工具（read、grep、find、ls）进行分析，不能修改任何文件。`,
     ``,
@@ -7,12 +27,14 @@ export function buildWorkerPrompt(question: string, task: string): string {
     ``,
     `## 你负责的子任务`,
     task,
+    priorSection,
     ``,
     `请完成该子任务的分析，并返回你的发现和结论。如果发现关键代码，请提供具体的文件路径、行号和代码片段作为证据。`,
   ].join("\n");
 }
 
-export function buildIsolatedWorkerPrompt(question: string, task: string): string {
+export function buildIsolatedWorkerPrompt(question: string, task: string, prior: PriorWorkerResult[] = []): string {
+  const priorSection = formatPriorResults(prior);
   return [
     `你是一个专业的编程专家，可以读取、搜索和修改文件。`,
     `你在一个隔离的工作环境中操作（git worktree），你的修改不会直接影响主分支。`,
@@ -23,8 +45,8 @@ export function buildIsolatedWorkerPrompt(question: string, task: string): strin
     ``,
     `## 你负责的子任务`,
     task,
+    priorSection,
     ``,
     `请修改相关文件以完成子任务，并简要总结你做的所有修改。`,
   ].join("\n");
 }
-

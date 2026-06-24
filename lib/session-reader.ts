@@ -6,6 +6,7 @@ import type { CollaborationRunSnapshot } from "./parallel-agent/collaboration-ty
 import { normalizeToolCalls } from "./normalize";
 import { extractTurnMode, normalizeAgentMode, stripTurnModeContext, type AgentMode } from "./agent-modes";
 import { getWorkerOrigins, pruneWorkerOrigins } from "./parallel-agent/subagent-registry";
+import { invalidateSessionIndex, scheduleSessionIndexRebuild } from "./session/session-index";
 
 const SESSION_LIST_TTL_MS = 30_000;
 /** Min interval between background refreshes to avoid thundering herd under load. */
@@ -160,6 +161,15 @@ export function invalidateSessionListCache(): void {
   const cached = globalThis.__deerhuxSessionListCache;
   if (cached) cached.expiresAt = 0;
 
+  // Cascade into the session index query layer so the sidebar rebuilds its
+  // index too. Best-effort: never let an index failure block the in-memory
+  // cache invalidation.
+  try {
+    invalidateSessionIndex("session-list-invalidate");
+  } catch (err) {
+    console.error("[session-reader] index invalidation failed:", err);
+  }
+
   // Debounce: wait for the burst of invalidations to settle, then refresh once
   if (_invalidationTimer) clearTimeout(_invalidationTimer);
   _invalidationTimer = setTimeout(() => {
@@ -180,6 +190,12 @@ export function forceRefreshSessionList(): void {
   globalThis.__deerhuxSessionListCache = undefined;
   // Fire-and-forget: pre-warm the cache so the next UI read is fast
   listAllSessions().catch(() => {});
+  // Cascade: rebuild the index query layer as well.
+  try {
+    scheduleSessionIndexRebuild("force-refresh");
+  } catch (err) {
+    console.error("[session-reader] index rebuild schedule failed:", err);
+  }
 }
 
 // ============================================================================

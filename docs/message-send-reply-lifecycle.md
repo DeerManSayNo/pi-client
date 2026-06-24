@@ -91,7 +91,7 @@
 
 **新建会话**（`app/api/agent/new/route.ts`）
 - 前端 `handleSend` 走 `isNew` 分支：先 `POST /api/agent/new {type:"create"}` 仅创建不发送
-- `startRpcSession(tempKey, "", cwd, ...)` → `SessionManager.create` → `createAgentSession`（注入自定义工具：`code_search`、`codegraph`、`spawn_subagent`、MCP 工具）
+- `startRpcSession(tempKey, "", cwd, ...)` → `SessionManager.create` → `createAgentSession`（注入自定义工具：`code_search`、`codegraph`、`subagent`、MCP 工具）
 - 返回 `realSessionId`，前端拿到后 `connectEvents(id)` 建好 SSE，**再** `POST /api/agent/[id] {prompt}` 发首条消息（保证 SSE 不错过 `agent_start`）
 
 **冷启动已有会话**（`app/api/agent/[id]/route.ts:11-40`）

@@ -554,10 +554,15 @@ export function applySectionOverrides(
   return liveSections.map((live) => {
     const override = overrides.find((s) => s.id === live.id);
     if (!override) return live;
+    const useDynamicFallback = live.id === "tools" && override.enabled && !live.content.trim() && override.content.trim();
     return {
       ...live,
       enabled: override.enabled,
-      content: live.editable ? (override.content || live.content) : live.content,
+      content: live.editable
+        ? (override.content || live.content)
+        : useDynamicFallback
+          ? override.content
+          : live.content,
     };
   });
 }

@@ -47,7 +47,7 @@ interface Props {
   nextUserTimestamp?: number;
   onResend?: (message: string, entryId?: string, references?: FileReference[], skill?: UserMessage["skill"]) => void;
   systemPrompt?: string | null;
-  /** spawn_subagent 协作 run 快照（来自父 session 的 custom entry）。 */
+  /** subagent 协作 run 快照（来自父 session 的 custom entry）。 */
   collaborationRuns?: CollaborationRunSnapshot[];
   onOpenSession?: (sessionId: string) => void;
 }
@@ -86,7 +86,7 @@ function copyText(text: string): Promise<void> {
 
 function MessageViewImpl({ message, isStreaming, toolResults, modelNames, watchdogInfo, entryId, onFork, forking, showTimestamp, prevTimestamp, nextUserTimestamp, onResend, systemPrompt, collaborationRuns, onOpenSession }: Props) {
   // 把协作 run 关联到触发它的 user 消息：run.createdAt 是 ISO string，
-  // UserMessage.timestamp 是 ms。一个 user turn 可能发起多次 spawn_subagent，
+  // UserMessage.timestamp 是 ms。一个 user turn 可能发起多次 subagent，
   // 全部归到该条 user（下一条 user 消息的 run 自然 createdAt 更晚，不会重复归属）。
   const rawTs = message.role === "user" ? (message as UserMessage).timestamp : undefined;
   const userTs = typeof rawTs === "number" ? rawTs : (rawTs ? Date.parse(rawTs) : NaN);

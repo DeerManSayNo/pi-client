@@ -196,6 +196,18 @@ export function AppShell() {
   useEscapeClose(() => setSettingsMenuOpen(false), settingsMenuOpen);
 
   const effectiveProjectCwd = selectedSession?.cwd ?? newSessionCwd ?? activeCwd ?? defaultCwd;
+  const sidebarOptimisticSessions = useMemo(() => {
+    const byId = new Map<string, SessionInfo>();
+    const add = (session: SessionInfo | null | undefined) => {
+      if (session && !session.isSubagent) byId.set(session.id, session);
+    };
+    add(pendingSession);
+    add(selectedSession);
+    for (const tab of sessionTabs) {
+      if (placeholderTabIdsRef.current.has(tab.id)) add(tab);
+    }
+    return [...byId.values()];
+  }, [pendingSession, selectedSession, sessionTabs]);
   // True once the initial ?session= URL param has been resolved (or confirmed absent)
   const [initialSessionRestored, setInitialSessionRestored] = useState<boolean>(() => !searchParams.get("session"));
   // Suppresses extra cwd handling during the initial URL restore
@@ -570,14 +582,20 @@ export function AppShell() {
     }
   }, [hasOpenChatWindowCapacity, placeSessionInLeftmostSlot, replaceUrl, showChatWindowLimitMessage]);
 
-  // worker tag 点击跳转到对应 worker session
+  // worker tag 点击跳转到对应 worker session。
+  // 注意：/api/sessions/[id] 返回的是包装对象 { sessionId, filePath, info, leafId, context }，
+  // 真正的 SessionInfo 在 info 字段里，不能直接把整个响应当 SessionInfo 用，
+  // 否则 session.id 为 undefined，会导致 tab 闪现后被槽位同步逻辑清除。
   const handleOpenSessionById = useCallback(async (sessionId: string) => {
     try {
       const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, { cache: "no-store" });
       if (res.ok) {
-        const session = (await res.json()) as SessionInfo;
-        handleSelectSession(session);
-        return;
+        const payload = (await res.json()) as { info?: SessionInfo };
+        // info 在 header 缺失时可能为 null；只要拿到合法 id 就直接打开。
+        if (payload?.info?.id) {
+          handleSelectSession(payload.info);
+          return;
+        }
       }
     } catch (err) {
       console.warn("获取 worker session 失败，尝试最小构造", err);
@@ -856,6 +874,7 @@ export function AppShell() {
 
   const handleSessionDeleted = useCallback((sessionId: string) => {
     setRefreshKey((k) => k + 1);
+    setPendingSession((prev) => (prev?.id === sessionId ? null : prev));
     if (selectedSession?.id === sessionId) {
       const cwd = selectedSession.cwd;
       setSelectedSession(null);
@@ -887,8 +906,9 @@ export function AppShell() {
 
   const handleAgentEnd = useCallback((sessionId: string, changedFiles?: string[]) => {
     setSessionRunning(sessionId, false);
-    // Clear pendingSession if the ended session was being tracked as pending
-    setPendingSession((prev) => (prev?.id === sessionId ? null : prev));
+    // Keep pendingSession until /api/sessions has actually listed it. The
+    // session list is cached and DeerHux may flush the new jsonl slightly after
+    // the final event; clearing the optimistic row here makes it disappear.
     setRefreshKey((k) => k + 1);
     setExplorerRefreshKey((k) => k + 1);
     const filePath = changedFiles?.filter(shouldAutoOpenFile).at(-1);
@@ -1207,7 +1227,10 @@ export function AppShell() {
         initialSessionId={initialSessionId}
         onInitialRestoreDone={handleInitialRestoreDone}
         refreshKey={refreshKey}
-        optimisticSession={pendingSession ?? selectedSession}
+        optimisticSessions={sidebarOptimisticSessions}
+        onOptimisticSessionResolved={(sessionId) => {
+          setPendingSession((prev) => (prev?.id === sessionId ? null : prev));
+        }}
         runningSessionStatuses={runningSessionStatuses}
         onSessionDeleted={handleSessionDeleted}
         selectedCwd={selectedSession?.cwd ?? newSessionCwd ?? activeCwd ?? null}

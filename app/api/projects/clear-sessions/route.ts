@@ -3,7 +3,7 @@ import { existsSync, readdirSync, rmSync, unlinkSync } from "fs";
 import { dirname } from "path";
 import {
   listAllSessions,
-  invalidateSessionListCache,
+  forceRefreshSessionList,
   invalidateSessionPathCache,
 } from "@/lib/session-reader";
 import { getRpcSession } from "@/lib/rpc-manager";
@@ -59,7 +59,7 @@ export async function POST(req: Request) {
       }
     }
 
-    invalidateSessionListCache();
+    forceRefreshSessionList();
 
     // Drop the cwd from project-meta so it doesn't linger as a stale entry.
     try {

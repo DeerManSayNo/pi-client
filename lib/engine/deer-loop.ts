@@ -122,8 +122,9 @@ function notImplemented(method: string, milestone: string): Error {
   );
 }
 
-/** ★ M2：工具调用循环最大轮数（防 LLM 无限调工具死循环）。与 pi 默认行为对齐。 */
-const DEFAULT_MAX_TOOL_ROUNDS = 20;
+/** ★ M2：工具调用循环最大轮数（防 LLM 无限调工具死循环）。
+ *  与 subagent 默认预算（SUBAGENT_MAX_TOOL_ROUNDS=100）保持一致。 */
+const DEFAULT_MAX_TOOL_ROUNDS = 100;
 
 /** ★ M6 helper：从 AssistantMessage.content 提取所有 text block 拼接成字符串。 */
 function extractText(message: { content?: unknown }): string {
@@ -206,7 +207,7 @@ interface ConsumedStream {
 /**
  * ★ M2：内置工具默认执行模式表（与 PiEngineAdapter.TOOL_EXECUTION_MODES 对齐）。
  *
- * read/grep/find/ls/code_search/spawn_subagent = parallel（无副作用，可并发）。
+ * read/grep/find/ls/code_search/subagent = parallel（无副作用，可并发）。
  * bash/edit/write = sequential（有副作用，必须串行防竞态）。
  *
  * 这是应用层预设，rpc-manager 调 applyToolExecutionModes() 时写入 registry 覆盖表。
@@ -218,7 +219,7 @@ const DEFAULT_TOOL_EXECUTION_MODES: Record<string, "parallel" | "sequential"> = 
   find: "parallel",
   ls: "parallel",
   code_search: "parallel",
-  spawn_subagent: "parallel",
+  subagent: "parallel",
   bash: "sequential",
   edit: "sequential",
   write: "sequential",

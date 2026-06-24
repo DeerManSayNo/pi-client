@@ -1,7 +1,8 @@
 import { existsSync } from "fs";
 import { NextResponse } from "next/server";
 import { listCollaborationRuns, startCollaborationRun } from "@/lib/parallel-agent/collaboration-orchestrator";
-import type { CollaborationRunMode, CollaborationRunSnapshot, CollaborationWorkerSpec } from "@/lib/parallel-agent/collaboration-types";
+import { sanitizeCollaborationRun } from "@/lib/parallel-agent/collaboration-sanitize";
+import type { CollaborationRunMode, CollaborationWorkerSpec, SubagentWorkflow } from "@/lib/parallel-agent/collaboration-types";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -10,15 +11,22 @@ function normalizeMode(value: unknown): CollaborationRunMode {
   return value === "isolated_coding" ? "isolated_coding" : "analysis";
 }
 
+function normalizeWorkflow(value: unknown): SubagentWorkflow | undefined {
+  return value === "parallel" || value === "sequential" || value === "pipeline" || value === "dag" ? value : undefined;
+}
+
 function normalizeWorkers(value: unknown): CollaborationWorkerSpec[] | null {
   if (!Array.isArray(value) || value.length === 0) return null;
   const workers: CollaborationWorkerSpec[] = [];
   for (const item of value) {
     if (typeof item !== "object" || item === null) return null;
-    const record = item as { name?: unknown; task?: unknown };
+    const record = item as { name?: unknown; task?: unknown; dependsOn?: unknown };
     if (typeof record.name !== "string" || !record.name.trim()) return null;
     if (typeof record.task !== "string" || !record.task.trim()) return null;
-    workers.push({ name: record.name.trim(), task: record.task.trim() });
+    const dependsOn = Array.isArray(record.dependsOn)
+      ? record.dependsOn.map((d) => (typeof d === "string" ? d.trim() : "")).filter(Boolean)
+      : [];
+    workers.push({ name: record.name.trim(), task: record.task.trim(), ...(dependsOn.length ? { dependsOn } : {}) });
   }
   return workers;
 }
@@ -29,6 +37,7 @@ export async function POST(request: Request) {
       cwd?: unknown;
       message?: unknown;
       mode?: unknown;
+      workflow?: unknown;
       workers?: unknown;
       parentSessionId?: unknown;
       parentEntryId?: unknown;
@@ -57,6 +66,7 @@ export async function POST(request: Request) {
       message: body.message,
       workers,
       mode: normalizeMode(body.mode),
+      workflow: normalizeWorkflow(body.workflow),
       parentSessionId: typeof body.parentSessionId === "string" && body.parentSessionId.trim() ? body.parentSessionId.trim() : undefined,
       parentEntryId: typeof body.parentEntryId === "string" && body.parentEntryId.trim() ? body.parentEntryId.trim() : undefined,
       allowDirtyWorktree: body.allowDirtyWorktree === true,
@@ -67,21 +77,11 @@ export async function POST(request: Request) {
   }
 }
 
-function sanitize(state: CollaborationRunSnapshot): CollaborationRunSnapshot {
-  return {
-    ...state,
-    workers: state.workers.map((worker) => {
-      const { sessionId: _sessionId, worktreePath: _worktreePath, ...rest } = worker;
-      return rest;
-    }),
-  };
-}
-
 export async function GET(request: Request) {
   const url = new URL(request.url);
   const parentSessionId = url.searchParams.get("parentSessionId")?.trim();
   const runs = listCollaborationRuns()
     .filter((run) => !parentSessionId || run.parentSessionId === parentSessionId)
-    .map((run) => sanitize(run));
+    .map((run) => sanitizeCollaborationRun(run));
   return NextResponse.json(runs);
 }

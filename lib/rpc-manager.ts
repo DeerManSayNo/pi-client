@@ -1,21 +1,19 @@
 import path from "path";
 import { existsSync, readFileSync } from "fs";
-import { createAgentSession, defineTool, SessionManager, type AgentSession } from "@earendil-works/pi-coding-agent";
+import { defineTool, SessionManager } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { cacheSessionPath, invalidateSessionListCache } from "./session-reader";
+import { cacheSessionPath, forceRefreshSessionList } from "./session-reader";
 import type { ToolInfo } from "./deerhux-types";
-import { PiEngineAdapter } from "./engine/pi-engine-adapter";
 import type { AgentEnginePort } from "./engine/port";
-import { detectPiPrivateFields } from "./engine/sdk-guard";
-import { createDeerLoop } from "./engine/factory";
+import { DeerLoopEngine } from "./engine/deer-loop";
 import type { AnyToolDefinition } from "./engine/tool-registry";
-import { isDeerLoopEnabled } from "./engine/feature-flag";
 import { getLiveIslandClient } from "./live-island-client";
 import { applyRolePromptToSystemPrompt } from "./roles";
 import { applyRolePromptConfigToPrompt, isRoleSystemPromptSectionEnabled, readRoleSystemPromptConfig } from "./system-prompt-decomposer";
 import { indexExists } from "./code-index/database";
 import { searchIndex } from "./code-index/search";
 import { createCodeGraphTools } from "./codegraph/tools";
+import { createStandardCodingTools, STANDARD_CODING_TOOL_NAMES } from "./engine/coding-tools";
 import { createSubagentTool, SUBAGENT_TOOL_NAME } from "./parallel-agent/subagent-tool";
 import { getAgentEventStore } from "./agent-runtime/event-store";
 import type { FileReference, ImageContent, SkillReference, TextContent } from "./types";
@@ -198,74 +196,6 @@ function stripTurnContextBlock(prompt: string): string {
   return prompt.replace(TURN_CONTEXT_BLOCK_RE, "").trimEnd();
 }
 
-type ProjectContextFile = { path: string; content: string };
-
-const PROJECT_CONTEXT_COMPACT_THRESHOLD = 2500;
-
-function extractMarkdownSection(content: string, heading: string): string {
-  const escaped = heading.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const match = content.match(new RegExp(`(^|\n)## ${escaped}\n([\s\S]*?)(?=\n## |$)`));
-  return match?.[2]?.trim() ?? "";
-}
-
-function extractImportantBullets(section: string, limit = 12): string[] {
-  const bullets: string[] = [];
-  for (const line of section.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (!trimmed.startsWith("-") && !trimmed.startsWith("**")) continue;
-    if (/^---+$/.test(trimmed)) continue;
-    bullets.push(trimmed.replace(/\s+/g, " "));
-    if (bullets.length >= limit) break;
-  }
-  return bullets;
-}
-
-function compactProjectContextContent(filePath: string, content: string): string {
-  const fileName = path.basename(filePath).toLowerCase();
-  if (!fileName.startsWith("agents") && !fileName.startsWith("claude")) return content;
-  if (content.length <= PROJECT_CONTEXT_COMPACT_THRESHOLD) return content;
-
-  const codingRules = extractImportantBullets(extractMarkdownSection(content, "编码规范"), 8);
-  const quickStart = extractMarkdownSection(content, "快速开始");
-  const quickStartLines = quickStart.split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line && !line.startsWith("```") && (/npm run dev|tsc --noEmit|next lint|next build|绝不要/.test(line)))
-    .slice(0, 6);
-  const architectureLines = [
-    "- 浏览器通过 /api/sessions 只读读取 session；发送消息走 POST /api/agent/[id]；事件流走 GET /api/agent/[id]/events。",
-    "- session 读取主要在 lib/session-reader.ts；AgentSession 生命周期与进程内注册表主要在 lib/rpc-manager.ts。",
-  ].filter(Boolean);
-  const pitfalls = extractImportantBullets(extractMarkdownSection(content, "关键设计决策与陷阱"), 18);
-  const sessionFormat = extractMarkdownSection(content, "DeerHux Session 文件格式");
-  const sessionLines = sessionFormat.split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => /存放位置|parentSession|session_info|SessionContext|entryIds/.test(line))
-    .slice(0, 6);
-
-  const lines = [
-    `# Project instructions summary for ${filePath}`,
-    "",
-    "This is a compact summary of the project context file. The full file can be read from the path above when a task requires detailed architecture, file maps, session format, or edge-case behavior.",
-  ];
-
-  if (codingRules.length > 0) lines.push("", "## 编码规范", ...codingRules);
-  if (quickStartLines.length > 0) lines.push("", "## 快速开始与校验", ...quickStartLines.map((line) => line.startsWith("-") ? line : `- ${line}`));
-  lines.push("", "## 架构要点", ...architectureLines);
-  if (pitfalls.length > 0) lines.push("", "## 关键陷阱", ...pitfalls);
-  if (sessionLines.length > 0) lines.push("", "## Session 文件提示", ...sessionLines.map((line) => line.startsWith("-") ? line : `- ${line}`));
-
-  return lines.join("\n");
-}
-
-function compactProjectContextFiles(base: { agentsFiles: ProjectContextFile[] }): { agentsFiles: ProjectContextFile[] } {
-  return {
-    agentsFiles: base.agentsFiles.map((file) => ({
-      ...file,
-      content: compactProjectContextContent(file.path, file.content),
-    })),
-  };
-}
-
 function sleepMs(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -278,6 +208,56 @@ function isFullToolPreset(toolNames: string[]): boolean {
 
 function includesMcpTool(toolNames: string[]): boolean {
   return toolNames.some((name) => name.startsWith("mcp__"));
+}
+
+const TOOLS_SECTION_RE = /(^|\n)Available tools:\n[\s\S]*?(?=\n\n(?:In addition to the tools above|Guidelines:|<deerhux_mode>|<project_context>|<available_skills>|MCP runtime tools:|Current date:|<!-- PI_ROLE|# Global Memory)|$)/;
+const TOOL_SECTION_INSERT_MARKERS = [
+  "\n\nGuidelines:",
+  "\n\n<deerhux_mode>",
+  "\n\n<project_context>",
+  "\n\n<available_skills>",
+  "\n\nMCP runtime tools:",
+  "\n\nCurrent date:",
+  "\n\n<!-- PI_ROLE",
+  "\n\n# Global Memory",
+];
+
+function buildLiveToolsSection(allTools: ToolInfo[], activeToolNames: string[]): string | null {
+  const byName = new Map(allTools.map((tool) => [tool.name, tool]));
+  const activeTools = activeToolNames
+    .map((name) => byName.get(name))
+    .filter((tool): tool is ToolInfo => Boolean(tool));
+  if (activeTools.length === 0) return null;
+
+  return [
+    "Available tools:",
+    ...activeTools.map((tool) => `- ${tool.name}: ${tool.description || "Available tool"}`),
+  ].join("\n");
+}
+
+function upsertToolsSection(prompt: string, toolsSection: string | null): string {
+  if (!toolsSection) return prompt;
+
+  if (TOOLS_SECTION_RE.test(prompt)) {
+    return prompt.replace(TOOLS_SECTION_RE, (match, prefix: string) => `${prefix}${toolsSection}`);
+  }
+
+  const trimmed = prompt.trim();
+  if (!trimmed) return toolsSection;
+
+  const insertAt = TOOL_SECTION_INSERT_MARKERS
+    .map((marker) => {
+      const index = prompt.indexOf(marker);
+      return index === -1 ? null : index;
+    })
+    .filter((index): index is number => index !== null)
+    .sort((a, b) => a - b)[0];
+
+  if (insertAt !== undefined) {
+    return `${prompt.slice(0, insertAt).trimEnd()}\n\n${toolsSection}${prompt.slice(insertAt)}`;
+  }
+
+  return `${trimmed}\n\n${toolsSection}`;
 }
 
 // ============================================================================
@@ -316,7 +296,7 @@ export class AgentSessionWrapper {
    * and reconnect with precise replay boundaries. */
   private currentTurnKey: string | null = null;
   private sawAssistantEventInTurn = false;
-  /** When true, the spawn_subagent tool is kept in the active tool set. */
+  /** When true, the subagent tool is kept in the active tool set. */
   private _subagentEnabled = false;
 
   constructor(public readonly inner: AgentEnginePort, roleId?: string | null, private mcpRuntimeLease?: McpRuntimeLease | null, agentMode?: AgentMode | null) {
@@ -356,7 +336,7 @@ export class AgentSessionWrapper {
     if (this.inner.agent.state) this.baseSystemPrompt = stripModePrompt(stripTurnContextBlock(this.inner.agent.state.systemPrompt ?? ""));
   }
 
-  /** Keep spawn_subagent in (or out of) the active tool set based on the toggle. */
+  /** Keep subagent in (or out of) the active tool set based on the toggle. */
   private applySubagentToActiveTools(): void {
     const all = this.inner.getAllTools();
     if (!all.some((t) => t.name === SUBAGENT_TOOL_NAME)) return; // tool not registered for this session
@@ -373,7 +353,11 @@ export class AgentSessionWrapper {
   private applyRolePrompt(): void {
     if (!this.inner.agent.state) return;
     this.syncRoleMcpActiveTools();
-    const configuredPrompt = applyRolePromptConfigToPrompt(this.baseSystemPrompt, this.roleId);
+    const promptWithTools = upsertToolsSection(
+      this.baseSystemPrompt,
+      buildLiveToolsSection(this.inner.getAllTools(), this.inner.getActiveToolNames()),
+    );
+    const configuredPrompt = applyRolePromptConfigToPrompt(promptWithTools, this.roleId);
     const shouldApplyModePrompt = this.modePromptEnabled && isRoleSystemPromptSectionEnabled(this.roleId, "mode_control");
     const promptWithMode = shouldApplyModePrompt ? applyModePrompt(configuredPrompt, this.agentMode) : configuredPrompt;
     const nextPrompt = isRoleSystemPromptSectionEnabled(this.roleId, "role_profile")
@@ -674,6 +658,7 @@ export class AgentSessionWrapper {
       const willRetry = (event as { willRetry?: boolean }).willRetry ?? false;
       if (!willRetry) {
         this._isRunning = false;
+        forceRefreshSessionList();
       }
     }
     if (event.type === "auto_retry_end") {
@@ -1110,7 +1095,7 @@ export class AgentSessionWrapper {
 
         const newSessionId = SessionManager.open(newSessionFile, sessionDir).getSessionId();
         cacheSessionPath(newSessionId, newSessionFile);
-        invalidateSessionListCache();
+        forceRefreshSessionList();
         this.destroy();
         return { cancelled: false, newSessionId };
       }
@@ -1338,6 +1323,11 @@ export function reloadMcpForIdleSessions(): Promise<Array<{ sessionId: string; o
  * For new sessions (sessionFile === ""), DeerHux generates its own id.
  * Pass toolNames to pre-configure active tools (empty array = all tools disabled).
  */
+type StartRpcSessionOptions = {
+  allowSubagentTool?: boolean;
+  maxToolRounds?: number;
+};
+
 export async function startRpcSession(
   sessionId: string,
   sessionFile: string,
@@ -1346,7 +1336,7 @@ export async function startRpcSession(
   roleId?: string | null,
   agentMode?: AgentMode | null,
   model?: { provider: string; modelId: string },
-  options?: { allowSubagentTool?: boolean }
+  options?: StartRpcSessionOptions,
 ): Promise<{ session: AgentSessionWrapper; realSessionId: string }> {
   const registry = getRegistry();
   const locks = getLocks();
@@ -1357,167 +1347,14 @@ export async function startRpcSession(
   const inflight = locks.get(sessionId);
   if (inflight) return inflight;
 
-  // ★ M6+ 默认走 DeerLoopEngine。DEERHUX_LOOP_ENGINE=pi 时回退到 pi 路径（紧急回退用）。
-  if (isDeerLoopEnabled()) {
-    const deerStarting = (async () => {
-      const { session, realSessionId } = await startDeerLoopSession(
-        sessionId, sessionFile, cwd, toolNames, roleId, agentMode, model, options,
-      );
-      return { session, realSessionId };
-    })().finally(() => locks.delete(sessionId));
-    locks.set(sessionId, deerStarting);
-    return deerStarting;
-  }
-
-  const starting = (async () => {
-    const { SessionManager, getAgentDir, DefaultResourceLoader, SettingsManager } = await import("@earendil-works/pi-coding-agent");
-    const agentDir = getAgentDir();
-    const settingsManager = SettingsManager.create(cwd, agentDir);
-    const resourceLoader = new DefaultResourceLoader({
-      cwd,
-      agentDir,
-      settingsManager,
-      agentsFilesOverride: compactProjectContextFiles,
-    });
-    await resourceLoader.reload();
-
-    const sessionManager = sessionFile
-      ? SessionManager.open(sessionFile, undefined)
-      : SessionManager.create(cwd, undefined);
-
-    // Determine which tools to pass based on requested toolNames.
-    // Since v0.68.0, createAgentSession expects string[] tool names instead of Tool[] instances.
-    // Pass all built-in coding tool names by default; for "all off", pass empty array.
-    const allCodingToolNames = ["read", "bash", "edit", "write", "grep", "find", "ls"];
-    const hasCodeIndex = indexExists(cwd);
-    const codeSearchTool = hasCodeIndex ? defineTool({
-      name: "code_search",
-      label: "Code Search",
-      description: "Search the codebase using a pre-built index. Returns file paths, line ranges, and concise code snippets.",
-      promptSnippet: "code_search: Search the indexed codebase by keywords and get file paths, line ranges, and snippets.",
-      parameters: Type.Object({
-        query: Type.String({ description: "Search query keywords" }),
-        path: Type.Optional(Type.String({ description: "Restrict to files under this relative path" })),
-        limit: Type.Optional(Type.Number({ description: "Maximum results, default 20" })),
-      }),
-      executionMode: "parallel" as const,
-      execute: async (_toolCallId, params, signal) => {
-        const results = await searchIndex(cwd, params.query, {
-          path: params.path,
-          limit: params.limit ?? 20,
-          signal,
-        });
-        const text = results.length
-          ? results.map(r => `${r.path}:${r.startLine}-${r.endLine} (score ${r.score})\n${r.snippet}`).join("\n\n")
-          : `No indexed results for: ${params.query}`;
-        return { content: [{ type: "text" as const, text }], details: undefined };
-      },
-    }) : null;
-    const codeGraphTools = await createCodeGraphTools(cwd);
-    const allowSubagentTool = options?.allowSubagentTool !== false;
-    // Holder is mutated once the real session id is known so the subagent tool
-    // can attach its runs to this session at execution time.
-    const sessionIdHolder: { id: string | undefined } = { id: undefined };
-    const subagentTool = allowSubagentTool ? createSubagentTool(cwd, { getParentSessionId: () => sessionIdHolder.id }) : null;
-    const hasExplicitMode = agentMode !== undefined && agentMode !== null;
-    const effectiveMode = normalizeAgentMode(agentMode);
-    const requestedToolNames = toolNames ?? (hasExplicitMode ? getToolNamesForAgentMode(effectiveMode) : []);
-    const shouldLoadMcpAtStartup = (!hasExplicitMode && isFullToolPreset(requestedToolNames)) || includesMcpTool(requestedToolNames);
-    const mcpRuntimeLease = shouldLoadMcpAtStartup
-      ? await import("./mcp-runtime").then(({ acquireMcpRuntime }) => acquireMcpRuntime(cwd))
-      : null;
-    const mcpRuntime = mcpRuntimeLease?.runtime ?? null;
-    const customTools = [...(codeSearchTool ? [codeSearchTool] : []), ...codeGraphTools, ...(subagentTool ? [subagentTool] : []), ...(mcpRuntime?.tools ?? [])];
-    const availableToolNames = [
-      ...allCodingToolNames,
-      ...(codeSearchTool ? ["code_search"] : []),
-      ...codeGraphTools.map(tool => tool.name),
-      ...(mcpRuntime?.toolNames ?? []),
-    ];
-    let toolsOption: string[] | undefined;
-    if (toolNames !== undefined || hasExplicitMode) {
-      if (requestedToolNames.length === 0) {
-        toolsOption = [];
-      } else if (!hasExplicitMode && isFullToolPreset(requestedToolNames)) {
-        toolsOption = availableToolNames;
-      } else {
-        const available = new Set(availableToolNames);
-        toolsOption = requestedToolNames.filter((name) => available.has(name));
-      }
-    }
-
-    // spawn_subagent is registered as a custom tool, but the SDK derives its
-    // allowed-tool whitelist (`allowedToolNames`) from the `tools` option. If
-    // spawn_subagent isn't in that whitelist, `_refreshToolRegistry` filters it
-    // out of the registry entirely — so `getAllTools()` never returns it and
-    // the `set_subagent_enabled` toggle silently no-ops (applySubagentToActiveTools
-    // early-returns). Add it to the whitelist whenever any tools are enabled;
-    // whether it is *active* is still driven by `_subagentEnabled` via
-    // setActiveToolsByName after creation.
-    if (allowSubagentTool && toolsOption && toolsOption.length > 0 && !toolsOption.includes(SUBAGENT_TOOL_NAME)) {
-      toolsOption.push(SUBAGENT_TOOL_NAME);
-    }
-
-    let inner: AgentSession;
-    try {
-      ({ session: inner } = await createAgentSession({
-        cwd,
-        agentDir,
-        sessionManager,
-        resourceLoader,
-        settingsManager,
-        ...(toolsOption !== undefined ? { tools: toolsOption } : {}),
-        ...(customTools.length > 0 ? { customTools } : {}),
-      }));
-    } catch (error) {
-      mcpRuntimeLease?.release();
-      throw error;
-    }
-
-    // 探测 pi 私有字段是否还在（SDK 升级漂移告警）。不阻断启动。
-    detectPiPrivateFields(inner);
-
-    // 用 Port 包裹 session：9 个 hack 集中到 PiEngineAdapter。
-    const adapter = new PiEngineAdapter(inner);
-    adapter.applyToolExecutionModes();
-    adapter.installRetryHardening();
-
-    // If specific tool names were requested (non-empty), narrow active tools now.
-    // The frontend preset lists are static, so the "full" preset cannot enumerate
-    // dynamically discovered MCP tool names. Treat the built-in full preset as
-    // "all available runtime tools", including MCP.
-    if (requestedToolNames.length > 0 && (toolNames !== undefined || hasExplicitMode)) {
-      const knownTools = new Set(adapter.getAllTools().map((tool: ToolInfo) => tool.name));
-      const isFullPreset = !hasExplicitMode && isFullToolPreset(requestedToolNames);
-      const requested = requestedToolNames.filter(name => knownTools.has(name));
-      if (isFullPreset) requested.push(...(mcpRuntime?.toolNames ?? []).filter(name => knownTools.has(name)));
-      adapter.setActiveToolsByName([...new Set(requested)]);
-    }
-
-    // When all tools are disabled, clear the system prompt entirely.
-    // DeerHux's buildSystemPrompt always produces a non-empty prompt even with no tools;
-    // the only way to truly clear it is to call agent.setSystemPrompt directly.
-    if (toolNames?.length === 0) {
-      adapter.setSystemPromptPersistent("");
-    }
-
-    const wrapper = new AgentSessionWrapper(adapter, roleId, mcpRuntimeLease, hasExplicitMode ? effectiveMode : undefined);
-    wrapper.start();
-
-    const realSessionId = adapter.sessionId;
-    sessionIdHolder.id = realSessionId;
-    const realSessionFile = adapter.sessionFile;
-    if (realSessionFile) cacheSessionPath(realSessionId, realSessionFile);
-    if (!sessionFile) invalidateSessionListCache();
-
-    wrapper.onDestroy(() => registry.delete(realSessionId));
-    registry.set(realSessionId, wrapper);
-
-    return { session: wrapper, realSessionId };
+  const deerStarting = (async () => {
+    const { session, realSessionId } = await startDeerLoopSession(
+      sessionId, sessionFile, cwd, toolNames, roleId, agentMode, model, options,
+    );
+    return { session, realSessionId };
   })().finally(() => locks.delete(sessionId));
-
-  locks.set(sessionId, starting);
-  return starting;
+  locks.set(sessionId, deerStarting);
+  return deerStarting;
 }
 
 // ===========================================================================
@@ -1525,7 +1362,7 @@ export async function startRpcSession(
 //
 // 取代 pi 的 createAgentSession：用 DeerLoopEngine + ToolRegistry + ToolExecutor 管理
 // 整个 agent loop，pi-ai 只做 LLM 传输。注册与 pi 路径等价的真实工具集（code_search /
-// codegraph / mcp / spawn_subagent），支持角色/模式 prompt 注入，走 SessionManager 做
+// codegraph / mcp / subagent），支持角色/模式 prompt 注入，走 SessionManager 做
 // jsonl 持久化。
 // ===========================================================================
 
@@ -1547,7 +1384,7 @@ async function startDeerLoopSession(
   roleId?: string | null,
   agentMode?: AgentMode | null,
   modelOverride?: { provider: string; modelId: string },
-  options?: { allowSubagentTool?: boolean },
+  options?: StartRpcSessionOptions,
 ): Promise<{ session: AgentSessionWrapper; realSessionId: string }> {
   const { AuthStorage, ModelRegistry } = await import("@earendil-works/pi-coding-agent");
   const authStorage = AuthStorage.create();
@@ -1556,7 +1393,7 @@ async function startDeerLoopSession(
   // 选取默认 model。优先级：modelOverride（worker 继承父 session 的 model）
   // > DEERHUX_LOOP_MODEL 环境变量 > 第一个可用 model。worker 若退回默认
   // getAvailable()[0]，会与父 session 的 model 不一致（实测 deepseek-v4-pro
-  // 不稳定会超时），导致 spawn_subagent 全军覆没。
+  // 不稳定会超时），导致 subagent 全军覆没。
   let model = modelRegistry.getAvailable()[0];
   const override = modelOverride
     ? `${modelOverride.provider}/${modelOverride.modelId}`
@@ -1576,7 +1413,8 @@ async function startDeerLoopSession(
   }
 
   // ─── 工具准备（与 pi 路径对齐：code_search + codegraph + subagent + mcp）───
-  const allCodingToolNames = ["read", "bash", "edit", "write", "grep", "find", "ls"];
+  const standardCodingTools = createStandardCodingTools(cwd);
+  const allCodingToolNames = [...STANDARD_CODING_TOOL_NAMES];
   const hasCodeIndex = indexExists(cwd);
   const codeSearchTool = hasCodeIndex ? defineTool({
     name: "code_search",
@@ -1603,10 +1441,16 @@ async function startDeerLoopSession(
   }) : null;
   const codeGraphTools = await createCodeGraphTools(cwd);
   const allowSubagentTool = options?.allowSubagentTool !== false;
-  const sessionContextHolder: { id: string | undefined; model: { provider: string; modelId: string } | undefined } = { id: undefined, model: undefined };
+  // holder 持有 engine 引用而非 model 快照：getParentModel 在 subagent 工具执行时
+  // 实时读取 engine.model，从而跟随主 agent 运行中切换的供应商/模型（set_model →
+  // engine.setModel → engine.model 变）。若存快照，切换后的 subagent 会用旧 model。
+  const sessionContextHolder: { id: string | undefined; engine?: AgentEnginePort } = { id: undefined };
   const subagentTool = allowSubagentTool ? createSubagentTool(cwd, {
     getParentSessionId: () => sessionContextHolder.id,
-    getParentModel: () => sessionContextHolder.model,
+    getParentModel: () => {
+      const m = sessionContextHolder.engine?.model;
+      return m ? { provider: String(m.provider), modelId: String(m.id ?? "") } : undefined;
+    },
   }) : null;
 
   const hasExplicitMode = agentMode !== undefined && agentMode !== null;
@@ -1619,6 +1463,7 @@ async function startDeerLoopSession(
   const mcpRuntime = mcpRuntimeLease?.runtime ?? null;
 
   const customTools: AnyToolDefinition[] = [
+    ...standardCodingTools,
     ...(codeSearchTool ? [codeSearchTool] : []),
     ...codeGraphTools,
     ...(subagentTool ? [subagentTool] : []),
@@ -1683,7 +1528,7 @@ async function startDeerLoopSession(
   const realSessionId = sessionManager.getSessionId();
 
   // ─── 构造 DeerLoopEngine ───
-  const engine: AgentEnginePort = createDeerLoop({
+  const engine: AgentEnginePort = new DeerLoopEngine({
     model,
     cwd,
     sessionId: realSessionId,
@@ -1696,6 +1541,7 @@ async function startDeerLoopSession(
     sessionManager,
     tools: customTools,
     activeToolNames,
+    maxToolRounds: options?.maxToolRounds,
   });
 
   // ★ M4：安装默认重试策略
@@ -1706,13 +1552,10 @@ async function startDeerLoopSession(
   wrapper.start();
 
   sessionContextHolder.id = realSessionId;
-  const engineModel = engine.model;
-  sessionContextHolder.model = engineModel
-    ? { provider: String(engineModel.provider), modelId: String((engineModel as { id?: unknown }).id ?? "") }
-    : undefined;
+  sessionContextHolder.engine = engine;
   const realSessionFile = sessionManager.getSessionFile?.() ?? undefined;
   if (realSessionFile) cacheSessionPath(realSessionId, realSessionFile);
-  if (!sessionFile) invalidateSessionListCache();
+  if (!sessionFile) forceRefreshSessionList();
 
   wrapper.onDestroy(() => getRegistry().delete(realSessionId));
   getRegistry().set(realSessionId, wrapper);
